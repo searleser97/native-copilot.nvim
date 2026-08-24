@@ -1,0 +1,27 @@
+{
+  "name": "copilot-fleet.nvim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native Neovim UI and durable multi-agent host for GitHub Copilot",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "smoke:sdk": "node scripts/sdk-smoke.mjs",
+    "test": "vitest run",
+    "test:nvim": "node scripts/nvim-smoke.mjs",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.11",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
+  }
+}

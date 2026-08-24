@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "defaultFleetId": "engineering",
+  "standard": {
+    "id": "standard",
+    "displayName": "Copilot",
+    "initialPrompt": "You are a general-purpose software engineering assistant. Work directly with the user, inspect before editing, and validate completed changes.",
+    "permissionProfile": "workspace-write"
+  },
+  "permissionProfiles": {
+    "read-only": {
+      "tools": {
+        "allow": ["*"],
+        "deny": ["edit", "create", "apply_patch", "shell"]
+      },
+      "paths": {
+        "read": ["${workspace}"],
+        "write": []
+      },
+      "commands": false,
+      "network": false,
+      "gitWrite": false,
+      "externalActions": false
+    },
+    "workspace-write": {
+      "tools": {
+        "allow": ["*"],
+        "deny": []
+      },
+      "paths": {
+        "read": ["${workspace}"],
+        "write": ["${workspace}"]
+      },
+      "commands": true,
+      "network": false,
+      "gitWrite": false,
+      "externalActions": false
+    }
+  },
+  "agents": {
+    "coordinator": {
+      "name": "Coordinator",
+      "description": "Coordinates work, detects blockers, and reports status without duplicating specialist work.",
+      "initialPrompt": "Coordinate the fleet. Break work into clear outcomes, route questions to the right members, reconcile disagreements, and give concise evidence-based status updates.",
+      "permissionProfile": "read-only",
+      "ui": {
+        "icon": "C",
+        "color": "DiagnosticInfo"
+      }
+    },
+    "planner": {
+      "name": "Planner",
+      "description": "Investigates requirements and produces an implementable plan.",
+      "initialPrompt": "Investigate the request and codebase, identify constraints and risks, and produce an implementation plan. Challenge assumptions and ask other members for evidence when needed.",
+      "permissionProfile": "read-only",
+      "ui": {
+        "icon": "P",
+        "color": "DiagnosticHint"
+      }
+    },
+    "implementer": {
+      "name": "Implementer",
+      "description": "Implements approved work and validates the result.",
+      "initialPrompt": "Implement the requested outcome precisely. Reuse existing patterns, keep changes focused, validate the behavior, and report concrete evidence. Ask the planner or reviewer when requirements are ambiguous.",
+      "permissionProfile": "workspace-write",
+      "ui": {
+        "icon": "I",
+        "color": "DiagnosticOk"
+      }
+    },
+    "reviewer": {
+      "name": "Reviewer",
+      "description": "Reviews correctness, risks, and validation evidence.",
+      "initialPrompt": "Review plans and implementations critically. Focus on correctness, regressions, security, edge cases, and whether validation proves the requested behavior. Send actionable findings directly to the responsible member.",
+      "permissionProfile": "read-only",
+      "ui": {
+        "icon": "R",
+        "color": "DiagnosticWarn"
+      }
+    }
+  },
+  "fleets": {
+    "engineering": {
+      "name": "Engineering Fleet",
+      "description": "A configurable planning, implementation, review, and coordination fleet.",
+      "entryMember": "coordinator",
+      "coordinatorMember": "coordinator",
+      "groups": {
+        "delivery": ["planner", "implementer", "reviewer"]
+      },
+      "validation": {
+        "coordinatorFallback": "direct",
+        "requireEntryReachability": true,
+        "allowIsolatedMembers": false
+      },
+      "members": {
+        "coordinator": {
+          "agent": "coordinator",
+          "recipients": ["planner", "implementer", "reviewer"],
+          "recipientGroups": ["delivery"],
+          "canBroadcast": true,
+          "autoStart": true
+        },
+        "planner": {
+          "agent": "planner",
+          "recipients": ["coordinator", "implementer", "reviewer"],
+          "canBroadcast": false,
+          "autoStart": true
+        },
+        "implementer": {
+          "agent": "implementer",
+          "recipients": ["coordinator", "planner", "reviewer"],
+          "canBroadcast": false,
+          "autoStart": true
+        },
+        "reviewer": {
+          "agent": "reviewer",
+          "recipients": ["coordinator", "planner", "implementer"],
+          "canBroadcast": false,
+          "autoStart": true
+        }
+      }
+    }
+  }
+}
