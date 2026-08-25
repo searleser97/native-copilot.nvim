@@ -1,4 +1,6 @@
 local M = {}
+local catalogs = {}
+local catalog_listeners = {}
 
 function M.parse(text)
   local name = text:match('^/([^%s]+)')
@@ -83,6 +85,38 @@ function M.complete(before, available, directories)
   end
   if #matches == 0 then return nil end
   return column - #input + 1, matches
+end
+
+function M.set_catalog(target, available)
+  catalogs[target] = available
+  local listeners = catalog_listeners[target] or {}
+  catalog_listeners[target] = nil
+  for _, listener in ipairs(listeners) do
+    listener(available)
+  end
+end
+
+function M.catalog(target)
+  return catalogs[target]
+end
+
+function M.on_catalog(target, listener)
+  catalog_listeners[target] = catalog_listeners[target] or {}
+  local listeners = catalog_listeners[target]
+  table.insert(listeners, listener)
+  return function()
+    for index, candidate in ipairs(listeners) do
+      if candidate == listener then
+        table.remove(listeners, index)
+        break
+      end
+    end
+  end
+end
+
+function M.reset_catalogs()
+  catalogs = {}
+  catalog_listeners = {}
 end
 
 return M

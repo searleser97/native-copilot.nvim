@@ -50,6 +50,9 @@ UI and rendering defaults can be adjusted in `setup`:
 require("copilot_fleet").setup({
   stream_flush_ms = 80,
   render_debounce_ms = 200,
+  completion = {
+    frontend = "native", -- "blink" when the optional source is configured
+  },
 })
 ```
 
@@ -145,6 +148,29 @@ Streaming deltas are batched and appended only to the changed buffer tail. Rich 
 SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
 Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata.
+
+### Optional blink.cmp source
+
+`blink.cmp` is not a plugin dependency. To use it as the completion frontend, set `completion.frontend = "blink"` above and register the source in your own blink configuration:
+
+```lua
+sources = {
+  default = function()
+    if vim.b.copilot_fleet_prompt then return { "copilot_fleet" } end
+    return { "lsp", "buffer", "snippets", "path" }
+  end,
+  providers = {
+    copilot_fleet = {
+      name = "Copilot",
+      module = "copilot_fleet.blink",
+      enabled = function() return vim.b.copilot_fleet_prompt == true end,
+      score_offset = 100,
+    },
+  },
+}
+```
+
+The native source remains the default and does not load blink. With the blink frontend selected, the plugin leaves `/` and `<Tab>` unmapped so the user's blink keymap remains authoritative.
 
 ## Lifecycle
 

@@ -47,6 +47,33 @@ start_column, completion_matches = commands.complete('/autopilot src', command_c
 end)
 assert(start_column == 12)
 assert(completion_matches[1].word == 'src/')
+commands.set_catalog('reviewer', command_catalog)
+assert(commands.catalog('reviewer') == command_catalog)
+local blink_source = require('copilot_fleet.blink').new()
+local blink_buf = vim.api.nvim_create_buf(false, true)
+vim.b[blink_buf].copilot_fleet_prompt = true
+vim.b[blink_buf].copilot_fleet_target = 'reviewer'
+local blink_response
+blink_source:get_completions({
+  bufnr = blink_buf,
+  line = '/aut',
+  cursor = { 1, 4 },
+}, function(response)
+  blink_response = response
+end)
+assert(#blink_response.items == 2)
+assert(blink_response.items[1].textEdit.newText == 'autopilot')
+assert(blink_response.items[1].textEdit.range.start.character == 1)
+assert(blink_response.items[1].textEdit.range['end'].character == 4)
+commands.reset_catalogs()
+assert(commands.catalog('reviewer') == nil)
+local catalog_notified = false
+local unsubscribe = commands.on_catalog('reviewer', function(available)
+  catalog_notified = available == command_catalog
+end)
+commands.set_catalog('reviewer', command_catalog)
+assert(catalog_notified)
+unsubscribe()
 buffers.setup({ render_debounce_ms = 30 })
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')

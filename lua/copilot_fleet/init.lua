@@ -13,6 +13,9 @@ local defaults = {
   overview_max_agents = 4,
   render_debounce_ms = 200,
   stream_flush_ms = 80,
+  completion = {
+    frontend = 'native',
+  },
   mappings = {
     toggle = '<leader>ait',
     fleet = '<leader>aif',
@@ -34,7 +37,7 @@ local state = {
   fleets = {},
   overview = false,
   configured_buffers = {},
-  command_catalogs = {},
+  command_requests = {},
 }
 
 local function notify(message, level)
@@ -90,8 +93,14 @@ local function update_prompt_label()
   if not state.prompt_win or not vim.api.nvim_win_is_valid(state.prompt_win) then return end
   local entry = buffers.get_member(state.selected)
   local target = entry and entry.display_name or state.selected
+  if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
+    vim.b[state.prompt_buf].copilot_fleet_target = state.selected
+  end
   vim.wo[state.prompt_win].winbar =
     (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
+  if options.completion.frontend == 'blink' and M.ensure_commands then
+    vim.schedule(function() M.ensure_commands(state.selected) end)
+  end
 end
 
 local function complete_slash_input()
@@ -99,7 +108,7 @@ local function complete_slash_input()
   local row, column = unpack(vim.api.nvim_win_get_cursor(0))
   local line = vim.api.nvim_buf_get_lines(state.prompt_buf, row - 1, row, false)[1] or ''
   local before = line:sub(1, column)
-  local catalog = state.command_catalogs[state.selected] or {}
+  local catalog = commands.catalog(state.selected) or {}
   local start_column, matches = commands.complete(before, catalog, function(prefix)
     return vim.fn.getcompletion(prefix, 'dir')
   end)
@@ -159,28 +168,30 @@ local function ensure_prompt_buffer()
     buffer = buf,
     desc = 'Insert AI prompt snippet',
   })
-  vim.keymap.set('i', '/', function()
-    local row, column = unpack(vim.api.nvim_win_get_cursor(0))
-    local before = table.concat(vim.api.nvim_buf_get_lines(buf, 0, row - 1, false), '')
-      .. (vim.api.nvim_get_current_line():sub(1, column))
-    if before == '' then
-      vim.schedule(M.select_commands)
-      return ''
-    end
-    return '/'
-  end, {
-    buffer = buf,
-    expr = true,
-    desc = 'Browse Copilot slash commands',
-  })
-  vim.keymap.set('i', '<Tab>', function()
-    if vim.fn.pumvisible() == 1 then return '<C-n>' end
-    return complete_slash_input() and '' or '\t'
-  end, {
-    buffer = buf,
-    expr = true,
-    desc = 'Complete Copilot slash command or argument',
-  })
+  if options.completion.frontend == 'native' then
+    vim.keymap.set('i', '/', function()
+      local row, column = unpack(vim.api.nvim_win_get_cursor(0))
+      local before = table.concat(vim.api.nvim_buf_get_lines(buf, 0, row - 1, false), '')
+        .. (vim.api.nvim_get_current_line():sub(1, column))
+      if before == '' then
+        vim.schedule(M.select_commands)
+        return ''
+      end
+      return '/'
+    end, {
+      buffer = buf,
+      expr = true,
+      desc = 'Browse Copilot slash commands',
+    })
+    vim.keymap.set('i', '<Tab>', function()
+      if vim.fn.pumvisible() == 1 then return '<C-n>' end
+      return complete_slash_input() and '' or '\t'
+    end, {
+      buffer = buf,
+      expr = true,
+      desc = 'Complete Copilot slash command or argument',
+    })
+  end
   state.prompt_buf = buf
   return buf
 end
@@ -428,11 +439,18 @@ end
 function M.select_commands()
   if not start_host() then return end
   ensure_ui()
-  send('commands.list', { target = state.selected })
+  send('commands.list', { target = state.selected, purpose = 'browse' })
+end
+
+function M.ensure_commands(target)
+  if not target or commands.catalog(target) or state.command_requests[target] then return end
+  if not protocol.is_running() then return end
+  state.command_requests[target] = true
+  send('commands.list', { target = target, purpose = 'cache' })
 end
 
 local function show_commands(target, available)
-  state.command_catalogs[target] = available
+  commands.set_catalog(target, available)
   local entries = {}
   for _, command in ipairs(available) do
     local aliases = command.aliases and #command.aliases > 0
@@ -564,8 +582,10 @@ function M._on_event(message)
     state.fleets = payload.fleets or {}
     return
   elseif message.type == 'commands.list' then
-    state.command_catalogs[payload.target or state.selected] = payload.commands or {}
-    show_commands(payload.target or state.selected, payload.commands or {})
+    local target = payload.target or state.selected
+    state.command_requests[target] = nil
+    commands.set_catalog(target, payload.commands or {})
+    if payload.purpose ~= 'cache' then show_commands(target, payload.commands or {}) end
     return
   elseif message.type == 'command.result' then
     local member_id = event_member(message)
@@ -598,6 +618,8 @@ function M._on_event(message)
     notify(payload.message or 'Copilot Fleet request failed.', vim.log.levels.ERROR)
     return
   elseif message.type == 'mode.changed' then
+    commands.reset_catalogs()
+    state.command_requests = {}
     state.mode = payload.mode or 'stopped'
     state.active_fleet = payload.fleetId
     if payload.mode == 'standard' then

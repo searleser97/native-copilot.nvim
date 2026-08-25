@@ -127,9 +127,14 @@ async function main(): Promise<void> {
         return;
       case "commands.list": {
         const target = requiredString(payload, "target", command.type);
+        const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;
         protocol.send(
           "commands.list",
-          { target, commands: await runtime.listCommands(target) },
+          {
+            target,
+            commands: await runtime.listCommands(target),
+            ...(purpose === undefined ? {} : { purpose }),
+          },
           { requestId: command.id, done: true },
         );
         return;
