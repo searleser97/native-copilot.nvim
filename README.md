@@ -78,6 +78,8 @@ No credentials or tokens belong in `fleets.json`.
 | `<leader>ait` | Toggle the native Copilot tab; starts Standard Copilot when needed |
 | `<leader>aif` | Select/start a valid Fleet, or stop Fleet mode |
 | `<leader>ais` | Telescope picker for overview, status, member, and view |
+| `<leader>aik` | List active background tasks and select one to cancel |
+| `<leader>aix` | Abort the selected agent's current foreground turn |
 | `[a` / `]a` | Previous/next member conversation |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
@@ -92,6 +94,9 @@ Commands mirror the primary mappings:
 :CopilotFleetSelect
 :CopilotFleetAgents
 :CopilotFleetStatus
+:CopilotFleetTasks
+:CopilotFleetAbort
+:CopilotFleetCancelBackground
 ```
 
 Selection uses `vim.ui.select` by default. To use Telescope for Copilot Fleet pickers, install it separately and opt in explicitly:
@@ -173,7 +178,15 @@ Command behavior follows the result returned by the SDK:
 
 Only commands returned by `session.rpc.commands.list()` are available. CLI-owned session navigation such as `/resume`, `/new`, and `/clear` is not currently exposed by the SDK session command registry, so the plugin does not emulate those commands.
 
-The embedded SDK registry currently exposes `/fleet`, but not `/tasks` or `/subagents`. `/fleet` starts Copilot's native subagent workflow inside the currently selected session; this is separate from the plugin's configured multi-session Fleets and mailbox routing. Native task/subagent management cannot be surfaced until the SDK exposes the corresponding commands or task APIs to embedded clients.
+The embedded SDK registry currently exposes `/fleet`, but not `/tasks` or `/subagents`. `/fleet` starts Copilot's native subagent workflow inside the currently selected session; this is separate from the plugin's configured multi-session Fleets and mailbox routing.
+
+The SDK does expose typed task-management RPCs, which the plugin uses directly:
+
+- `:CopilotFleetTasks` or `<leader>aik` lists running/idle agent and shell tasks for the selected session and cancels the selected task.
+- `:CopilotFleetCancelBackground` cancels every background subagent in the selected session.
+- `:CopilotFleetAbort` or `<leader>aix` aborts the selected session's foreground turn while keeping the session usable.
+
+Cancelling all background agents does not terminate promoted attached shell processes. A running shell tracked by the task registry can instead be selected and cancelled through `:CopilotFleetTasks`.
 
 ### Optional blink.cmp source
 

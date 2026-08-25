@@ -271,6 +271,21 @@ export class CopilotRuntime {
     }
   }
 
+  async listTasks(target: string): Promise<unknown[]> {
+    const live = await this.activeSession(target);
+    return (await live.session.rpc.tasks.list()).tasks;
+  }
+
+  async cancelTask(target: string, taskId: string): Promise<boolean> {
+    const live = await this.activeSession(target);
+    return (await live.session.rpc.tasks.cancel({ id: taskId })).cancelled;
+  }
+
+  async cancelAllBackgroundAgents(target: string): Promise<number> {
+    const live = await this.activeSession(target);
+    return live.session.rpc.cancelAllBackgroundAgents();
+  }
+
   private standardPermission(): PermissionProfile {
     const profile = this.config.permissionProfiles[this.config.standard.permissionProfile];
     if (!profile) {

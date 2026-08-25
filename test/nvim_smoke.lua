@@ -149,11 +149,18 @@ require('copilot_fleet').setup({
     toggle = '<leader>ait',
     fleet = '<leader>aif',
     select = '<leader>ais',
+    tasks = '<leader>aik',
+    abort = '<leader>aix',
   },
 })
 assert(vim.fn.maparg('<leader>ait', 'n') ~= '')
 assert(vim.fn.maparg('<leader>aif', 'n') ~= '')
 assert(vim.fn.maparg('<leader>ais', 'n') ~= '')
+assert(vim.fn.maparg('<leader>aik', 'n') ~= '')
+assert(vim.fn.maparg('<leader>aix', 'n') ~= '')
+assert(vim.fn.exists(':CopilotFleetTasks') == 2)
+assert(vim.fn.exists(':CopilotFleetAbort') == 2)
+assert(vim.fn.exists(':CopilotFleetCancelBackground') == 2)
 
 buffers.reset()
 print('nvim smoke passed')

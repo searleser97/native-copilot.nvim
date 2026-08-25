@@ -70,6 +70,40 @@ vim.ui.select = original_select
 assert(native_picker, 'native picker frontend was not used')
 assert(native_picker.opts.prompt == 'Tasks')
 assert(native_picker.items[1].option.name == 'list')
+native_picker = nil
+vim.ui.select = function(items, opts, on_choice)
+  native_picker = { items = items, opts = opts }
+  on_choice(nil)
+end
+fleet._on_event({
+  v = 1,
+  type = 'tasks.list',
+  memberId = 'coordinator',
+  target = 'status',
+  done = true,
+  payload = {
+    target = 'coordinator',
+    tasks = {
+      {
+        type = 'agent',
+        id = 'running-agent',
+        status = 'running',
+        description = 'Review the implementation',
+      },
+      {
+        type = 'shell',
+        id = 'completed-shell',
+        status = 'completed',
+        command = 'npm test',
+      },
+    },
+  },
+})
+vim.ui.select = original_select
+assert(native_picker, 'task cancellation picker was not shown')
+assert(native_picker.opts.prompt == 'Cancel background task — coordinator')
+assert(#native_picker.items == 1, 'completed tasks were offered for cancellation')
+assert(native_picker.items[1].task.id == 'running-agent')
 fleet.show_overview()
 
 local wins = vim.api.nvim_tabpage_list_wins(0)

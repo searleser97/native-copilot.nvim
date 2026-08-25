@@ -22,6 +22,8 @@ local defaults = {
     toggle = '<leader>ait',
     fleet = '<leader>aif',
     select = '<leader>ais',
+    tasks = '<leader>aik',
+    abort = '<leader>aix',
   },
 }
 
@@ -531,6 +533,22 @@ function M.select()
   end)
 end
 
+function M.select_task()
+  if not start_host() then return end
+  ensure_ui()
+  send('tasks.list', { target = state.selected })
+end
+
+function M.cancel_background()
+  if not start_host() then return end
+  send('session.cancel-background', { target = state.selected })
+end
+
+function M.abort()
+  if not start_host() then return end
+  send('session.abort', { target = state.selected })
+end
+
 function M.select_fleet()
   if not start_host() then return end
   ensure_ui()
@@ -635,6 +653,45 @@ function M._on_event(message)
       end)
     end
     return
+  elseif message.type == 'tasks.list' then
+    local active = {}
+    for _, task in ipairs(payload.tasks or {}) do
+      if task.status == 'running' or task.status == 'idle' then
+        local detail = task.type == 'shell' and task.command
+          or task.description
+          or task.prompt
+          or task.id
+        table.insert(active, {
+          display = ('Cancel [%s] %s — %s'):format(task.status, task.type, detail),
+          ordinal = table.concat({ task.status, task.type, detail, task.id }, ' '),
+          task = task,
+        })
+      end
+    end
+    if #active == 0 then
+      notify(('No active background tasks for %s.'):format(payload.target or state.selected))
+      return
+    end
+    picker(('Cancel background task — %s'):format(payload.target or state.selected), active, function(item)
+      send('tasks.cancel', {
+        target = payload.target or state.selected,
+        taskId = item.task.id,
+      })
+    end)
+    return
+  elseif message.type == 'tasks.cancelled' then
+    if payload.cancelled then
+      notify(('Cancelled background task %s.'):format(payload.taskId or ''))
+    else
+      notify(
+        ('Background task %s is no longer cancellable.'):format(payload.taskId or ''),
+        vim.log.levels.WARN
+      )
+    end
+    return
+  elseif message.type == 'background.cancelled' then
+    notify(('Cancelled %d background agent(s).'):format(payload.count or 0))
+    return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
     notify(payload.message or 'Copilot Fleet request failed.', vim.log.levels.ERROR)
     return
@@ -729,10 +786,19 @@ function M.setup(user_options)
   vim.keymap.set('n', options.mappings.select, M.select, {
     desc = 'Select Copilot mode, agent, or view',
   })
+  vim.keymap.set('n', options.mappings.tasks, M.select_task, {
+    desc = 'Cancel a Copilot background task',
+  })
+  vim.keymap.set('n', options.mappings.abort, M.abort, {
+    desc = 'Abort the selected Copilot turn',
+  })
   vim.api.nvim_create_user_command('CopilotFleetToggle', M.toggle, {})
   vim.api.nvim_create_user_command('CopilotFleetSelect', M.select_fleet, {})
   vim.api.nvim_create_user_command('CopilotFleetAgents', M.select, {})
   vim.api.nvim_create_user_command('CopilotFleetStatus', M.show_status, {})
+  vim.api.nvim_create_user_command('CopilotFleetTasks', M.select_task, {})
+  vim.api.nvim_create_user_command('CopilotFleetAbort', M.abort, {})
+  vim.api.nvim_create_user_command('CopilotFleetCancelBackground', M.cancel_background, {})
   vim.api.nvim_create_autocmd('BufWinEnter', {
     callback = function(args) buffers.on_shown(args.buf) end,
   })

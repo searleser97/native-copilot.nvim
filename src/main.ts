@@ -189,6 +189,34 @@ async function main(): Promise<void> {
           done: true,
         });
         return;
+      case "tasks.list": {
+        const target = requiredString(payload, "target", command.type);
+        protocol.send(
+          "tasks.list",
+          { target, tasks: await runtime.listTasks(target) },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "tasks.cancel": {
+        const target = requiredString(payload, "target", command.type);
+        const taskId = requiredString(payload, "taskId", command.type);
+        protocol.send(
+          "tasks.cancelled",
+          { target, taskId, cancelled: await runtime.cancelTask(target, taskId) },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "session.cancel-background": {
+        const target = requiredString(payload, "target", command.type);
+        protocol.send(
+          "background.cancelled",
+          { target, count: await runtime.cancelAllBackgroundAgents(target) },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
       case "shutdown":
         await close("Neovim requested shutdown", command.id);
         return;
