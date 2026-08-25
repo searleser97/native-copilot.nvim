@@ -100,6 +100,7 @@ No credentials or tokens belong in `fleets.json`.
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `/fleet` | Start a configured Fleet or recover an inactive Fleet run |
+| `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
 
@@ -236,7 +237,7 @@ in place. The task-strip winbar shows the member as `loading` until initializati
 summarizes settled components. MCP connection-state changes update the same pane; loading failures
 also remain visible as muted inline conversation errors.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly.
 
 Native scheduled prompts and session-store support are enabled for every SDK session. The model can
 therefore use `manage_schedule` and `sql` when the connected Copilot runtime exposes them. `todos`
@@ -251,10 +252,11 @@ Command behavior follows the result returned by the SDK:
 - Commands requiring a subcommand open a Telescope picker; argument choices are also available through completion. For example, `/mcp` exposes `list`, `show`, `enable`, `disable`, and `reload`.
 
 Other than the explicit client-native `/fleet` and `/tasks` integrations, commands come from
-`session.rpc.commands.list()`. CLI-owned general session navigation such as `/resume`, `/new`, and
-`/clear` is not currently exposed by the SDK session command registry. Fleet recovery is handled by
-the configured-Fleet `/fleet` picker because it must restore multiple session IDs and mailbox state
-as one run.
+`session.rpc.commands.list()`. CLI-owned general session navigation such as `/new` and `/clear` is
+not currently exposed by the SDK session command registry. The plugin implements `/resume` through
+the SDK client's typed `listSessions()` and `resumeSession()` APIs. Fleet recovery remains handled
+by the configured-Fleet `/fleet` picker because it must restore multiple session IDs and mailbox
+state as one run.
 
 The embedded SDK registry's built-in `/fleet` would start a native subagent workflow inside one
 session. `copilot-fleet.nvim` replaces it so `/fleet` consistently controls configured independent

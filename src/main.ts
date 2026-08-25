@@ -139,6 +139,20 @@ async function main(): Promise<void> {
           { requestId: command.id, done: true },
         );
         return;
+      case "sessions.list":
+        protocol.send(
+          "sessions.list",
+          { sessions: await runtime.listSessions() },
+          { requestId: command.id, done: true },
+        );
+        return;
+      case "session.resume":
+        await runtime.resumeStandardSession(requiredString(payload, "sessionId", command.type));
+        protocol.send("request.complete", { type: command.type }, {
+          requestId: command.id,
+          done: true,
+        });
+        return;
       case "commands.list": {
         const target = requiredString(payload, "target", command.type);
         const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;

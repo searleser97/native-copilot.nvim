@@ -23,6 +23,12 @@ local function client_commands(fleets)
       description = 'View and cancel background agents and shell commands',
       kind = 'client',
     },
+    {
+      name = 'resume',
+      description = 'Resume a previous Copilot session for this workspace',
+      kind = 'client',
+      input = { hint = 'session id' },
+    },
   }
 end
 
@@ -185,6 +191,13 @@ local function submit_prompt()
         M.start_fleet(command.input)
       else
         M.select_fleet()
+      end
+      return
+    elseif command.name:lower() == 'resume' then
+      if command.input then
+        send('session.resume', { sessionId = command.input })
+      else
+        send('sessions.list')
       end
       return
     end
@@ -1031,6 +1044,29 @@ function M._on_event(message)
     state.fleets = payload.fleets or {}
     state.recoverable_fleets = payload.recoverableFleets or {}
     return
+  elseif message.type == 'sessions.list' then
+    local entries = {}
+    for _, session in ipairs(payload.sessions or {}) do
+      local summary = session.summary
+      if not summary or summary == '' then summary = session.sessionId end
+      table.insert(entries, {
+        display = ('%s — %s'):format(summary, session.modifiedTime or 'unknown time'),
+        ordinal = table.concat({
+          summary,
+          session.sessionId or '',
+          session.modifiedTime or '',
+        }, ' '),
+        session = session,
+      })
+    end
+    if #entries == 0 then
+      notify('No previous Copilot sessions were found for this workspace.', vim.log.levels.INFO)
+      return
+    end
+    picker('Resume Copilot session', entries, function(item)
+      send('session.resume', { sessionId = item.session.sessionId })
+    end)
+    return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
     local available = commands.merge(payload.commands or {}, client_commands(state.fleets))
@@ -1239,6 +1275,24 @@ function M._on_event(message)
       )
     end
     if is_ui_open() and state.selected then M.show_member(state.selected) end
+    render_task_buffer()
+    return
+  elseif message.type == 'session.loading' then
+    commands.reset_catalogs()
+    state.command_requests = {}
+    buffers.reset()
+    state.configured_buffers = {}
+    state.tasks = {}
+    state.environment = {}
+    state.task_detail = nil
+    state.task_progress = nil
+    state.mode = 'standard-loading'
+    state.active_fleet = nil
+    state.member_order = { 'standard' }
+    state.selected = 'standard'
+    ensure_member('standard', 'Copilot')
+    buffers.set_state('standard', 'loading')
+    if is_ui_open() then M.show_member('standard') end
     render_task_buffer()
     return
   elseif message.type == 'mode.changed' then

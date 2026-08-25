@@ -11,6 +11,7 @@ import {
   type PermissionRequestResult,
   type SessionConfig,
   type SessionEvent,
+  type SessionMetadata,
   type Tool,
 } from "@github/copilot-sdk";
 import { z } from "zod";
@@ -297,6 +298,14 @@ export class CopilotRuntime {
 
   async listModels(): Promise<unknown[]> {
     return (await this.ensureClient()).listModels();
+  }
+
+  async listSessions(): Promise<SessionMetadata[]> {
+    const client = await this.ensureClient();
+    const activeSessionIds = new Set([...this.live.values()].map((live) => live.session.sessionId));
+    return (await client.listSessions({ workingDirectory: this.workspace }))
+      .filter((session) => !activeSessionIds.has(session.sessionId))
+      .sort((left, right) => right.modifiedTime.getTime() - left.modifiedTime.getTime());
   }
 
   private async activeSession(target: string): Promise<LiveSession> {
@@ -852,6 +861,39 @@ export class CopilotRuntime {
     } catch (error) {
       this.db.finishRun(runId, "interrupted", "Standard Copilot failed to start");
       this.active = undefined;
+      throw error;
+    }
+  }
+
+  async resumeStandardSession(sessionId: string): Promise<void> {
+    const client = await this.ensureClient();
+    const available = await client.listSessions({ workingDirectory: this.workspace });
+    if (!available.some((session) => session.sessionId === sessionId)) {
+      throw new Error(`Session "${sessionId}" was not found for this workspace.`);
+    }
+
+    await this.stopActive(`Resuming session ${sessionId}`);
+    const runId = randomUUID();
+    this.db.createRun(runId, "standard", null, this.workspace, process.pid);
+    this.active = { kind: "standard", runId };
+    this.emit(
+      "session.loading",
+      { mode: "standard-loading", sessionId },
+      { runId, memberId: "standard", target: "status", done: false },
+    );
+    try {
+      await this.connectSession(
+        runId,
+        "standard",
+        sessionId,
+        this.standardSessionConfig(this.config.standard),
+        true,
+      );
+      this.emit("mode.changed", { mode: "standard", recovered: true, sessionId }, { runId });
+    } catch (error) {
+      this.db.finishRun(runId, "interrupted", "Standard Copilot recovery failed");
+      this.active = undefined;
+      await this.openStandard();
       throw error;
     }
   }

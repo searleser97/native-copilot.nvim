@@ -84,6 +84,7 @@ fleet._on_event({
 local command_catalog = require('copilot_fleet.commands').catalog('coordinator')
 assert(require('copilot_fleet.commands').find(command_catalog, 'tasks').kind == 'client')
 assert(require('copilot_fleet.commands').find(command_catalog, 'fleet').kind == 'client')
+assert(require('copilot_fleet.commands').find(command_catalog, 'resume').kind == 'client')
 fleet._on_event({
   v = 1,
   id = 'tasks-changed',
@@ -270,6 +271,34 @@ vim.ui.select = original_select
 assert(native_picker, 'native picker frontend was not used')
 assert(native_picker.opts.prompt == 'Tasks')
 assert(native_picker.items[1].option.name == 'list')
+local resumed_session
+vim.ui.select = function(items, opts, on_choice)
+  native_picker = { items = items, opts = opts }
+  on_choice(items[1])
+end
+protocol.send = function(message_type, payload)
+  if message_type == 'session.resume' then resumed_session = payload.sessionId end
+  return 'resume-session'
+end
+fleet._on_event({
+  v = 1,
+  type = 'sessions.list',
+  target = 'status',
+  done = true,
+  payload = {
+    sessions = {
+      {
+        sessionId = 'previous-session',
+        summary = 'Continue plugin work',
+        modifiedTime = '2026-08-25T19:00:00.000Z',
+      },
+    },
+  },
+})
+vim.ui.select = original_select
+protocol.send = original_send
+assert(native_picker.opts.prompt == 'Resume Copilot session')
+assert(resumed_session == 'previous-session', 'session picker did not resume the selected session')
 local permission_response
 local original_send = protocol.send
 vim.ui.select = function(items, opts, on_choice)
