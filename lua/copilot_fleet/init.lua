@@ -13,6 +13,7 @@ local defaults = {
   overview_max_agents = 4,
   render_debounce_ms = 200,
   stream_flush_ms = 80,
+  follow_bottom = true,
   completion = {
     frontend = 'native',
   },
@@ -694,6 +695,7 @@ function M.setup(user_options)
   buffers.setup({
     render_debounce_ms = options.render_debounce_ms,
     stream_flush_ms = options.stream_flush_ms,
+    follow_bottom = options.follow_bottom,
   })
   vim.keymap.set('n', options.mappings.toggle, M.toggle, {
     desc = 'Toggle native Copilot',

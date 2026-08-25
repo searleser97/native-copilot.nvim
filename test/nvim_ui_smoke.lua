@@ -4,6 +4,10 @@ vim.opt.runtimepath:prepend(root)
 
 local fleet = require('copilot_fleet')
 fleet.setup({ overview_max_agents = 4 })
+local hidden_lines = {}
+for index = 1, 40 do
+  table.insert(hidden_lines, ('Hidden retained line %d.'):format(index))
+end
 fleet._on_event({
   v = 1,
   type = 'mode.changed',
@@ -48,19 +52,24 @@ fleet._on_event({
   done = true,
   payload = {
     messageId = 'observer-message',
-    content = 'Hidden buffers retain this message.',
+    content = table.concat(hidden_lines, '\n'),
   },
 })
 local buffers = require('copilot_fleet.buffers')
 assert(buffers.get_member('observer').unread == 1)
 local observer_buf = buffers.buffer('observer', 'conversation')
 local text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
-assert(text:find('Hidden buffers retain this message.', 1, true))
+assert(text:find('Hidden retained line 40.', 1, true))
 
 fleet.show_member('observer')
 assert(buffers.get_member('observer').unread == 0)
 assert(vim.api.nvim_get_current_buf() == observer_buf)
 assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'member view contains an unexpected activity pane')
+assert(
+  vim.api.nvim_win_get_cursor(0)[1] == vim.api.nvim_buf_line_count(observer_buf),
+  'opening a conversation did not follow its last line'
+)
+assert(vim.fn.line('w$') == vim.api.nvim_buf_line_count(observer_buf), 'conversation bottom is not visible')
 fleet._on_event({
   v = 1,
   id = 'reasoning-summary',
@@ -125,6 +134,11 @@ conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1,
 assert(conversation_text:find('> **Tool**', 1, true))
 assert(conversation_text:find('> view', 1, true))
 assert(conversation_text:find('Assistant output remains normally highlighted.', 1, true))
+assert(
+  vim.api.nvim_win_get_cursor(0)[1] == vim.api.nvim_buf_line_count(observer_buf),
+  'streamed response did not keep the cursor at the bottom'
+)
+assert(vim.fn.line('w$') == vim.api.nvim_buf_line_count(observer_buf), 'streamed response bottom is hidden')
 activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
   details = true,
 })
@@ -161,5 +175,10 @@ assert(conversation_text:find('Dynamically discovered command output.', 1, true)
 fleet.close()
 fleet.show_member('observer')
 assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'UI reopen created an unexpected activity pane')
+assert(
+  vim.api.nvim_win_get_cursor(0)[1] == vim.api.nvim_buf_line_count(observer_buf),
+  'reopened conversation did not follow its last line'
+)
+assert(vim.fn.line('w$') == vim.api.nvim_buf_line_count(observer_buf), 'reopened bottom is hidden')
 fleet.close()
 print('nvim UI smoke passed')

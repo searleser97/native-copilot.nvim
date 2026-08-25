@@ -6,6 +6,7 @@ local activity_namespace = vim.api.nvim_create_namespace('copilot_fleet_inline_a
 local options = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
+  follow_bottom = true,
 }
 
 local function with_modifiable(buf, operation)
@@ -40,6 +41,19 @@ local function visible(buf)
   return #vim.fn.win_findbuf(buf) > 0
 end
 
+local function follow_bottom(view)
+  if not options.follow_bottom or view.id ~= 'conversation' then return end
+  local last_line = vim.api.nvim_buf_line_count(view.buf)
+  for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
+    if vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_set_cursor, win, { last_line, 0 })
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.cmd('normal! zb')
+      end)
+    end
+  end
+end
+
 local function finalize_render(view)
   view.dirty = true
   render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
@@ -56,6 +70,7 @@ local function finalize_render(view)
     end
     render_markdown(view.buf, true)
     view.dirty = false
+    follow_bottom(view)
   end, options.render_debounce_ms)
 end
 
@@ -152,6 +167,7 @@ local function flush(view)
       }
     )
   end
+  follow_bottom(view)
 end
 
 local function schedule_flush(view)
@@ -285,6 +301,7 @@ function M.on_shown(buf)
     for _, view in pairs(entry.views) do
       if view.buf == buf then
         if view.id == 'conversation' then entry.unread = 0 end
+        follow_bottom(view)
         if view.dirty and not view.streaming and not view.activity_streaming then
           finalize_render(view)
         end

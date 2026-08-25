@@ -50,6 +50,7 @@ UI and rendering defaults can be adjusted in `setup`:
 require("copilot_fleet").setup({
   stream_flush_ms = 80,
   render_debounce_ms = 200,
+  follow_bottom = true,
   completion = {
     frontend = "native", -- "blink" when the optional source is configured
   },
@@ -144,6 +145,8 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 Conversation, mailbox, and status views are native `nofile` Markdown buffers. Inline activity and reasoning are part of each conversation buffer. The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Rich Markdown rendering is disabled while a response is streaming, debounced at turn completion, scoped to windows where the buffer is visible, and deferred for hidden buffers until they become visible. Configure this with `stream_flush_ms` and `render_debounce_ms`.
+
+Conversation windows follow the final line when opened, switched, reopened, rendered, or updated by streaming output. Set `follow_bottom = false` to preserve the current viewport instead.
 
 SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
