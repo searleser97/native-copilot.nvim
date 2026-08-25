@@ -85,6 +85,7 @@ local command_catalog = require('native_copilot.commands').catalog('coordinator'
 assert(require('native_copilot.commands').find(command_catalog, 'tasks').kind == 'client')
 assert(require('native_copilot.commands').find(command_catalog, 'fleet').kind == 'client')
 assert(require('native_copilot.commands').find(command_catalog, 'resume').kind == 'client')
+assert(require('native_copilot.commands').find(command_catalog, 'mcp-reload').kind == 'client')
 fleet._on_event({
   v = 1,
   id = 'tasks-changed',

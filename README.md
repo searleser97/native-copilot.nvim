@@ -91,9 +91,7 @@ No credentials or tokens belong in `fleets.json`.
 
 The built-in `github-mcp-server` authenticates through `gh auth token` at session startup. The
 token is read directly from the GitHub CLI credential store, passed to the SDK in memory, and is
-never written to plugin configuration, logs, SQLite, or conversation buffers. Existing
-installations continue using a legacy `copilot-fleet\state.sqlite` database when present so Fleet
-recovery history is preserved.
+never written to plugin configuration, logs, SQLite, or conversation buffers.
 
 ## Key bindings
 
@@ -146,10 +144,8 @@ Commands mirror the primary mappings:
 :NativeCopilotTasks
 :NativeCopilotAbort
 :NativeCopilotCancelBackground
+:NativeCopilotReloadMcp
 ```
-
-The previous `require("copilot_fleet")`, `copilot_fleet.blink`, and `:CopilotFleet*` names remain
-as compatibility aliases, so existing configurations continue to load during migration.
 
 Selection uses `vim.ui.select` by default. To use Telescope for Copilot Fleet pickers, install it separately and opt in explicitly:
 
@@ -248,6 +244,10 @@ summarizes settled components. MCP connection-state changes update the same pane
 also remain visible as muted inline conversation errors.
 
 Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly.
+
+`/mcp-reload` and `:NativeCopilotReloadMcp` call the SDK's session-scoped
+`session.rpc.mcp.reload()` API. They stop and reconnect the selected session's MCP servers,
+refresh the environment rows in the task pane, and do not restart or replace the Copilot session.
 
 Native scheduled prompts and session-store support are enabled for every SDK session. The model can
 therefore use `manage_schedule` and `sql` when the connected Copilot runtime exposes them. `todos`

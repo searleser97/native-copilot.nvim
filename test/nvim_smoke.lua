@@ -11,7 +11,6 @@ package.loaded['render-markdown'] = {
 
 local buffers = require('native_copilot.buffers')
 local commands = require('native_copilot.commands')
-assert(require('copilot_fleet') == require('native_copilot'), 'legacy module alias is broken')
 assert(commands.parse('/autopilot on').name == 'autopilot')
 assert(commands.parse('/autopilot on').input == 'on')
 assert(commands.parse('/refine first line\nsecond line').input == 'first line\nsecond line')
@@ -175,12 +174,10 @@ require('native_copilot').setup({
 assert(vim.fn.maparg('<leader>ait', 'n') ~= '')
 assert(vim.fn.maparg('<leader>aif', 'n') ~= '')
 assert(vim.fn.maparg('<leader>ais', 'n') ~= '')
-assert(vim.fn.exists(':CopilotFleetTasks') == 2)
-assert(vim.fn.exists(':CopilotFleetAbort') == 2)
-assert(vim.fn.exists(':CopilotFleetCancelBackground') == 2)
 assert(vim.fn.exists(':NativeCopilotTasks') == 2)
 assert(vim.fn.exists(':NativeCopilotAbort') == 2)
 assert(vim.fn.exists(':NativeCopilotCancelBackground') == 2)
+assert(vim.fn.exists(':NativeCopilotReloadMcp') == 2)
 
 buffers.reset()
 print('nvim smoke passed')

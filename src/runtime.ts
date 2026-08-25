@@ -389,6 +389,23 @@ export class CopilotRuntime {
     return (await live.session.rpc.tasks.list()).tasks;
   }
 
+  async reloadMcp(target: string): Promise<number> {
+    const live = await this.activeSession(target);
+    this.emit(
+      "environment.progress",
+      { component: "MCP servers", message: "Reloading MCP server connections" },
+      { runId: live.runId, memberId: live.memberId, target: "activity", done: false },
+    );
+    await live.session.rpc.mcp.reload();
+    const { servers } = await live.session.rpc.mcp.list();
+    this.emit(
+      "environment.loaded",
+      { component: "MCP servers", items: servers },
+      { runId: live.runId, memberId: live.memberId, target: "activity", done: true },
+    );
+    return servers.length;
+  }
+
   async cancelTask(target: string, taskId: string): Promise<boolean> {
     const live = await this.activeSession(target);
     return (await live.session.rpc.tasks.cancel({ id: taskId })).cancelled;
