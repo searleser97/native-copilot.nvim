@@ -34,6 +34,7 @@ local state = {
   fleets = {},
   overview = false,
   configured_buffers = {},
+  command_catalogs = {},
 }
 
 local function notify(message, level)
@@ -89,7 +90,26 @@ local function update_prompt_label()
   if not state.prompt_win or not vim.api.nvim_win_is_valid(state.prompt_win) then return end
   local entry = buffers.get_member(state.selected)
   local target = entry and entry.display_name or state.selected
-  vim.wo[state.prompt_win].winbar = (' To: %s  |  <Enter> send  |  <C-p> snippets '):format(target)
+  vim.wo[state.prompt_win].winbar =
+    (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
+end
+
+local function complete_slash_input()
+  if not state.prompt_buf or not vim.api.nvim_buf_is_valid(state.prompt_buf) then return false end
+  local row, column = unpack(vim.api.nvim_win_get_cursor(0))
+  local line = vim.api.nvim_buf_get_lines(state.prompt_buf, row - 1, row, false)[1] or ''
+  local before = line:sub(1, column)
+  local catalog = state.command_catalogs[state.selected] or {}
+  local start_column, matches = commands.complete(before, catalog, function(prefix)
+    return vim.fn.getcompletion(prefix, 'dir')
+  end)
+  if not start_column then return false end
+  vim.schedule(function()
+    if vim.api.nvim_get_current_buf() == state.prompt_buf then
+      vim.fn.complete(start_column, matches)
+    end
+  end)
+  return true
 end
 
 local function submit_prompt()
@@ -152,6 +172,14 @@ local function ensure_prompt_buffer()
     buffer = buf,
     expr = true,
     desc = 'Browse Copilot slash commands',
+  })
+  vim.keymap.set('i', '<Tab>', function()
+    if vim.fn.pumvisible() == 1 then return '<C-n>' end
+    return complete_slash_input() and '' or '\t'
+  end, {
+    buffer = buf,
+    expr = true,
+    desc = 'Complete Copilot slash command or argument',
   })
   state.prompt_buf = buf
   return buf
@@ -404,6 +432,7 @@ function M.select_commands()
 end
 
 local function show_commands(target, available)
+  state.command_catalogs[target] = available
   local entries = {}
   for _, command in ipairs(available) do
     local aliases = command.aliases and #command.aliases > 0
@@ -425,6 +454,7 @@ local function show_commands(target, available)
       vim.api.nvim_set_current_win(state.prompt_win)
       vim.api.nvim_win_set_cursor(state.prompt_win, { 1, #prompt })
       vim.cmd('startinsert!')
+      if item.command.input and item.command.input.choices then complete_slash_input() end
     end
   end)
 end
@@ -534,6 +564,7 @@ function M._on_event(message)
     state.fleets = payload.fleets or {}
     return
   elseif message.type == 'commands.list' then
+    state.command_catalogs[payload.target or state.selected] = payload.commands or {}
     show_commands(payload.target or state.selected, payload.commands or {})
     return
   elseif message.type == 'command.result' then

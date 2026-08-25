@@ -78,6 +78,7 @@ No credentials or tokens belong in `fleets.json`.
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
+| `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
 
 Commands mirror the primary mappings:
@@ -143,7 +144,7 @@ Streaming deltas are batched and appended only to the changed buffer tail. Rich 
 
 SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata.
 
 ## Lifecycle
 

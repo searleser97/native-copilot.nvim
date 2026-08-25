@@ -13,9 +13,40 @@ local buffers = require('copilot_fleet.buffers')
 local commands = require('copilot_fleet.commands')
 assert(commands.parse('/autopilot on').name == 'autopilot')
 assert(commands.parse('/autopilot on').input == 'on')
+assert(commands.parse('/refine first line\nsecond line').input == 'first line\nsecond line')
 assert(commands.parse('/future-command').name == 'future-command')
 assert(commands.parse('normal prompt') == nil)
 assert(commands.prompt({ name = 'model', input = { hint = 'model name' } }) == '/model ')
+local command_catalog = {
+  {
+    name = 'autopilot',
+    aliases = { 'auto' },
+    description = 'Toggle autopilot',
+    input = {
+      choices = {
+        { name = 'on', description = 'Enable autopilot' },
+        { name = 'off', description = 'Disable autopilot' },
+      },
+    },
+  },
+}
+assert(commands.find(command_catalog, 'AUTO').name == 'autopilot')
+assert(commands.command_matches(command_catalog, 'aut')[1].word == 'autopilot')
+assert(commands.command_matches(command_catalog, 'au')[2].word == 'auto')
+assert(commands.choice_matches(command_catalog[1], 'o')[1].word == 'on')
+assert(#commands.choice_matches(command_catalog[1], 'missing') == 0)
+local start_column, completion_matches = commands.complete('/aut', command_catalog)
+assert(start_column == 2)
+assert(completion_matches[1].word == 'autopilot')
+start_column, completion_matches = commands.complete('/autopilot o', command_catalog)
+assert(start_column == 12)
+assert(completion_matches[1].word == 'on')
+command_catalog[1].input = { completion = 'directory' }
+start_column, completion_matches = commands.complete('/autopilot src', command_catalog, function()
+  return { 'src/', 'scripts/' }
+end)
+assert(start_column == 12)
+assert(completion_matches[1].word == 'src/')
 buffers.setup({ render_debounce_ms = 30 })
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')

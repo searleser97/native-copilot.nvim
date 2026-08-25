@@ -120,6 +120,15 @@ async function runStandard() {
   if (!Array.isArray(commandList.payload?.commands) || commandList.payload.commands.length === 0) {
     throw new Error("The active Copilot session returned no slash commands");
   }
+  const commandsWithInputMetadata = commandList.payload.commands.filter(
+    (command) =>
+      command.input?.choices?.length > 0 ||
+      command.input?.completion ||
+      command.input?.hint,
+  );
+  if (commandsWithInputMetadata.length === 0) {
+    throw new Error("The active Copilot session returned no argument-completion metadata");
+  }
   const inspectionCommand = commandList.payload.commands.find((command) => command.name === "context");
   if (!inspectionCommand) {
     throw new Error("The active Copilot session did not expose the read-only /context smoke command");
@@ -157,7 +166,8 @@ async function runStandard() {
     "Standard Copilot idle",
   );
   console.log(
-    `standard smoke passed with ${commandList.payload.commands.length} dynamic commands: ` +
+    `standard smoke passed with ${commandList.payload.commands.length} dynamic commands and ` +
+      `${commandsWithInputMetadata.length} argument schemas: ` +
       response.payload.content.trim(),
   );
 }
