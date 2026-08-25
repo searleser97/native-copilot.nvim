@@ -146,6 +146,34 @@ async function runStandard() {
       `Unexpected /context result: ${JSON.stringify(commandResult.payload?.result ?? null)}`,
     );
   }
+  const modelRequestId = send("model.list", { target: "standard", purpose: "smoke" });
+  const modelList = await waitFor(
+    (event) => event.type === "model.list" && event.requestId === modelRequestId,
+    "session model list",
+  );
+  if (!Array.isArray(modelList.payload?.state?.models) || !modelList.payload.state.current?.modelId) {
+    throw new Error(`Invalid session model state: ${JSON.stringify(modelList.payload?.state ?? null)}`);
+  }
+  const currentModelId = modelList.payload.state.current.modelId;
+  const switchRequestId = send("model.switch", {
+    target: "standard",
+    modelId: currentModelId,
+  });
+  const modelChanged = await waitFor(
+    (event) => event.type === "model.changed" && event.requestId === switchRequestId,
+    "session model switch",
+  );
+  if (modelChanged.payload?.model?.modelId !== currentModelId) {
+    throw new Error(`Unexpected switched model: ${JSON.stringify(modelChanged.payload?.model ?? null)}`);
+  }
+  const mcpRequestId = send("mcp.list", { target: "standard", purpose: "smoke" });
+  const mcpList = await waitFor(
+    (event) => event.type === "mcp.list" && event.requestId === mcpRequestId,
+    "session MCP list",
+  );
+  if (!Array.isArray(mcpList.payload?.servers)) {
+    throw new Error(`Invalid MCP list: ${JSON.stringify(mcpList.payload ?? null)}`);
+  }
   const marker = "native-copilot-standard-smoke-ok";
   await request("prompt.send", {
     target: "standard",
@@ -167,7 +195,9 @@ async function runStandard() {
   );
   console.log(
     `standard smoke passed with ${commandList.payload.commands.length} dynamic commands and ` +
-      `${commandsWithInputMetadata.length} argument schemas: ` +
+      `${commandsWithInputMetadata.length} argument schemas, ` +
+      `${modelList.payload.state.models.length} models, and ` +
+      `${mcpList.payload.servers.length} MCP servers: ` +
       response.payload.content.trim(),
   );
 }
