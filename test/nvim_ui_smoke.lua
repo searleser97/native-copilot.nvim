@@ -200,8 +200,47 @@ local environment_text = table.concat(
   vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false),
   '\n'
 )
-assert(environment_text:find('Loading Copilot environment', 1, true))
-assert(environment_text:find('1 connected, 1 failed', 1, true))
+task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
+assert(task_text:find('✓ [environment] MCP servers — 1 connected, 1 failed', 1, true))
+assert(not task_text:find('Copilot environment', 1, true), 'generic environment row was not replaced')
+assert(vim.wo[task_win].winbar:find('environment 1/1', 1, true))
+assert(
+  not environment_text:find('Loading Copilot environment', 1, true),
+  'successful environment progress leaked into the conversation'
+)
+assert(
+  not environment_text:find('1 connected, 1 failed', 1, true),
+  'successful environment result leaked into the conversation'
+)
+local task_action_sent = false
+protocol.send = function()
+  task_action_sent = true
+  return 'unexpected-task-action'
+end
+vim.api.nvim_set_current_win(task_win)
+vim.api.nvim_win_set_cursor(task_win, { 1, 0 })
+task_maps.details.callback()
+task_maps.cancel.callback()
+protocol.send = original_send
+assert(not task_action_sent, 'environment rows must not invoke task actions')
+fleet._on_event({
+  v = 1,
+  type = 'environment.error',
+  memberId = 'coordinator',
+  target = 'activity',
+  done = true,
+  payload = {
+    component = 'Skills',
+    message = 'Invalid skill metadata',
+  },
+})
+task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
+assert(task_text:find('✗ [environment] Skills — Invalid skill metadata', 1, true))
+environment_text = table.concat(
+  vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false),
+  '\n'
+)
+assert(environment_text:find('Skills error', 1, true), 'environment failure is absent from conversation')
 local native_picker
 local original_select = vim.ui.select
 vim.ui.select = function(items, opts, on_choice)

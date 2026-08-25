@@ -117,6 +117,12 @@ scrollable. Its buffer-local actions are:
 
 Use `/tasks` or `:CopilotFleetTasks` to focus this task buffer.
 
+The same pane shows Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other
+environment initialization as non-actionable `[environment]` rows. These rows update in place,
+remain outside the task action mappings, and contribute an `environment completed/total` summary
+to the winbar. Successful loading does not add conversation messages; loading failures remain
+visible both as failed environment rows and concise inline conversation errors.
+
 When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
 `Reject` prompt. Fleet permission profiles remain hard ceilings: requests outside a member's
 configured path, command, network, Git, or external-action policy are rejected before the prompt.
@@ -223,7 +229,12 @@ Conversation windows follow the final line when opened, switched, reopened, rend
 
 SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
-Environment initialization also appears as muted inline activity. Each session reports runtime/configuration discovery, an explicit loading row, and the loaded count for tools, instructions, skills, MCP servers, plugins, and agents. The task-strip winbar shows the member as `loading` until initialization finishes. MCP connection-state changes and loading failures are surfaced as they occur.
+Environment initialization appears in the task strip rather than adding successful loading
+messages to the conversation. Each session reports runtime/configuration discovery and loaded
+counts for tools, instructions, skills, MCP servers, plugins, and agents through rows that update
+in place. The task-strip winbar shows the member as `loading` until initialization finishes and
+summarizes settled components. MCP connection-state changes update the same pane; loading failures
+also remain visible as muted inline conversation errors.
 
 Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above.
 

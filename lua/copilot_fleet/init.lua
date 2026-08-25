@@ -67,6 +67,7 @@ local state = {
   active_fleet = nil,
   member_order = { 'standard' },
   tasks = {},
+  environment = {},
   fleets = {},
   recoverable_fleets = {},
   overview = false,
@@ -285,6 +286,43 @@ local function task_status_label(tasks)
   return #parts > 0 and table.concat(parts, '  ') or 'idle'
 end
 
+local function environment_status_label(environment)
+  if not environment or #environment.order == 0 then return nil end
+  local settled = 0
+  for _, component in ipairs(environment.order) do
+    local item = environment.components[component]
+    if item and item.status ~= 'running' then settled = settled + 1 end
+  end
+  return ('environment %d/%d'):format(settled, #environment.order)
+end
+
+local function update_environment(member_id, component, status, detail)
+  member_id = member_id or 'standard'
+  component = component or 'Environment'
+  local environment = state.environment[member_id]
+  if not environment then
+    environment = { components = {}, order = {} }
+    state.environment[member_id] = environment
+  end
+
+  if component ~= 'Copilot environment' and environment.components['Copilot environment'] then
+    environment.components['Copilot environment'] = nil
+    for index, name in ipairs(environment.order) do
+      if name == 'Copilot environment' then
+        table.remove(environment.order, index)
+        break
+      end
+    end
+  end
+
+  if not environment.components[component] then table.insert(environment.order, component) end
+  environment.components[component] = {
+    component = component,
+    status = status,
+    detail = detail,
+  }
+end
+
 local function set_task_lines(lines)
   if not state.task_buf or not vim.api.nvim_buf_is_valid(state.task_buf) then return end
   vim.bo[state.task_buf].readonly = false
@@ -340,24 +378,38 @@ local function render_task_buffer()
   end
 
   local lines = {}
-  for row, task in ipairs(tasks) do
-    lines[row] = ('%s [%s] %s'):format(
+  local environment = state.environment[state.selected]
+  for _, component in ipairs(environment and environment.order or {}) do
+    local item = environment.components[component]
+    if item then
+      table.insert(lines, ('%s [environment] %s — %s'):format(
+        task_symbols[item.status] or '?',
+        item.component,
+        item.detail or item.status
+      ))
+    end
+  end
+  for _, task in ipairs(tasks) do
+    table.insert(lines, ('%s [%s] %s'):format(
       task_symbols[task.status] or '?',
       task.type or 'task',
       task_description(task)
-    )
-    state.task_rows[row] = task
+    ))
+    state.task_rows[#lines] = task
   end
-  if #lines == 0 then lines = { 'No tracked tasks.' } end
+  if #lines == 0 then lines = { 'No tracked tasks or environment activity.' } end
   set_task_lines(lines)
   local entry = buffers.get_member(state.selected)
   local target = entry and entry.display_name or state.selected
   local member_state = entry and entry.state or 'unknown'
+  local status = task_status_label(tasks)
+  local environment_status = environment_status_label(environment)
+  if environment_status then status = status .. '  ' .. environment_status end
   for _, win in ipairs(vim.fn.win_findbuf(state.task_buf)) do
     vim.wo[win].winbar = (' Tasks · %s · %s · %s  |  <Enter> details  |  dd cancel '):format(
       target,
       member_state,
-      task_status_label(tasks)
+      status
     )
     vim.api.nvim_win_set_height(win, options.task_height)
     vim.api.nvim_win_set_cursor(win, { #lines, 0 })
@@ -1083,13 +1135,10 @@ function M._on_event(message)
     return
   elseif message.type == 'environment.progress' then
     local component = payload.component or 'Environment'
-    buffers.set_state(event_member(message), 'loading')
+    local member_id = event_member(message)
+    buffers.set_state(member_id, 'loading')
+    update_environment(member_id, component, 'running', payload.message or 'Loading...')
     render_task_buffer()
-    buffers.append_activity_block(
-      event_member(message),
-      'Loading ' .. component,
-      payload.message or 'Loading...'
-    )
     return
   elseif message.type == 'environment.loaded' then
     local component = payload.component or 'Environment'
@@ -1108,23 +1157,41 @@ function M._on_event(message)
       table.sort(parts)
       if #parts > 0 then detail = table.concat(parts, ', ') end
     end
-    buffers.append_activity_block(event_member(message), component, detail)
+    update_environment(event_member(message), component, 'completed', detail)
+    render_task_buffer()
     return
   elseif message.type == 'environment.error' then
+    local member_id = event_member(message)
+    local component = payload.component or 'Environment'
+    local detail = payload.message or 'Loading failed'
+    update_environment(member_id, component, 'failed', detail)
+    render_task_buffer()
     buffers.append_activity_block(
-      event_member(message),
-      (payload.component or 'Environment') .. ' error',
-      payload.message or 'Loading failed'
+      member_id,
+      component .. ' error',
+      detail
     )
     return
   elseif message.type == 'environment.status' then
     local detail = payload.status or 'unknown'
     if payload.error and payload.error ~= '' then detail = detail .. ': ' .. payload.error end
-    buffers.append_activity_block(
+    local row_status = 'completed'
+    if payload.status == 'connecting' or payload.status == 'starting' then
+      row_status = 'running'
+    elseif
+      payload.status == 'failed'
+      or payload.status == 'error'
+      or (payload.error and payload.error ~= '')
+    then
+      row_status = 'failed'
+    end
+    update_environment(
       event_member(message),
       payload.component or 'Environment',
+      row_status,
       detail
     )
+    render_task_buffer()
     return
   elseif message.type == 'session.recreated' then
     buffers.append_activity_block(
@@ -1149,6 +1216,7 @@ function M._on_event(message)
     buffers.reset()
     state.configured_buffers = {}
     state.tasks = {}
+    state.environment = {}
     state.mode = 'fleet-loading'
     state.active_fleet = payload.fleetId
     state.member_order = {}
