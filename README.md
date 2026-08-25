@@ -99,6 +99,7 @@ No credentials or tokens belong in `fleets.json`.
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
+| `/fleet` | Start a configured Fleet or recover an inactive Fleet run |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
 
@@ -165,6 +166,26 @@ fleet-<workspace-hash>-<instance-id>-<fleet-id>-<member-id>
 The same catalog agent can therefore appear in multiple Fleets—or more than once in one Fleet under different member IDs—without sharing conversation context.
 Closing and reopening the Copilot tab in the same Neovim process keeps those sessions. Starting a new Neovim process creates fresh Standard and Fleet-member sessions instead of automatically resuming the previous process's transcript.
 
+Each Neovim process owns an independent host, runtime, and set of top-level SDK sessions. Active
+runs record their owning host process, so opening another Neovim instance does not mark or recover
+the first instance's work. Runs whose owning host has exited become recoverable.
+
+Neovim always starts in Standard mode with one Copilot session. A configured multi-session Fleet is
+created only when `/fleet`, `<leader>aif`, or `:CopilotFleetSelect` explicitly selects it, or when
+Standard Copilot invokes the guarded `start_fleet` tool. The latter waits for the current Standard
+turn to become idle. Only members with `autoStart` are connected initially; other top-level member
+sessions remain visibly in `standby` until first prompted, queried for session commands, or sent a
+mailbox message.
+
+`/fleet` intentionally replaces the runtime's built-in command in this UI. Its picker can start a
+new configured Fleet or recover an inactive historical run. Recovery reconnects every member
+session previously created for that run, preserves its mailbox association, and starts any missing
+`autoStart` members. Active runs owned by another Neovim instance are never offered.
+
+If the runtime did not persist a member because it never had conversation activity, recovery
+recreates that empty member session under the same ID. A missing session with recorded conversation
+activity is treated as an error rather than silently presenting an empty replacement.
+
 ### Validation
 
 A Fleet is rejected before startup when it contains:
@@ -204,7 +225,7 @@ SDK-provided reasoning summaries, intent, tool activity, and errors appear inlin
 
 Environment initialization also appears as muted inline activity. Each session reports runtime/configuration discovery, an explicit loading row, and the loaded count for tools, instructions, skills, MCP servers, plugins, and agents. The task-strip winbar shows the member as `loading` until initialization finishes. MCP connection-state changes and loading failures are surfaced as they occur.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above.
 
 Native scheduled prompts and session-store support are enabled for every SDK session. The model can
 therefore use `manage_schedule` and `sql` when the connected Copilot runtime exposes them. `todos`
@@ -218,9 +239,15 @@ Command behavior follows the result returned by the SDK:
 - Agent-prompt results are submitted to the selected agent as a normal turn.
 - Commands requiring a subcommand open a Telescope picker; argument choices are also available through completion. For example, `/mcp` exposes `list`, `show`, `enable`, `disable`, and `reload`.
 
-Only commands returned by `session.rpc.commands.list()` are available. CLI-owned session navigation such as `/resume`, `/new`, and `/clear` is not currently exposed by the SDK session command registry, so the plugin does not emulate those commands.
+Other than the explicit client-native `/fleet` and `/tasks` integrations, commands come from
+`session.rpc.commands.list()`. CLI-owned general session navigation such as `/resume`, `/new`, and
+`/clear` is not currently exposed by the SDK session command registry. Fleet recovery is handled by
+the configured-Fleet `/fleet` picker because it must restore multiple session IDs and mailbox state
+as one run.
 
-The embedded SDK registry currently exposes `/fleet`, but not `/tasks` or `/subagents`. `/fleet` starts Copilot's native subagent workflow inside the currently selected session; this is separate from the plugin's configured multi-session Fleets and mailbox routing.
+The embedded SDK registry's built-in `/fleet` would start a native subagent workflow inside one
+session. `copilot-fleet.nvim` replaces it so `/fleet` consistently controls configured independent
+top-level sessions and mailbox routing instead.
 
 The SDK does expose typed task-management RPCs, which the plugin uses directly:
 

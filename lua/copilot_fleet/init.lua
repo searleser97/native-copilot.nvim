@@ -4,13 +4,27 @@ local commands = require('copilot_fleet.commands')
 
 local M = {}
 
-local client_commands = {
-  {
-    name = 'tasks',
-    description = 'View and cancel background agents and shell commands',
-    kind = 'client',
-  },
-}
+local function client_commands(fleets)
+  local choices = {}
+  for _, fleet in ipairs(fleets or {}) do
+    if fleet.valid then
+      table.insert(choices, { name = fleet.id, description = fleet.description })
+    end
+  end
+  return {
+    {
+      name = 'fleet',
+      description = 'Start or recover a configured multi-session Copilot Fleet',
+      kind = 'client',
+      input = { hint = 'fleet id', choices = choices },
+    },
+    {
+      name = 'tasks',
+      description = 'View and cancel background agents and shell commands',
+      kind = 'client',
+    },
+  }
+end
 
 local defaults = {
   node_command = 'node',
@@ -54,6 +68,7 @@ local state = {
   member_order = { 'standard' },
   tasks = {},
   fleets = {},
+  recoverable_fleets = {},
   overview = false,
   configured_buffers = {},
   command_requests = {},
@@ -163,6 +178,13 @@ local function submit_prompt()
   if command then
     if command.name:lower() == 'tasks' then
       M.select_task()
+      return
+    elseif command.name:lower() == 'fleet' then
+      if command.input then
+        M.start_fleet(command.input)
+      else
+        M.select_fleet()
+      end
       return
     end
     send('command.invoke', {
@@ -874,6 +896,24 @@ function M.select_fleet()
       fleet = fleet,
     })
   end
+  for _, run in ipairs(state.recoverable_fleets) do
+    local fleet
+    for _, candidate in ipairs(state.fleets) do
+      if candidate.id == run.fleetId then fleet = candidate break end
+    end
+    if fleet then
+      table.insert(entries, {
+        display = ('Recover %s · %s · %d sessions'):format(
+          fleet.name,
+          run.status,
+          #(run.members or {})
+        ),
+        ordinal = table.concat({ 'recover', fleet.name, run.startedAt or '', run.status or '' }, ' '),
+        kind = 'recover',
+        run = run,
+      })
+    end
+  end
   picker('Copilot Fleets', entries, function(item)
     if item.kind == 'stop' then
       buffers.reset()
@@ -885,6 +925,10 @@ function M.select_fleet()
       send('fleet.stop')
       return
     end
+    if item.kind == 'recover' then
+      send('fleet.resume', { runId = item.run.id })
+      return
+    end
     if not item.fleet.valid then
       local diagnostics = {}
       for _, issue in ipairs(item.fleet.issues or {}) do
@@ -893,13 +937,25 @@ function M.select_fleet()
       notify(table.concat(diagnostics, '\n'), vim.log.levels.ERROR)
       return
     end
-    buffers.reset()
-    state.configured_buffers = {}
-    state.tasks = {}
-    state.member_order = {}
-    state.selected = 'standard'
     send('fleet.start', { fleetId = item.fleet.id })
   end)
+end
+
+function M.start_fleet(fleet_id)
+  if not start_host() then return end
+  local selected
+  for _, fleet in ipairs(state.fleets) do
+    if fleet.id == fleet_id then selected = fleet break end
+  end
+  if not selected then
+    notify(('Unknown Fleet: %s'):format(fleet_id), vim.log.levels.ERROR)
+    return
+  end
+  if not selected.valid then
+    notify(('Fleet %s is invalid.'):format(fleet_id), vim.log.levels.ERROR)
+    return
+  end
+  send('fleet.start', { fleetId = fleet_id })
 end
 
 local function event_member(message)
@@ -921,10 +977,11 @@ function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
     state.fleets = payload.fleets or {}
+    state.recoverable_fleets = payload.recoverableFleets or {}
     return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
-    local available = commands.merge(payload.commands or {}, client_commands)
+    local available = commands.merge(payload.commands or {}, client_commands(state.fleets))
     state.command_requests[target] = nil
     commands.set_catalog(target, available)
     if payload.purpose ~= 'cache' then show_commands(target, available) end
@@ -1069,8 +1126,52 @@ function M._on_event(message)
       detail
     )
     return
+  elseif message.type == 'session.recreated' then
+    buffers.append_activity_block(
+      event_member(message),
+      'Session recovery',
+      payload.message or 'Empty session recreated'
+    )
+    return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
     notify(payload.message or 'Copilot Fleet request failed.', vim.log.levels.ERROR)
+    return
+  elseif message.type == 'fleet.requested' then
+    buffers.append_activity_block(
+      'standard',
+      'Fleet requested',
+      ('%s will start when the current turn becomes idle.'):format(payload.fleetId or 'Fleet')
+    )
+    return
+  elseif message.type == 'fleet.loading' then
+    commands.reset_catalogs()
+    state.command_requests = {}
+    buffers.reset()
+    state.configured_buffers = {}
+    state.tasks = {}
+    state.mode = 'fleet-loading'
+    state.active_fleet = payload.fleetId
+    state.member_order = {}
+    local connecting = {}
+    for _, member_id in ipairs(payload.connectingMembers or {}) do connecting[member_id] = true end
+    for _, member_info in ipairs(payload.members or {}) do
+      table.insert(state.member_order, member_info.id)
+      ensure_member(member_info.id, member_info.displayName)
+      buffers.set_state(member_info.id, connecting[member_info.id] and 'loading' or 'standby')
+    end
+    state.selected = payload.entryMember or state.member_order[1]
+    if state.selected then
+      buffers.append_activity_block(
+        state.selected,
+        payload.recovered and 'Recovering Fleet' or 'Starting Fleet',
+        ('Connecting %d of %d configured members...'):format(
+          #(payload.connectingMembers or {}),
+          #state.member_order
+        )
+      )
+    end
+    if is_ui_open() and state.selected then M.show_member(state.selected) end
+    render_task_buffer()
     return
   elseif message.type == 'mode.changed' then
     commands.reset_catalogs()
@@ -1083,6 +1184,7 @@ function M._on_event(message)
       state.member_order = { 'standard' }
       state.selected = 'standard'
       ensure_member('standard', payload.displayName or 'Copilot')
+      if protocol.is_running() then send('hello') end
     elseif payload.mode == 'fleet' then
       state.member_order = {}
       for _, member_info in ipairs(payload.members or {}) do

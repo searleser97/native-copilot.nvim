@@ -575,6 +575,7 @@ export class CopilotRuntime {
     memberId: string,
     sessionId: string,
     config: SessionConfig,
+    resumeExisting = false,
   ): Promise<LiveSession> {
     const existing = this.live.get(memberId);
     if (existing) {
@@ -587,8 +588,24 @@ export class CopilotRuntime {
     );
     const client = await this.ensureClient();
     let session: CopilotSession;
-    if (this.knownSessionIds.has(sessionId)) {
-      session = await client.resumeSession(sessionId, { ...config, suppressResumeEvent: true });
+    if (resumeExisting || this.knownSessionIds.has(sessionId)) {
+      try {
+        session = await client.resumeSession(sessionId, { ...config, suppressResumeEvent: true });
+        this.knownSessionIds.add(sessionId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const missing = message.includes("Session not found:");
+        if (!resumeExisting || !missing || this.db.hasConversationActivity(runId, memberId)) {
+          throw error;
+        }
+        session = await client.createSession({ ...config, sessionId });
+        this.knownSessionIds.add(sessionId);
+        this.emit(
+          "session.recreated",
+          { message: "The previous session had no conversation and was recreated." },
+          { runId, memberId, target: "activity", done: true },
+        );
+      }
     } else {
       session = await client.createSession({ ...config, sessionId });
       this.knownSessionIds.add(sessionId);
@@ -822,7 +839,7 @@ export class CopilotRuntime {
     }
     await this.stopActive("Switching to Standard Copilot");
     const runId = randomUUID();
-    this.db.createRun(runId, "standard", null, this.workspace);
+    this.db.createRun(runId, "standard", null, this.workspace, process.pid);
     this.active = { kind: "standard", runId };
     try {
       await this.connectSession(
@@ -850,8 +867,16 @@ export class CopilotRuntime {
     }
     await this.stopActive(`Switching to fleet ${fleetId}`);
     const runId = randomUUID();
-    this.db.createRun(runId, "fleet", fleetId, this.workspace);
+    this.db.createRun(runId, "fleet", fleetId, this.workspace, process.pid);
     this.active = { kind: "fleet", runId, fleet: validated.fleet };
+    this.emitFleetLoading(
+      runId,
+      validated.fleet,
+      false,
+      [...validated.fleet.members.values()]
+        .filter((member) => member.autoStart)
+        .map((member) => member.id),
+    );
     const started: LiveSession[] = [];
     try {
       for (const member of validated.fleet.members.values()) {
@@ -861,21 +886,7 @@ export class CopilotRuntime {
       }
       this.emit(
         "mode.changed",
-        {
-          mode: "fleet",
-          fleetId,
-          name: validated.fleet.name,
-          entryMember: validated.fleet.entryMember,
-          coordinatorMember: validated.fleet.coordinatorMember,
-          members: [...validated.fleet.members.values()].map((member) => ({
-            id: member.id,
-            displayName: member.displayName,
-            description: member.description,
-            recipients: [...member.recipients],
-            canBroadcast: member.canBroadcast,
-            ui: member.ui,
-          })),
-        },
+        this.fleetModePayload(validated.fleet, false),
         { runId },
       );
     } catch (error) {
@@ -883,8 +894,123 @@ export class CopilotRuntime {
       this.live.clear();
       this.db.finishRun(runId, "interrupted", "Fleet startup failed");
       this.active = undefined;
+      await this.openStandard();
       throw error;
     }
+  }
+
+  recoverableFleetRuns(): Array<Record<string, unknown>> {
+    return this.db
+      .resumableFleetRuns(this.workspace)
+      .filter((run) => {
+        const validation = validateFleet(this.config, run.fleetId, this.workspace);
+        return validation.valid;
+      })
+      .map((run) => ({
+        id: run.id,
+        fleetId: run.fleetId,
+        status: run.status,
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        members: run.sessions.map((session) => session.memberId),
+      }));
+  }
+
+  async resumeFleet(runId: string): Promise<void> {
+    const stored = this.db.fleetRun(runId, this.workspace);
+    if (!stored) {
+      throw new Error(`Fleet run "${runId}" was not found for this workspace.`);
+    }
+    if (stored.status === "active") {
+      throw new Error(`Fleet run "${runId}" is owned by another active Neovim instance.`);
+    }
+    const validated = validateFleet(this.config, stored.fleetId, this.workspace);
+    if (!validated.valid || !validated.fleet) {
+      throw new Error(`Fleet "${stored.fleetId}" can no longer be resumed with this configuration.`);
+    }
+    await this.stopActive(`Recovering fleet ${stored.fleetId}`);
+    this.db.resumeRun(runId, process.pid);
+    this.active = { kind: "fleet", runId, fleet: validated.fleet };
+    const started: LiveSession[] = [];
+    const storedSessions = new Map(
+      stored.sessions.map((session) => [session.memberId, session.sessionId]),
+    );
+    this.emitFleetLoading(
+      runId,
+      validated.fleet,
+      true,
+      [...validated.fleet.members.values()]
+        .filter((member) => storedSessions.has(member.id) || member.autoStart)
+        .map((member) => member.id),
+    );
+    try {
+      for (const member of validated.fleet.members.values()) {
+        const sessionId = storedSessions.get(member.id);
+        if (sessionId) {
+          started.push(
+            await this.connectSession(
+              runId,
+              member.id,
+              sessionId,
+              this.memberConfig(member, [
+                this.createSendMessageTool(validated.fleet, member),
+              ]),
+              true,
+            ),
+          );
+        } else if (member.autoStart) {
+          started.push(await this.ensureFleetMember(member.id));
+        }
+      }
+      this.emit("mode.changed", this.fleetModePayload(validated.fleet, true), { runId });
+      for (const member of started) {
+        queueMicrotask(() => void this.drainMailbox(member.memberId));
+      }
+    } catch (error) {
+      await Promise.allSettled(started.map((live) => live.session.disconnect()));
+      this.live.clear();
+      this.db.finishRun(runId, "interrupted", "Fleet recovery failed");
+      this.active = undefined;
+      await this.openStandard();
+      throw error;
+    }
+  }
+
+  private fleetModePayload(fleet: ResolvedFleet, recovered: boolean): Record<string, unknown> {
+    return {
+      mode: "fleet",
+      fleetId: fleet.id,
+      name: fleet.name,
+      recovered,
+      entryMember: fleet.entryMember,
+      coordinatorMember: fleet.coordinatorMember,
+      members: [...fleet.members.values()].map((member) => ({
+        id: member.id,
+        displayName: member.displayName,
+        description: member.description,
+        recipients: [...member.recipients],
+        canBroadcast: member.canBroadcast,
+        autoStart: member.autoStart,
+        ui: member.ui,
+      })),
+    };
+  }
+
+  private emitFleetLoading(
+    runId: string,
+    fleet: ResolvedFleet,
+    recovered: boolean,
+    connectingMembers: string[],
+  ): void {
+    this.emit(
+      "fleet.loading",
+      {
+        ...this.fleetModePayload(fleet, recovered),
+        mode: "fleet-loading",
+        connectingMembers,
+      },
+      { runId, target: "status", done: false },
+    );
   }
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
@@ -915,7 +1041,7 @@ export class CopilotRuntime {
     if (live.busy) {
       return;
     }
-    const pending = this.db.claimMessages(memberId);
+    const pending = this.db.claimMessages(this.active.runId, memberId);
     for (const message of pending) {
       if (message.kind === "user") {
         this.db.completeMessage(message.id);

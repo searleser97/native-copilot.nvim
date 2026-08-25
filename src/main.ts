@@ -2,7 +2,7 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { argv, env, exit, ppid, stderr } from "node:process";
+import { argv, env, exit, kill, ppid, stderr } from "node:process";
 import { fleetSummaries, loadConfig } from "./config.js";
 import { FleetDatabase } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
@@ -69,7 +69,17 @@ async function main(): Promise<void> {
   const options = hostOptions();
   const config = await loadConfig(options.configPath, options.workspace);
   const db = new FleetDatabase(options.databasePath);
-  const interruptedRuns = db.markInterruptedWork("Host restarted after an interrupted Neovim session");
+  const interruptedRuns = db.markInterruptedWork(
+    "Owning Neovim host is no longer running",
+    (ownerPid) => {
+      try {
+        kill(ownerPid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  );
   let runtime: CopilotRuntime;
   let protocol: Protocol;
   let closing: Promise<void> | undefined;
@@ -111,6 +121,7 @@ async function main(): Promise<void> {
               displayName: config.standard.displayName,
             },
             status: runtime.status(),
+            recoverableFleets: runtime.recoverableFleetRuns(),
           },
           { requestId: command.id, done: true },
         );
@@ -162,6 +173,13 @@ async function main(): Promise<void> {
         return;
       case "fleet.start":
         await runtime.startFleet(requiredString(payload, "fleetId", command.type));
+        protocol.send("request.complete", { type: command.type }, {
+          requestId: command.id,
+          done: true,
+        });
+        return;
+      case "fleet.resume":
+        await runtime.resumeFleet(requiredString(payload, "runId", command.type));
         protocol.send("request.complete", { type: command.type }, {
           requestId: command.id,
           done: true,

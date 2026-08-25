@@ -26,6 +26,15 @@ export interface StateSnapshot {
   events: Array<Record<string, unknown>>;
 }
 
+export interface StoredFleetRun {
+  id: string;
+  fleetId: string;
+  status: RunStatus;
+  startedAt: string;
+  endedAt: string | null;
+  sessions: Array<{ memberId: string; sessionId: string; state: string; lastActiveAt: string }>;
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -49,7 +58,7 @@ export class FleetDatabase {
         version INTEGER NOT NULL
       );
       INSERT INTO schema_meta(version)
-      SELECT 2
+      SELECT 3
       WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
 
       CREATE TABLE IF NOT EXISTS runs (
@@ -60,7 +69,8 @@ export class FleetDatabase {
         status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
         started_at TEXT NOT NULL,
         ended_at TEXT,
-        interruption_reason TEXT
+        interruption_reason TEXT,
+        owner_pid INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS member_sessions (
@@ -138,6 +148,14 @@ export class FleetDatabase {
         COMMIT;
       `);
     }
+    if (schema.version < 3) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE runs ADD COLUMN owner_pid INTEGER;
+        UPDATE schema_meta SET version = 3;
+        COMMIT;
+      `);
+    }
   }
 
   private transaction<T>(operation: () => T): T {
@@ -152,41 +170,115 @@ export class FleetDatabase {
     }
   }
 
-  markInterruptedWork(reason: string): number {
+  markInterruptedWork(reason: string, ownerIsAlive: (pid: number) => boolean): number {
     const timestamp = now();
-    const result = this.db
-      .prepare(
-        `UPDATE runs
-         SET status = 'interrupted', ended_at = ?, interruption_reason = ?
-         WHERE status = 'active'`,
-      )
-      .run(timestamp, reason);
+    const active = this.db
+      .prepare("SELECT id, owner_pid AS ownerPid FROM runs WHERE status = 'active'")
+      .all() as unknown as Array<{ id: string; ownerPid: number | null }>;
+    const staleIds = active
+      .filter((run) => run.ownerPid === null || !ownerIsAlive(run.ownerPid))
+      .map((run) => run.id);
+    const interrupt = this.db.prepare(
+      `UPDATE runs
+       SET status = 'interrupted', ended_at = ?, interruption_reason = ?
+       WHERE id = ? AND status = 'active'`,
+    );
+    for (const id of staleIds) {
+      interrupt.run(timestamp, reason, id);
+    }
+    if (staleIds.length === 0) {
+      return 0;
+    }
+    const placeholders = staleIds.map(() => "?").join(", ");
     this.db
       .prepare(
         `UPDATE messages
          SET status = 'pending', updated_at = ?
          WHERE status = 'delivering'
-           AND run_id IN (SELECT id FROM runs WHERE status = 'interrupted')`,
+           AND run_id IN (${placeholders})`,
       )
-      .run(timestamp);
-    this.db.exec(
-      `DELETE FROM delivery_leases
-       WHERE message_id IN (
-         SELECT messages.id FROM messages
-         JOIN runs ON runs.id = messages.run_id
-         WHERE runs.status = 'interrupted'
-       )`,
-    );
-    return Number(result.changes);
-  }
-
-  createRun(id: string, mode: RunMode, fleetId: string | null, workspace: string): void {
+      .run(timestamp, ...staleIds);
     this.db
       .prepare(
-        `INSERT INTO runs(id, mode, fleet_id, workspace, status, started_at)
-         VALUES (?, ?, ?, ?, 'active', ?)`,
+      `DELETE FROM delivery_leases
+       WHERE message_id IN (SELECT id FROM messages WHERE run_id IN (${placeholders}))`,
       )
-      .run(id, mode, fleetId, workspace, now());
+      .run(...staleIds);
+    return staleIds.length;
+  }
+
+  createRun(
+    id: string,
+    mode: RunMode,
+    fleetId: string | null,
+    workspace: string,
+    ownerPid: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO runs(id, mode, fleet_id, workspace, status, started_at, owner_pid)
+         VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+      )
+      .run(id, mode, fleetId, workspace, now(), ownerPid);
+  }
+
+  resumableFleetRuns(workspace: string, limit = 20): StoredFleetRun[] {
+    const runs = this.db
+      .prepare(
+        `SELECT id, fleet_id AS fleetId, status, started_at AS startedAt, ended_at AS endedAt
+         FROM runs
+         WHERE mode = 'fleet' AND workspace = ? AND fleet_id IS NOT NULL
+           AND status != 'active'
+           AND EXISTS (SELECT 1 FROM member_sessions WHERE run_id = runs.id)
+         ORDER BY started_at DESC
+         LIMIT ?`,
+      )
+      .all(workspace, limit) as unknown as Array<Omit<StoredFleetRun, "sessions">>;
+    const sessions = this.db.prepare(
+      `SELECT member_id AS memberId, session_id AS sessionId, state,
+              last_active_at AS lastActiveAt
+       FROM member_sessions
+       WHERE run_id = ?
+       ORDER BY last_active_at DESC`,
+    );
+    return runs.map((run) => ({
+      ...run,
+      sessions: sessions.all(run.id) as unknown as StoredFleetRun["sessions"],
+    }));
+  }
+
+  fleetRun(id: string, workspace: string): StoredFleetRun | undefined {
+    const run = this.db
+      .prepare(
+        `SELECT id, fleet_id AS fleetId, status, started_at AS startedAt, ended_at AS endedAt
+         FROM runs
+         WHERE id = ? AND mode = 'fleet' AND workspace = ? AND fleet_id IS NOT NULL`,
+      )
+      .get(id, workspace) as unknown as Omit<StoredFleetRun, "sessions"> | undefined;
+    if (!run) {
+      return undefined;
+    }
+    const sessions = this.db
+      .prepare(
+        `SELECT member_id AS memberId, session_id AS sessionId, state,
+                last_active_at AS lastActiveAt
+         FROM member_sessions WHERE run_id = ?`,
+      )
+      .all(id) as unknown as StoredFleetRun["sessions"];
+    return { ...run, sessions };
+  }
+
+  resumeRun(id: string, ownerPid: number): void {
+    const result = this.db
+      .prepare(
+        `UPDATE runs
+         SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
+         WHERE id = ? AND mode = 'fleet' AND status != 'active'`,
+      )
+      .run(ownerPid, id);
+    if (result.changes !== 1) {
+      throw new Error(`Fleet run "${id}" could not be resumed.`);
+    }
   }
 
   finishRun(id: string, status: Exclude<RunStatus, "active">, reason?: string): void {
@@ -210,6 +302,22 @@ export class FleetDatabase {
            last_active_at = excluded.last_active_at`,
       )
       .run(runId, memberId, sessionId, state, now());
+  }
+
+  hasConversationActivity(runId: string, memberId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT EXISTS(
+           SELECT 1 FROM messages
+           WHERE run_id = ? AND target = ?
+         ) OR EXISTS(
+           SELECT 1 FROM events
+           WHERE run_id = ? AND member_id = ?
+             AND type IN ('user.message', 'assistant.message', 'assistant.reasoning')
+         ) AS present`,
+      )
+      .get(runId, memberId, runId, memberId) as { present: number };
+    return row.present === 1;
   }
 
   nextSequence(runId: string, target: string): number {
@@ -255,7 +363,7 @@ export class FleetDatabase {
     });
   }
 
-  claimMessages(target: string, limit = 20, leaseMs = 60_000): StoredMessage[] {
+  claimMessages(runId: string, target: string, limit = 20, leaseMs = 60_000): StoredMessage[] {
     return this.transaction(() => {
       const timestamp = now();
       const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
@@ -275,11 +383,11 @@ export class FleetDatabase {
              id, run_id AS runId, source, target, kind, content, status, sequence,
              created_at AS createdAt, updated_at AS updatedAt
            FROM messages
-           WHERE target = ? AND status = 'pending'
+           WHERE run_id = ? AND target = ? AND status = 'pending'
            ORDER BY created_at, sequence
            LIMIT ?`,
         )
-        .all(target, limit) as unknown as StoredMessage[];
+        .all(runId, target, limit) as unknown as StoredMessage[];
 
       const update = this.db.prepare(
         `UPDATE messages SET status = 'delivering', updated_at = ? WHERE id = ?`,

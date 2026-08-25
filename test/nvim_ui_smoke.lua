@@ -23,6 +23,35 @@ assert(
 )
 fleet._on_event({
   v = 1,
+  type = 'fleet.loading',
+  payload = {
+    mode = 'fleet-loading',
+    fleetId = 'ui-smoke',
+    entryMember = 'coordinator',
+    recovered = false,
+    connectingMembers = { 'coordinator', 'planner', 'implementer', 'reviewer' },
+    members = {
+      { id = 'coordinator', displayName = 'Coordinator' },
+      { id = 'planner', displayName = 'Planner' },
+      { id = 'implementer', displayName = 'Implementer' },
+      { id = 'reviewer', displayName = 'Reviewer' },
+      { id = 'observer', displayName = 'Observer' },
+    },
+  },
+})
+local loading_entry = require('copilot_fleet.buffers').get_member('coordinator')
+assert(loading_entry.state == 'loading', 'Fleet member did not enter loading state')
+assert(
+  require('copilot_fleet.buffers').get_member('observer').state == 'standby',
+  'lazy Fleet member did not remain in standby'
+)
+local loading_text = table.concat(
+  vim.api.nvim_buf_get_lines(loading_entry.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(loading_text:find('Starting Fleet', 1, true), 'Fleet startup activity is missing')
+fleet._on_event({
+  v = 1,
   type = 'mode.changed',
   payload = {
     mode = 'fleet',
@@ -54,6 +83,7 @@ fleet._on_event({
 })
 local command_catalog = require('copilot_fleet.commands').catalog('coordinator')
 assert(require('copilot_fleet.commands').find(command_catalog, 'tasks').kind == 'client')
+assert(require('copilot_fleet.commands').find(command_catalog, 'fleet').kind == 'client')
 fleet._on_event({
   v = 1,
   id = 'tasks-changed',

@@ -37,6 +37,13 @@ local merged_catalog = commands.merge(command_catalog, {
 assert(#merged_catalog == 2)
 assert(commands.find(merged_catalog, 'tasks').kind == 'client')
 assert(#commands.merge(merged_catalog, { { name = 'tasks' } }) == 2)
+local overridden_catalog = commands.merge({
+  { name = 'fleet', description = 'SDK Fleet', kind = 'builtin' },
+}, {
+  { name = 'fleet', description = 'Configured Fleet', kind = 'client' },
+})
+assert(#overridden_catalog == 1)
+assert(commands.find(overridden_catalog, 'fleet').kind == 'client')
 assert(commands.command_matches(command_catalog, 'aut')[1].word == 'autopilot')
 assert(commands.command_matches(command_catalog, 'au')[2].word == 'auto')
 assert(commands.choice_matches(command_catalog[1], 'o')[1].word == 'on')

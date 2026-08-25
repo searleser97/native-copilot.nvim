@@ -28,8 +28,8 @@ function M.find(available, name)
 end
 
 function M.merge(available, additions)
-  local result = vim.deepcopy(available or {})
-  for _, command in ipairs(additions or {}) do
+  local result = vim.deepcopy(additions or {})
+  for _, command in ipairs(available or {}) do
     if not M.find(result, command.name) then table.insert(result, vim.deepcopy(command)) end
   end
   return result
