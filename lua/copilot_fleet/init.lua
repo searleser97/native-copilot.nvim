@@ -4,12 +4,23 @@ local commands = require('copilot_fleet.commands')
 
 local M = {}
 
+local client_commands = {
+  {
+    name = 'tasks',
+    description = 'View and cancel background agents and shell commands',
+    kind = 'client',
+  },
+}
+
 local defaults = {
   node_command = 'node',
+  runtime_command = vim.env.NVIM_COPILOT_CMD or vim.env.COPILOT_CLI_CMD,
   config_path = vim.fn.stdpath('config') .. '/copilot/fleets.json',
   database_path = vim.fn.stdpath('data') .. '/copilot-fleet/state.sqlite',
   workspace = nil,
   prompt_height = 8,
+  task_height = 5,
+  task_detail_height = 12,
   overview_max_agents = 4,
   render_debounce_ms = 200,
   stream_flush_ms = 80,
@@ -31,15 +42,23 @@ local state = {
   main_win = nil,
   prompt_win = nil,
   prompt_buf = nil,
+  task_win = nil,
+  task_buf = nil,
+  task_rows = {},
+  task_detail = nil,
+  task_progress = nil,
   status_buf = nil,
   selected = 'standard',
   mode = 'stopped',
   active_fleet = nil,
   member_order = { 'standard' },
+  tasks = {},
   fleets = {},
   overview = false,
   configured_buffers = {},
   command_requests = {},
+  permission_queue = {},
+  permission_prompt_open = false,
 }
 
 local function notify(message, level)
@@ -142,6 +161,10 @@ local function submit_prompt()
   set_prompt_lines({ '' })
   local command = commands.parse(content)
   if command then
+    if command.name:lower() == 'tasks' then
+      M.select_task()
+      return
+    end
     send('command.invoke', {
       target = state.selected,
       name = command.name,
@@ -201,6 +224,209 @@ local function ensure_prompt_buffer()
     })
   end
   state.prompt_buf = buf
+  return buf
+end
+
+local task_symbols = {
+  running = '○',
+  idle = '○',
+  completed = '✓',
+  failed = '✗',
+  cancelled = '–',
+}
+
+local function task_description(task)
+  local detail = task.description or task.command or task.prompt or task.id
+  return tostring(detail):gsub('[\r\n]+', ' ')
+end
+
+local function task_at_cursor()
+  if not state.task_buf or vim.api.nvim_get_current_buf() ~= state.task_buf then return nil end
+  if state.task_detail then return state.task_detail end
+  return state.task_rows[vim.api.nvim_win_get_cursor(0)[1]]
+end
+
+local function task_status_label(tasks)
+  local counts = { active = 0, completed = 0, failed = 0, cancelled = 0 }
+  for _, task in ipairs(tasks) do
+    if task.status == 'running' or task.status == 'idle' then
+      counts.active = counts.active + 1
+    elseif counts[task.status] ~= nil then
+      counts[task.status] = counts[task.status] + 1
+    end
+  end
+  local parts = {}
+  if counts.active > 0 then table.insert(parts, ('○ %d active'):format(counts.active)) end
+  if counts.completed > 0 then table.insert(parts, ('✓ %d done'):format(counts.completed)) end
+  if counts.failed > 0 then table.insert(parts, ('✗ %d failed'):format(counts.failed)) end
+  if counts.cancelled > 0 then table.insert(parts, ('– %d cancelled'):format(counts.cancelled)) end
+  return #parts > 0 and table.concat(parts, '  ') or 'idle'
+end
+
+local function set_task_lines(lines)
+  if not state.task_buf or not vim.api.nvim_buf_is_valid(state.task_buf) then return end
+  vim.bo[state.task_buf].readonly = false
+  vim.bo[state.task_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.task_buf, 0, -1, false, lines)
+  vim.bo[state.task_buf].modifiable = false
+  vim.bo[state.task_buf].readonly = true
+end
+
+local function render_task_buffer()
+  if not state.task_buf or not vim.api.nvim_buf_is_valid(state.task_buf) then return end
+  local tasks = state.tasks[state.selected] or {}
+  state.task_rows = {}
+  if state.task_detail then
+    local task = state.task_detail
+    local progress = state.task_progress
+    local lines = {
+      ('%s [%s] %s'):format(
+        task_symbols[task.status] or '?',
+        task.type or 'task',
+        task_description(task)
+      ),
+      ('Status: %s'):format(task.status or 'unknown'),
+      ('ID: %s'):format(task.id or 'unknown'),
+      '',
+    }
+    if not progress then
+      table.insert(lines, 'Loading task progress...')
+    elseif progress.type == 'agent' then
+      if progress.latestIntent then
+        table.insert(lines, 'Intent: ' .. progress.latestIntent)
+        table.insert(lines, '')
+      end
+      for _, activity in ipairs(progress.recentActivity or {}) do
+        table.insert(lines, activity.message or vim.inspect(activity))
+      end
+    elseif progress.type == 'shell' then
+      if progress.pid then table.insert(lines, ('PID: %s'):format(progress.pid)) end
+      if progress.recentOutput and progress.recentOutput ~= '' then
+        vim.list_extend(lines, vim.split(progress.recentOutput, '\n', { plain = true }))
+      end
+    else
+      table.insert(lines, 'No progress details are available.')
+    end
+    set_task_lines(lines)
+    for _, win in ipairs(vim.fn.win_findbuf(state.task_buf)) do
+      vim.wo[win].winbar = (' Task details · %s  |  <BS>/q back  |  dd cancel '):format(
+        task.status or 'unknown'
+      )
+      vim.api.nvim_win_set_height(win, options.task_detail_height)
+    end
+    return
+  end
+
+  local lines = {}
+  for row, task in ipairs(tasks) do
+    lines[row] = ('%s [%s] %s'):format(
+      task_symbols[task.status] or '?',
+      task.type or 'task',
+      task_description(task)
+    )
+    state.task_rows[row] = task
+  end
+  if #lines == 0 then lines = { 'No tracked tasks.' } end
+  set_task_lines(lines)
+  local entry = buffers.get_member(state.selected)
+  local target = entry and entry.display_name or state.selected
+  local member_state = entry and entry.state or 'unknown'
+  for _, win in ipairs(vim.fn.win_findbuf(state.task_buf)) do
+    vim.wo[win].winbar = (' Tasks · %s · %s · %s  |  <Enter> details  |  dd cancel '):format(
+      target,
+      member_state,
+      task_status_label(tasks)
+    )
+    vim.api.nvim_win_set_height(win, options.task_height)
+    vim.api.nvim_win_set_cursor(win, { #lines, 0 })
+  end
+end
+
+local function merge_tasks(member_id, incoming)
+  local current = state.tasks[member_id] or {}
+  local by_id = {}
+  for _, task in ipairs(current) do by_id[task.id] = task end
+  for _, task in ipairs(incoming or {}) do
+    if by_id[task.id] then
+      local updated = vim.tbl_deep_extend('force', by_id[task.id], task)
+      for index, candidate in ipairs(current) do
+        if candidate.id == task.id then
+          current[index] = updated
+          break
+        end
+      end
+      by_id[task.id] = updated
+    else
+      table.insert(current, task)
+      by_id[task.id] = task
+    end
+  end
+  state.tasks[member_id] = current
+  if state.task_detail and state.task_detail.id and by_id[state.task_detail.id] then
+    state.task_detail = by_id[state.task_detail.id]
+  end
+end
+
+local function cancel_cursor_task()
+  local task = task_at_cursor()
+  if not task then return end
+  if task.status ~= 'running' and task.status ~= 'idle' then
+    notify(('Task %s is already %s.'):format(task.id or '', task.status or 'finished'))
+    return
+  end
+  send('tasks.cancel', { target = state.selected, taskId = task.id })
+end
+
+local function show_cursor_task()
+  local task = task_at_cursor()
+  if not task then return end
+  state.task_detail = task
+  state.task_progress = nil
+  render_task_buffer()
+  send('tasks.progress', { target = state.selected, taskId = task.id })
+end
+
+local function show_task_list()
+  if not state.task_detail then return end
+  state.task_detail = nil
+  state.task_progress = nil
+  render_task_buffer()
+end
+
+local function ensure_task_buffer()
+  if state.task_buf and vim.api.nvim_buf_is_valid(state.task_buf) then return state.task_buf end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(buf, 'copilot-fleet://tasks')
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'copilot-fleet-tasks'
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].readonly = true
+  vim.keymap.set('n', 'dd', cancel_cursor_task, {
+    buffer = buf,
+    desc = 'Cancel Copilot task under cursor',
+  })
+  vim.keymap.set('n', '<CR>', show_cursor_task, {
+    buffer = buf,
+    desc = 'Show Copilot task details',
+  })
+  vim.keymap.set('n', '<BS>', show_task_list, {
+    buffer = buf,
+    desc = 'Return to Copilot task list',
+  })
+  vim.keymap.set('n', 'q', show_task_list, {
+    buffer = buf,
+    desc = 'Return to Copilot task list',
+  })
+  vim.keymap.set('n', 'r', function()
+    send('tasks.list', { target = state.selected, purpose = 'refresh' })
+  end, {
+    buffer = buf,
+    desc = 'Refresh Copilot tasks',
+  })
+  state.task_buf = buf
+  render_task_buffer()
   return buf
 end
 
@@ -268,6 +494,8 @@ local function close_non_prompt_windows()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(state.tab)) do
     if vim.api.nvim_win_get_buf(win) == state.prompt_buf then
       prompt_win = win
+    elseif win == state.task_win then
+      -- Keep the task strip between the main view and prompt.
     elseif not keep then
       keep = win
     end
@@ -278,7 +506,12 @@ local function close_non_prompt_windows()
     keep = vim.api.nvim_get_current_win()
   end
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(state.tab)) do
-    if win ~= keep and win ~= prompt_win and vim.api.nvim_win_is_valid(win) then
+    if
+      win ~= keep
+      and win ~= prompt_win
+      and win ~= state.task_win
+      and vim.api.nvim_win_is_valid(win)
+    then
       pcall(vim.api.nvim_win_close, win, true)
     end
   end
@@ -302,6 +535,13 @@ local function ensure_ui()
   vim.api.nvim_win_set_buf(state.prompt_win, ensure_prompt_buffer())
   vim.api.nvim_win_set_height(state.prompt_win, options.prompt_height)
   vim.wo[state.prompt_win].winfixheight = true
+  vim.cmd('aboveleft split')
+  state.task_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(state.task_win, ensure_task_buffer())
+  vim.api.nvim_win_set_height(state.task_win, options.task_height)
+  vim.wo[state.task_win].winfixheight = true
+  vim.wo[state.task_win].cursorline = true
+  render_task_buffer()
   update_prompt_label()
   vim.api.nvim_set_current_win(state.prompt_win)
 end
@@ -311,6 +551,7 @@ local function start_host()
   if not ensure_default_config() then return false end
   return protocol.start({
     node_command = options.node_command,
+    runtime_command = options.runtime_command,
     config_path = options.config_path,
     database_path = options.database_path,
     workspace = current_workspace(),
@@ -331,6 +572,7 @@ function M.close()
   state.tab = nil
   state.main_win = nil
   state.prompt_win = nil
+  state.task_win = nil
   state.overview = false
 end
 
@@ -347,10 +589,13 @@ function M.show_member(member_id, view_id)
   end
   state.overview = false
   state.selected = member_id
+  state.task_detail = nil
+  state.task_progress = nil
   local win = close_non_prompt_windows()
   vim.api.nvim_win_set_buf(win, entry.views[view_id or 'conversation'].buf)
   buffers.mark_read(member_id)
   update_prompt_label()
+  render_task_buffer()
   vim.api.nvim_set_current_win(win)
 end
 
@@ -457,6 +702,57 @@ local function picker(title, entries, choose)
   }):find()
 end
 
+local function permission_detail(request)
+  if request.kind == 'shell' then
+    return request.fullCommandText or table.concat(request.commands or {}, ' ')
+  end
+  return request.path
+    or request.url
+    or request.toolName
+    or request.fileName
+    or request.factoryId
+    or request.kind
+end
+
+local function show_next_permission()
+  if state.permission_prompt_open or #state.permission_queue == 0 then return end
+  state.permission_prompt_open = true
+  local pending = table.remove(state.permission_queue, 1)
+  local request = pending.request or {}
+  local warning = request.managedApprovalRequired and ' (managed approval required)' or ''
+  vim.ui.select({
+    { display = 'Approve once', approved = true },
+    { display = 'Reject', approved = false },
+  }, {
+    prompt = ('Copilot %s permission%s: %s'):format(
+      request.kind or 'tool',
+      warning,
+      tostring(permission_detail(request))
+    ),
+    format_item = function(item) return item.display end,
+  }, function(item)
+    send('permission.respond', {
+      requestId = pending.requestId,
+      approved = item ~= nil and item.approved == true,
+    })
+    state.permission_prompt_open = false
+    vim.schedule(show_next_permission)
+  end)
+end
+
+local function request_permission(payload, member_id)
+  table.insert(state.permission_queue, payload)
+  buffers.append_activity_block(
+    member_id,
+    'Permission',
+    ('Approval required for `%s`: %s'):format(
+      payload.request and payload.request.kind or 'tool',
+      tostring(permission_detail(payload.request or {}))
+    )
+  )
+  show_next_permission()
+end
+
 function M.select_commands()
   if not start_host() then return end
   ensure_ui()
@@ -534,7 +830,13 @@ end
 function M.select_task()
   if not start_host() then return end
   ensure_ui()
-  send('tasks.list', { target = state.selected })
+  state.task_detail = nil
+  state.task_progress = nil
+  render_task_buffer()
+  if state.task_win and vim.api.nvim_win_is_valid(state.task_win) then
+    vim.api.nvim_set_current_win(state.task_win)
+  end
+  send('tasks.list', { target = state.selected, purpose = 'view' })
 end
 
 function M.cancel_background()
@@ -576,6 +878,7 @@ function M.select_fleet()
     if item.kind == 'stop' then
       buffers.reset()
       state.configured_buffers = {}
+      state.tasks = {}
       state.member_order = { 'standard' }
       state.selected = 'standard'
       ensure_member('standard', 'Copilot')
@@ -592,6 +895,7 @@ function M.select_fleet()
     end
     buffers.reset()
     state.configured_buffers = {}
+    state.tasks = {}
     state.member_order = {}
     state.selected = 'standard'
     send('fleet.start', { fleetId = item.fleet.id })
@@ -620,9 +924,10 @@ function M._on_event(message)
     return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
+    local available = commands.merge(payload.commands or {}, client_commands)
     state.command_requests[target] = nil
-    commands.set_catalog(target, payload.commands or {})
-    if payload.purpose ~= 'cache' then show_commands(target, payload.commands or {}) end
+    commands.set_catalog(target, available)
+    if payload.purpose ~= 'cache' then show_commands(target, available) end
     return
   elseif message.type == 'command.result' then
     local member_id = event_member(message)
@@ -652,6 +957,11 @@ function M._on_event(message)
     end
     return
   elseif message.type == 'tasks.list' then
+    if payload.purpose == 'view' or payload.purpose == 'refresh' then
+      merge_tasks(payload.target or event_member(message), payload.tasks or {})
+      render_task_buffer()
+      return
+    end
     local active = {}
     for _, task in ipairs(payload.tasks or {}) do
       if task.status == 'running' or task.status == 'idle' then
@@ -679,6 +989,10 @@ function M._on_event(message)
     return
   elseif message.type == 'tasks.cancelled' then
     if payload.cancelled then
+      for _, task in ipairs(state.tasks[payload.target or event_member(message)] or {}) do
+        if task.id == payload.taskId then task.status = 'cancelled' end
+      end
+      render_task_buffer()
       notify(('Cancelled background task %s.'):format(payload.taskId or ''))
     else
       notify(
@@ -687,8 +1001,73 @@ function M._on_event(message)
       )
     end
     return
+  elseif message.type == 'tasks.changed' then
+    merge_tasks(event_member(message), payload.tasks or {})
+    render_task_buffer()
+    if state.status_buf and vim.api.nvim_buf_is_valid(state.status_buf) then
+      update_status_buffer()
+    end
+    return
+  elseif message.type == 'tasks.progress' then
+    if state.task_detail and state.task_detail.id == payload.taskId then
+      state.task_progress = payload.progress
+      render_task_buffer()
+    end
+    return
+  elseif message.type == 'tasks.error' then
+    buffers.append_activity_block(
+      event_member(message),
+      'Task status error',
+      payload.message or 'Could not refresh task status'
+    )
+    return
   elseif message.type == 'background.cancelled' then
     notify(('Cancelled %d background agent(s).'):format(payload.count or 0))
+    return
+  elseif message.type == 'environment.progress' then
+    local component = payload.component or 'Environment'
+    buffers.set_state(event_member(message), 'loading')
+    render_task_buffer()
+    buffers.append_activity_block(
+      event_member(message),
+      'Loading ' .. component,
+      payload.message or 'Loading...'
+    )
+    return
+  elseif message.type == 'environment.loaded' then
+    local component = payload.component or 'Environment'
+    local items = payload.items or {}
+    local detail = ('%d loaded'):format(#items)
+    if component == 'MCP servers' then
+      local statuses = {}
+      for _, server in ipairs(items) do
+        local status = server.status or 'unknown'
+        statuses[status] = (statuses[status] or 0) + 1
+      end
+      local parts = {}
+      for status, count in pairs(statuses) do
+        table.insert(parts, ('%d %s'):format(count, status))
+      end
+      table.sort(parts)
+      if #parts > 0 then detail = table.concat(parts, ', ') end
+    end
+    buffers.append_activity_block(event_member(message), component, detail)
+    return
+  elseif message.type == 'environment.error' then
+    buffers.append_activity_block(
+      event_member(message),
+      (payload.component or 'Environment') .. ' error',
+      payload.message or 'Loading failed'
+    )
+    return
+  elseif message.type == 'environment.status' then
+    local detail = payload.status or 'unknown'
+    if payload.error and payload.error ~= '' then detail = detail .. ': ' .. payload.error end
+    buffers.append_activity_block(
+      event_member(message),
+      payload.component or 'Environment',
+      detail
+    )
     return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
     notify(payload.message or 'Copilot Fleet request failed.', vim.log.levels.ERROR)
@@ -698,6 +1077,8 @@ function M._on_event(message)
     state.command_requests = {}
     state.mode = payload.mode or 'stopped'
     state.active_fleet = payload.fleetId
+    state.task_detail = nil
+    state.task_progress = nil
     if payload.mode == 'standard' then
       state.member_order = { 'standard' }
       state.selected = 'standard'
@@ -714,6 +1095,7 @@ function M._on_event(message)
       M.show_member(state.selected)
       focus_prompt()
     end
+    render_task_buffer()
     return
   end
 
@@ -744,11 +1126,14 @@ function M._on_event(message)
     local data = payload.data or {}
     local detail = data.toolName or data.intent or data.message or vim.inspect(data)
     buffers.append_activity_block(member_id, event_type, tostring(detail))
+  elseif message.type == 'permission.requested' then
+    request_permission(payload, member_id)
   elseif message.type == 'member.error' then
     buffers.append_activity_block(member_id, 'Error', payload.message or vim.inspect(payload))
     buffers.set_state(member_id, 'error')
   elseif message.type == 'member.state' then
     buffers.set_state(member_id, payload.state or 'unknown')
+    render_task_buffer()
   elseif message.type == 'mailbox.queued' or message.type == 'mailbox.delivered' then
     buffers.append_block(
       member_id,

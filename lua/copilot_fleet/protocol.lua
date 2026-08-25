@@ -88,6 +88,9 @@ function M.start(opts, on_event)
   }
   state.job = vim.fn.jobstart(command, {
     cwd = opts.workspace or vim.uv.cwd(),
+    env = opts.runtime_command and {
+      COPILOT_FLEET_RUNTIME_COMMAND = opts.runtime_command,
+    } or nil,
     stdout_buffered = false,
     stderr_buffered = false,
     on_stdout = on_stdout,

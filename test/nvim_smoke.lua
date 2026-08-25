@@ -31,6 +31,12 @@ local command_catalog = {
   },
 }
 assert(commands.find(command_catalog, 'AUTO').name == 'autopilot')
+local merged_catalog = commands.merge(command_catalog, {
+  { name = 'tasks', description = 'Manage tasks', kind = 'client' },
+})
+assert(#merged_catalog == 2)
+assert(commands.find(merged_catalog, 'tasks').kind == 'client')
+assert(#commands.merge(merged_catalog, { { name = 'tasks' } }) == 2)
 assert(commands.command_matches(command_catalog, 'aut')[1].word == 'autopilot')
 assert(commands.command_matches(command_catalog, 'au')[2].word == 'auto')
 assert(commands.choice_matches(command_catalog[1], 'o')[1].word == 'on')
@@ -87,6 +93,8 @@ buffers.complete_activity('reviewer', 'reasoning-1', 'Checking the implementatio
 buffers.append_conversation_delta('reviewer', 'message-1', 'The implementation ')
 buffers.append_conversation_delta('reviewer', 'message-1', 'looks correct.')
 buffers.complete_conversation('reviewer', 'message-1', 'The implementation looks correct.')
+buffers.append_activity_delta('reviewer', 'reasoning-late', 'Late but ')
+buffers.complete_activity('reviewer', 'reasoning-late', 'Late but ordered summary.')
 vim.wait(250)
 
 local text = table.concat(
@@ -99,6 +107,9 @@ assert(text:find('> **Reasoning summary**', 1, true))
 assert(text:find('> Checking the implementation.', 1, true))
 assert(text:find('## Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
+local late_reasoning = text:find('Late but ordered summary.', 1, true)
+local assistant_heading = text:find('## Reviewer', 1, true)
+assert(late_reasoning and assistant_heading and late_reasoning < assistant_heading)
 local _, count = text:gsub('The implementation looks correct%.', '')
 assert(count == 1, 'stream final message was duplicated')
 local _, reasoning_count = text:gsub('Checking the implementation%.', '')
@@ -112,17 +123,16 @@ local activity_marks = vim.api.nvim_buf_get_extmarks(
   -1,
   { details = true }
 )
-assert(#activity_marks == 1, 'streamed reasoning did not produce one inline highlight')
-assert(activity_marks[1][4].hl_group == 'Comment')
+assert(#activity_marks == 2, 'reasoning summaries did not produce two inline highlights')
 local assistant_row
 for row, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line == '## Reviewer' then assistant_row = row - 1 end
 end
 assert(assistant_row, 'assistant heading row was not found')
-assert(
-  activity_marks[1][4].end_row <= assistant_row,
-  'inline activity highlight leaked into the assistant response'
-)
+for _, mark in ipairs(activity_marks) do
+  assert(mark[4].hl_group == 'Comment')
+  assert(mark[4].end_row <= assistant_row, 'inline activity highlight leaked into the assistant response')
+end
 assert(#render_calls == 0, 'hidden buffer was rendered')
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
 buffers.on_shown(member.views.conversation.buf)

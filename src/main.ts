@@ -12,6 +12,7 @@ import { PROTOCOL_VERSION } from "./types.js";
 interface HostOptions {
   configPath: string;
   databasePath: string;
+  runtimeCommand: string | undefined;
   workspace: string;
 }
 
@@ -40,6 +41,8 @@ function hostOptions(): HostOptions {
     databasePath: resolve(
       option("--db") ?? env.COPILOT_FLEET_DATABASE ?? resolve(dataRoot, "copilot-fleet", "state.sqlite"),
     ),
+    runtimeCommand:
+      env.COPILOT_FLEET_RUNTIME_COMMAND ?? env.NVIM_COPILOT_CMD ?? env.COPILOT_CLI_CMD,
   };
 }
 
@@ -191,9 +194,24 @@ async function main(): Promise<void> {
         return;
       case "tasks.list": {
         const target = requiredString(payload, "target", command.type);
+        const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;
         protocol.send(
           "tasks.list",
-          { target, tasks: await runtime.listTasks(target) },
+          {
+            target,
+            tasks: await runtime.listTasks(target),
+            ...(purpose === undefined ? {} : { purpose }),
+          },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "tasks.progress": {
+        const target = requiredString(payload, "target", command.type);
+        const taskId = requiredString(payload, "taskId", command.type);
+        protocol.send(
+          "tasks.progress",
+          { target, taskId, progress: await runtime.taskProgress(target, taskId) },
           { requestId: command.id, memberId: target, target: "status", done: true },
         );
         return;
@@ -205,6 +223,16 @@ async function main(): Promise<void> {
           "tasks.cancelled",
           { target, taskId, cancelled: await runtime.cancelTask(target, taskId) },
           { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "permission.respond": {
+        const requestId = requiredString(payload, "requestId", command.type);
+        const approved = payload.approved === true;
+        protocol.send(
+          "permission.resolved",
+          { requestId, approved, applied: runtime.respondPermission(requestId, approved) },
+          { requestId: command.id, target: "status", done: true },
         );
         return;
       }
@@ -229,9 +257,15 @@ async function main(): Promise<void> {
     await close("stdin closed");
     exit(0);
   });
-  runtime = new CopilotRuntime(config, options.workspace, db, (type, payload, fields) => {
-    protocol.send(type, payload, fields);
-  });
+  runtime = new CopilotRuntime(
+    config,
+    options.workspace,
+    db,
+    (type, payload, fields) => {
+      protocol.send(type, payload, fields);
+    },
+    options.runtimeCommand,
+  );
 
   const parentMonitor = setInterval(() => {
     try {

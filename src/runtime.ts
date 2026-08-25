@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import {
   CopilotClient,
+  RuntimeConnection,
   defineTool,
   type CopilotSession,
   type PermissionHandler,
@@ -37,13 +39,54 @@ export interface RuntimeEmitter {
   ): void;
 }
 
+function findExecutable(name: string, pathValue = process.env.PATH): string | undefined {
+  for (const directory of pathValue?.split(delimiter) ?? []) {
+    const candidate = resolve(directory.replace(/^"|"$/g, ""), name);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+export function configuredRuntimeConnection(
+  command: string | undefined,
+  platform = process.platform,
+  shell = process.env.SHELL,
+  powershell = findExecutable("pwsh.exe"),
+) {
+  if (!command?.trim()) {
+    return undefined;
+  }
+  if (platform === "win32") {
+    if (!powershell) {
+      throw new Error("pwsh.exe is required to launch the configured Copilot runtime command.");
+    }
+    return RuntimeConnection.forStdio({
+      path: powershell,
+      args: ["-NoLogo", "-NoProfile", "-Command", `& { ${command} @args }`],
+    });
+  }
+
+  return RuntimeConnection.forStdio({
+    path: shell || "/bin/sh",
+    args: ["-lc", `exec ${command} "$@"`, "copilot-runtime"],
+  });
+}
+
 interface LiveSession {
   session: CopilotSession;
   runId: string;
   memberId: string;
   busy: boolean;
   sequence: number;
+  taskRefresh: number;
   unsubscribe: () => void;
+}
+
+interface EnvironmentProbe {
+  component: string;
+  load: (session: CopilotSession) => Promise<unknown[]>;
 }
 
 type ActiveMode =
@@ -62,6 +105,36 @@ const persistEventTypes = new Set<SessionEvent["type"]>([
   "session.error",
   "session.shutdown",
 ]);
+
+const environmentProbes: EnvironmentProbe[] = [
+  {
+    component: "Tools",
+    load: async (session) => {
+      await session.rpc.tools.initializeAndValidate();
+      return (await session.rpc.tools.getCurrentMetadata()).tools ?? [];
+    },
+  },
+  {
+    component: "Instructions",
+    load: async (session) => (await session.rpc.instructions.getSources()).sources,
+  },
+  {
+    component: "Skills",
+    load: async (session) => (await session.rpc.skills.list()).skills,
+  },
+  {
+    component: "MCP servers",
+    load: async (session) => (await session.rpc.mcp.list()).servers,
+  },
+  {
+    component: "Plugins",
+    load: async (session) => (await session.rpc.plugins.list()).plugins,
+  },
+  {
+    component: "Agents",
+    load: async (session) => (await session.rpc.agent.list()).agents,
+  },
+];
 
 function projectKey(workspace: string): string {
   return createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0, 12);
@@ -108,12 +181,12 @@ function reject(feedback: string): PermissionRequestResult {
   return { kind: "reject", feedback };
 }
 
-function permissionHandler(profile: PermissionProfile, workspace: string): PermissionHandler {
-  return (request: PermissionRequest): PermissionRequestResult => {
-    if (request.managedApprovalRequired) {
-      return reject("Managed policy requires an explicit user decision in an interactive surface.");
-    }
-    switch (request.kind) {
+export function permissionDecision(
+  profile: PermissionProfile,
+  workspace: string,
+  request: PermissionRequest,
+): PermissionRequestResult {
+  switch (request.kind) {
       case "read":
         return isWithin(request.path, profile.paths.read, workspace)
           ? { kind: "approved" }
@@ -166,8 +239,7 @@ function permissionHandler(profile: PermissionProfile, workspace: string): Permi
         return profile.externalActions
           ? { kind: "approved" }
           : reject(`${request.kind} operations are disabled for this member.`);
-    }
-  };
+  }
 }
 
 function sdkToolPatterns(patterns: string[]): string[] {
@@ -192,19 +264,26 @@ export class CopilotRuntime {
   private active: ActiveMode;
   private shuttingDown = false;
   private pendingFleetStart: string | undefined;
+  private readonly pendingPermissions = new Map<
+    string,
+    { resolve: (result: PermissionRequestResult) => void }
+  >();
 
   constructor(
     private readonly config: FleetConfig,
     private readonly workspace: string,
     private readonly db: FleetDatabase,
     private readonly emit: RuntimeEmitter,
+    private readonly runtimeCommand?: string,
   ) {}
 
   private async ensureClient(): Promise<CopilotClient> {
     if (this.client) {
       return this.client;
     }
+    const connection = configuredRuntimeConnection(this.runtimeCommand);
     const client = new CopilotClient({
+      ...(connection ? { connection } : {}),
       workingDirectory: this.workspace,
       logLevel: "error",
     });
@@ -281,9 +360,70 @@ export class CopilotRuntime {
     return (await live.session.rpc.tasks.cancel({ id: taskId })).cancelled;
   }
 
+  async taskProgress(target: string, taskId: string): Promise<unknown> {
+    const live = await this.activeSession(target);
+    return (await live.session.rpc.tasks.getProgress({ id: taskId })).progress ?? null;
+  }
+
   async cancelAllBackgroundAgents(target: string): Promise<number> {
     const live = await this.activeSession(target);
     return live.session.rpc.cancelAllBackgroundAgents();
+  }
+
+  respondPermission(requestId: string, approved: boolean): boolean {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) {
+      return false;
+    }
+    this.pendingPermissions.delete(requestId);
+    pending.resolve(
+      approved ? { kind: "approved" } : reject("Permission rejected by the user in Neovim."),
+    );
+    return true;
+  }
+
+  private permissionHandler(profile: PermissionProfile, memberId: string): PermissionHandler {
+    return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
+      const decision = permissionDecision(profile, this.workspace, request);
+      if (decision.kind !== "approved" || !request.managedApprovalRequired) {
+        return decision;
+      }
+      const requestId = randomUUID();
+      this.emit(
+        "permission.requested",
+        { requestId, request },
+        { memberId, target: "status", done: false },
+      );
+      return new Promise((resolve) => {
+        this.pendingPermissions.set(requestId, { resolve });
+      });
+    };
+  }
+
+  private refreshTasks(live: LiveSession): void {
+    const refresh = ++live.taskRefresh;
+    void live.session.rpc.tasks
+      .list()
+      .then(({ tasks }) => {
+        if (refresh !== live.taskRefresh) {
+          return;
+        }
+        this.emit(
+          "tasks.changed",
+          { tasks },
+          { runId: live.runId, memberId: live.memberId, target: "status", done: true },
+        );
+      })
+      .catch((error: unknown) => {
+        if (refresh !== live.taskRefresh) {
+          return;
+        }
+        this.emit(
+          "tasks.error",
+          { message: error instanceof Error ? error.message : String(error) },
+          { runId: live.runId, memberId: live.memberId, target: "status", done: true },
+        );
+      });
   }
 
   private standardPermission(): PermissionProfile {
@@ -303,9 +443,11 @@ export class CopilotRuntime {
       streaming: true,
       includeSubAgentStreamingEvents: false,
       reasoningSummary: member.reasoningSummary,
+      manageScheduleEnabled: true,
+      enableSessionStore: true,
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: member.initialPrompt },
-      onPermissionRequest: permissionHandler(member.permission, this.workspace),
+      onPermissionRequest: this.permissionHandler(member.permission, member.id),
       tools,
       availableTools: sdkToolPatterns(member.permission.tools.allow),
       excludedTools: sdkToolPatterns(member.permission.tools.deny),
@@ -326,9 +468,11 @@ export class CopilotRuntime {
       workingDirectory: this.workspace,
       streaming: true,
       reasoningSummary: standard.reasoningSummary ?? "detailed",
+      manageScheduleEnabled: true,
+      enableSessionStore: true,
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: standard.initialPrompt },
-      onPermissionRequest: permissionHandler(permission, this.workspace),
+      onPermissionRequest: this.permissionHandler(permission, "standard"),
       tools: [this.createStartFleetTool()],
       availableTools: sdkToolPatterns(permission.tools.allow),
       excludedTools: sdkToolPatterns(permission.tools.deny),
@@ -436,6 +580,11 @@ export class CopilotRuntime {
     if (existing) {
       return existing;
     }
+    this.emit(
+      "environment.progress",
+      { component: "Copilot environment", message: "Starting runtime and discovering configuration" },
+      { runId, memberId, target: "activity" },
+    );
     const client = await this.ensureClient();
     let session: CopilotSession;
     if (this.knownSessionIds.has(sessionId)) {
@@ -450,11 +599,46 @@ export class CopilotRuntime {
       memberId,
       busy: false,
       sequence: 0,
+      taskRefresh: 0,
       unsubscribe: () => undefined,
     };
     live.unsubscribe = session.on((event) => this.handleSessionEvent(live, event));
     this.live.set(memberId, live);
     this.db.upsertSession(runId, memberId, sessionId, "connected");
+    for (const probe of environmentProbes) {
+      this.emit(
+        "environment.progress",
+        { component: probe.component, message: `Loading ${probe.component.toLowerCase()}` },
+        { runId, memberId, target: "activity" },
+      );
+    }
+    const environment = await Promise.allSettled(
+      environmentProbes.map(async (probe) => ({
+        component: probe.component,
+        items: await probe.load(session),
+      })),
+    );
+    for (let index = 0; index < environment.length; index += 1) {
+      const result = environment[index]!;
+      const component = environmentProbes[index]!.component;
+      if (result.status === "fulfilled") {
+        this.emit("environment.loaded", result.value, {
+          runId,
+          memberId,
+          target: "activity",
+          done: true,
+        });
+      } else {
+        this.emit(
+          "environment.error",
+          {
+            component,
+            message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          },
+          { runId, memberId, target: "activity", done: true },
+        );
+      }
+    }
     const history = await session.getEvents();
     this.emit(
       "session.history",
@@ -466,6 +650,7 @@ export class CopilotRuntime {
       { state: "idle", sessionId },
       { runId, memberId, target: "status" },
     );
+    this.refreshTasks(live);
     return live;
   }
 
@@ -573,6 +758,58 @@ export class CopilotRuntime {
           target: "activity",
           done: event.type === "tool.execution_complete",
         });
+        break;
+      case "session.background_tasks_changed":
+      case "subagent.started":
+      case "subagent.completed":
+      case "subagent.failed":
+        this.refreshTasks(live);
+        break;
+      case "session.skills_loaded":
+        this.emit(
+          "environment.loaded",
+          { component: "Skills", items: event.data.skills },
+          { ...fields, target: "activity", done: true },
+        );
+        break;
+      case "session.custom_agents_updated":
+        this.emit(
+          "environment.loaded",
+          { component: "Agents", items: event.data.agents },
+          { ...fields, target: "activity", done: true },
+        );
+        for (const error of event.data.errors) {
+          this.emit(
+            "environment.error",
+            { component: "Agents", message: error },
+            { ...fields, target: "activity", done: true },
+          );
+        }
+        break;
+      case "session.mcp_servers_loaded":
+        this.emit(
+          "environment.loaded",
+          { component: "MCP servers", items: event.data.servers },
+          { ...fields, target: "activity", done: true },
+        );
+        break;
+      case "session.mcp_server_status_changed":
+        this.emit(
+          "environment.status",
+          {
+            component: `MCP ${event.data.serverName}`,
+            status: event.data.status,
+            error: event.data.error,
+          },
+          { ...fields, target: "activity", done: true },
+        );
+        break;
+      case "session.extensions_loaded":
+        this.emit(
+          "environment.loaded",
+          { component: "Extensions", items: event.data.extensions },
+          { ...fields, target: "activity", done: true },
+        );
         break;
       default:
         break;
@@ -759,6 +996,10 @@ export class CopilotRuntime {
       return;
     }
     this.shuttingDown = true;
+    for (const pending of this.pendingPermissions.values()) {
+      pending.resolve(reject(`Permission request cancelled: ${reason}`));
+    }
+    this.pendingPermissions.clear();
     if (this.active) {
       const runId = this.active.runId;
       for (const live of this.live.values()) {

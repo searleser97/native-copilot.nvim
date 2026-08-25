@@ -47,15 +47,32 @@ UI and rendering defaults can be adjusted in `setup`:
 
 ```lua
 require("copilot_fleet").setup({
+  -- Defaults to NVIM_COPILOT_CMD, then COPILOT_CLI_CMD, when either is set.
+  runtime_command = nil,
   stream_flush_ms = 80,
   render_debounce_ms = 200,
   follow_bottom = true,
+  task_height = 5,
+  task_detail_height = 12,
   frontend = {
     completion = "native", -- "blink" when the optional source is configured
     picker = "native", -- "telescope" only when explicitly selected
   },
 })
 ```
+
+`runtime_command` lets the SDK use the same private launcher as an existing Copilot CLI setup.
+The command stays in local Neovim configuration or an environment variable; it does not belong in
+this repository. The SDK appends its headless/stdio arguments to the launcher, so wrapper-owned
+flags such as additional MCP configuration, disabled MCP servers, tool exclusions, and approval
+policy continue to apply:
+
+```powershell
+$env:NVIM_COPILOT_CMD = "& 'C:\private\Invoke-ConfiguredCopilot.ps1'"
+```
+
+On Windows the plugin runs this through `pwsh`; on Unix it uses `$SHELL`. If neither variable nor
+`runtime_command` is configured, the SDK's bundled Copilot runtime is used.
 
 On first use, the plugin copies `examples\fleets.json` to the editable user configuration:
 
@@ -84,6 +101,25 @@ No credentials or tokens belong in `fleets.json`.
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
+
+The read-only task buffer between the conversation and prompt continuously tracks work for the
+selected recipient. `○` is running or waiting, `✓` completed, `✗` failed, and `–` cancelled.
+Completed rows remain as session history and the buffer follows new work while remaining normally
+scrollable. Its buffer-local actions are:
+
+| Binding | Task action |
+|---|---|
+| `<Enter>` | Show progress details in the same task window |
+| `<BS>` / `q` | Return from details to the task list |
+| `dd` | Cancel the running or waiting task under the cursor |
+| `r` | Refresh task state |
+
+Use `/tasks` or `:CopilotFleetTasks` to focus this task buffer.
+
+When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
+`Reject` prompt. Fleet permission profiles remain hard ceilings: requests outside a member's
+configured path, command, network, Git, or external-action policy are rejected before the prompt.
+Closing the prompt rejects the request, and pending requests are rejected when the host shuts down.
 
 Commands mirror the primary mappings:
 
@@ -166,7 +202,15 @@ Conversation windows follow the final line when opened, switched, reopened, rend
 
 SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata.
+Environment initialization also appears as muted inline activity. Each session reports runtime/configuration discovery, an explicit loading row, and the loaded count for tools, instructions, skills, MCP servers, plugins, and agents. The task-strip winbar shows the member as `loading` until initialization finishes. MCP connection-state changes and loading failures are surfaced as they occur.
+
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer.
+
+Native scheduled prompts and session-store support are enabled for every SDK session. The model can
+therefore use `manage_schedule` and `sql` when the connected Copilot runtime exposes them. `todos`
+and `todo_deps` are tables in the per-session SQLite database used through `sql`; they are not
+separate tools. Availability is still subject to the installed Copilot CLI/runtime version and its
+feature policy.
 
 Command behavior follows the result returned by the SDK:
 
@@ -180,7 +224,7 @@ The embedded SDK registry currently exposes `/fleet`, but not `/tasks` or `/suba
 
 The SDK does expose typed task-management RPCs, which the plugin uses directly:
 
-- `:CopilotFleetTasks` lists running/idle agent and shell tasks for the selected session and cancels the selected task.
+- `:CopilotFleetTasks` focuses the live task list for the selected session.
 - `:CopilotFleetCancelBackground` cancels every background subagent in the selected session.
 - `:CopilotFleetAbort` aborts the selected session's foreground turn while keeping the session usable.
 

@@ -3,6 +3,7 @@ local M = {}
 local registry = {}
 local render_generation = {}
 local activity_namespace = vim.api.nvim_create_namespace('copilot_fleet_inline_activity')
+local message_anchor_namespace = vim.api.nvim_create_namespace('copilot_fleet_message_anchor')
 local options = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
@@ -101,6 +102,8 @@ local function create_buffer(name, member_id, view_id)
     activity_streaming = false,
     dirty = false,
     active_message = nil,
+    message_anchor = nil,
+    deferred_activity = nil,
   }
 end
 
@@ -198,7 +201,58 @@ end
 function M.append_block(member_id, view_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
+  if view_id == 'conversation' and heading == 'You' then
+    view.message_anchor = nil
+    vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
+  end
   append(view, ('\n## %s\n\n%s\n'):format(heading, content), true)
+end
+
+local function insert_activity_before_message(view, heading, content)
+  if not view.message_anchor then return false end
+  flush(view)
+  local anchor = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    message_anchor_namespace,
+    view.message_anchor,
+    {}
+  )
+  if #anchor == 0 then
+    view.message_anchor = nil
+    return false
+  end
+  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
+  view.dirty = true
+  render_markdown(view.buf, false)
+  local lines = { '', ('> **%s**'):format(heading), '>' }
+  for _, line in ipairs(vim.split(content, '\n', { plain = true })) do
+    table.insert(lines, '> ' .. line)
+  end
+  table.insert(lines, '')
+  local start_row = anchor[1]
+  with_modifiable(view.buf, function()
+    vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
+  end)
+  view.message_anchor = vim.api.nvim_buf_set_extmark(
+    view.buf,
+    message_anchor_namespace,
+    start_row + #lines,
+    0,
+    {
+      id = view.message_anchor,
+      right_gravity = false,
+    }
+  )
+  vim.api.nvim_buf_set_extmark(view.buf, activity_namespace, start_row, 0, {
+    end_row = start_row + #lines,
+    end_col = 0,
+    hl_group = 'Comment',
+    hl_eol = true,
+    priority = 200,
+  })
+  follow_bottom(view)
+  if not view.streaming then finalize_render(view) end
+  return true
 end
 
 local function begin_inline_activity(view, activity_id, heading)
@@ -218,6 +272,17 @@ end
 function M.append_activity_delta(member_id, activity_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  if view.message_anchor then
+    if not view.deferred_activity or view.deferred_activity.id ~= activity_id then
+      view.deferred_activity = { id = activity_id, content = '' }
+      render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
+      view.dirty = true
+      render_markdown(view.buf, false)
+    end
+    view.deferred_activity.content = view.deferred_activity.content .. content
+    view.activity_streaming = true
+    return
+  end
   if not view.active_activity or view.active_activity.id ~= activity_id then
     begin_inline_activity(view, activity_id, 'Reasoning summary')
   end
@@ -229,6 +294,12 @@ end
 function M.complete_activity(member_id, activity_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  if view.deferred_activity and view.deferred_activity.id == activity_id then
+    local final_content = content ~= '' and content or view.deferred_activity.content
+    view.deferred_activity = nil
+    view.activity_streaming = false
+    if insert_activity_before_message(view, 'Reasoning summary', final_content) then return end
+  end
   if view.active_activity and view.active_activity.id == activity_id then
     view.pending = view.pending .. '\n'
     flush(view)
@@ -236,7 +307,9 @@ function M.complete_activity(member_id, activity_id, content)
     view.activity_streaming = false
     if not view.streaming then finalize_render(view) end
   else
-    M.append_activity_block(member_id, 'Reasoning summary', content)
+    if not insert_activity_before_message(view, 'Reasoning summary', content) then
+      M.append_activity_block(member_id, 'Reasoning summary', content)
+    end
   end
 end
 
@@ -263,6 +336,14 @@ function M.append_conversation_delta(member_id, message_id, content)
   if view.active_message ~= message_id then
     flush(view)
     view.active_message = message_id
+    vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
+    view.message_anchor = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      message_anchor_namespace,
+      vim.api.nvim_buf_line_count(view.buf) - 1,
+      0,
+      { right_gravity = false }
+    )
     append(view, ('\n## %s\n\n'):format(entry.display_name), false)
   end
   append(view, content, false)
