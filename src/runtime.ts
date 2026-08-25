@@ -383,6 +383,11 @@ export class CopilotRuntime {
     const id = randomUUID();
     const display = result.displayPrompt || `/${name}${input ? ` ${input}` : ""}`;
     this.db.enqueueMessage(id, live.runId, "user", live.memberId, "user", display);
+    this.emit(
+      "prompt.queued",
+      { id, source: "command", target: live.memberId, content: display },
+      { runId: live.runId, memberId: live.memberId, target: "activity", done: false },
+    );
     try {
       const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "enqueue" });
       this.db.completeMessage(id);
@@ -397,7 +402,13 @@ export class CopilotRuntime {
         runtimeSettingsChanged: result.runtimeSettingsChanged,
       };
     } catch (error) {
-      this.db.failMessage(id, error instanceof Error ? error.message : String(error), true);
+      const message = error instanceof Error ? error.message : String(error);
+      this.db.failMessage(id, message, true);
+      this.emit(
+        "prompt.failed",
+        { id, source: "command", message },
+        { runId: live.runId, memberId: live.memberId, target: "activity", done: true },
+      );
       throw error;
     }
   }
@@ -819,6 +830,36 @@ export class CopilotRuntime {
       sequence: live.sequence,
     };
     switch (event.type) {
+      case "user.message":
+        if (event.data.source && /^schedule-\d+$/.test(event.data.source)) {
+          this.emit(
+            "scheduled.prompt",
+            { ...event.data, eventId: event.id },
+            { ...fields, target: "conversation", done: false },
+          );
+        }
+        break;
+      case "session.schedule_created":
+        this.emit("schedule.created", event.data, {
+          ...fields,
+          target: "activity",
+          done: true,
+        });
+        break;
+      case "session.schedule_cancelled":
+        this.emit("schedule.cancelled", event.data, {
+          ...fields,
+          target: "activity",
+          done: true,
+        });
+        break;
+      case "session.schedule_rearmed":
+        this.emit("schedule.rearmed", event.data, {
+          ...fields,
+          target: "activity",
+          done: true,
+        });
+        break;
       case "assistant.message_delta":
         this.emit(
           "conversation.delta",

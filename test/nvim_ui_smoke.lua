@@ -116,40 +116,44 @@ fleet._on_event({
     },
   },
 })
-local task_buf = vim.fn.bufnr('native-copilot://tasks')
-assert(task_buf > 0, 'task buffer was not created')
-assert(vim.bo[task_buf].modifiable == false)
-assert(vim.bo[task_buf].readonly == true)
-local task_win = vim.fn.win_findbuf(task_buf)[1]
-assert(task_win, 'task buffer is not visible between conversation and prompt')
-assert(vim.wo[task_win].winbar:find('○ 1 active', 1, true))
-assert(vim.wo[task_win].winbar:find('✓ 1 done', 1, true))
-assert(vim.wo[task_win].winbar:find('✗ 1 failed', 1, true))
-local task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('○ [agent] Review implementation', 1, true))
-assert(task_text:find('✓ [shell] npm test', 1, true))
-assert(task_text:find('✗ [agent] Validate deployment', 1, true))
-assert(
-  vim.api.nvim_win_get_cursor(task_win)[1] == vim.api.nvim_buf_line_count(task_buf),
-  'task list did not follow the newest row'
-)
-local task_maps = vim.api.nvim_buf_call(task_buf, function()
-  return {
-    cancel = vim.fn.maparg('dd', 'n', false, true),
-    details = vim.fn.maparg('<CR>', 'n', false, true),
-    back = vim.fn.maparg('<BS>', 'n', false, true),
-  }
+local coordinator_buf = require('native_copilot.buffers').buffer('coordinator', 'conversation')
+assert(vim.fn.bufnr('native-copilot://tasks') == -1, 'legacy task buffer was created')
+local function buffer_text(buf)
+  return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+end
+local function line_with(buf, text)
+  for index, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find(text, 1, true) then return index end
+  end
+end
+local function line_count_with(buf, text)
+  local count = 0
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find(text, 1, true) then count = count + 1 end
+  end
+  return count
+end
+local timeline_text = buffer_text(coordinator_buf)
+assert(timeline_text:find('○ **[task] [agent] Review implementation**', 1, true))
+assert(timeline_text:find('✓ **[task] [shell] npm test**', 1, true))
+assert(timeline_text:find('✗ **[task] [agent] Validate deployment**', 1, true))
+local coordinator_win = vim.fn.win_findbuf(coordinator_buf)[1]
+vim.api.nvim_set_current_win(coordinator_win)
+vim.api.nvim_win_set_cursor(coordinator_win, {
+  assert(line_with(coordinator_buf, '[agent] Review implementation')),
+  0,
+})
+local conversation_maps = vim.api.nvim_buf_call(coordinator_buf, function()
+  return { details = vim.fn.maparg('<CR>', 'n', false, true) }
 end)
-assert(task_maps.cancel.buffer == 1, 'task cancellation mapping is not buffer-local')
-assert(task_maps.details.buffer == 1, 'task details mapping is not buffer-local')
-assert(task_maps.back.buffer == 1, 'task back mapping is not buffer-local')
-vim.api.nvim_set_current_win(task_win)
-vim.api.nvim_win_set_cursor(task_win, { 1, 0 })
+assert(conversation_maps.details.buffer == 1, 'conversation task mapping is not buffer-local')
 local protocol = require('native_copilot.protocol')
 local original_send = protocol.send
 protocol.send = function() return 'ui-smoke-request' end
-task_maps.details.callback()
+conversation_maps.details.callback()
 protocol.send = original_send
+local task_detail_buf = vim.api.nvim_get_current_buf()
+assert(vim.api.nvim_win_get_config(0).relative == 'editor', 'task details did not open in a float')
 fleet._on_event({
   v = 1,
   id = 'task-progress',
@@ -169,12 +173,13 @@ fleet._on_event({
     },
   },
 })
-task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('Intent: Checking the implementation', 1, true))
-assert(task_text:find('✓ Read changed files', 1, true))
-task_maps.back.callback()
-task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('○ [agent] Review implementation', 1, true))
+local detail_text = buffer_text(task_detail_buf)
+assert(detail_text:find('Intent: Checking the implementation', 1, true))
+assert(detail_text:find('✓ Read changed files', 1, true))
+local close_detail = vim.api.nvim_buf_call(task_detail_buf, function()
+  return vim.fn.maparg('q', 'n', false, true)
+end)
+close_detail.callback()
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(vim.fn.bufnr('AI Prompt'))[1])
 fleet._on_event({
   v = 1,
@@ -186,7 +191,15 @@ fleet._on_event({
     message = 'Starting runtime and discovering configuration',
   },
 })
-assert(vim.wo[task_win].winbar:find('loading', 1, true), 'loading state is absent from task winbar')
+timeline_text = buffer_text(coordinator_buf)
+assert(
+  timeline_text:find(
+    '○ **[environment] Copilot environment** — Starting runtime and discovering configuration',
+    1,
+    true
+  ),
+  'loading state is absent from the conversation timeline'
+)
 fleet._on_event({
   v = 1,
   type = 'environment.loaded',
@@ -201,32 +214,32 @@ fleet._on_event({
     },
   },
 })
-local coordinator_buf = require('native_copilot.buffers').buffer('coordinator', 'conversation')
 local environment_text = table.concat(
   vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false),
   '\n'
 )
-task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('✓ [environment] MCP servers — 1 connected, 1 failed', 1, true))
-assert(not task_text:find('Copilot environment', 1, true), 'generic environment row was not replaced')
-assert(vim.wo[task_win].winbar:find('environment 1/1', 1, true))
 assert(
-  not environment_text:find('Loading Copilot environment', 1, true),
-  'successful environment progress leaked into the conversation'
+  environment_text:find(
+    '✓ **[environment] MCP servers** — 1 connected, 1 failed',
+    1,
+    true
+  )
 )
 assert(
-  not environment_text:find('1 connected, 1 failed', 1, true),
-  'successful environment result leaked into the conversation'
+  not environment_text:find('Copilot environment', 1, true),
+  'generic environment row was not replaced in place'
 )
 local task_action_sent = false
 protocol.send = function()
   task_action_sent = true
   return 'unexpected-task-action'
 end
-vim.api.nvim_set_current_win(task_win)
-vim.api.nvim_win_set_cursor(task_win, { 1, 0 })
-task_maps.details.callback()
-task_maps.cancel.callback()
+vim.api.nvim_set_current_win(coordinator_win)
+vim.api.nvim_win_set_cursor(coordinator_win, {
+  assert(line_with(coordinator_buf, '[environment] MCP servers')),
+  0,
+})
+conversation_maps.details.callback()
 protocol.send = original_send
 assert(not task_action_sent, 'environment rows must not invoke task actions')
 fleet._on_event({
@@ -240,13 +253,194 @@ fleet._on_event({
     message = 'Invalid skill metadata',
   },
 })
-task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('✗ [environment] Skills — Invalid skill metadata', 1, true))
 environment_text = table.concat(
   vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false),
   '\n'
 )
-assert(environment_text:find('Skills error', 1, true), 'environment failure is absent from conversation')
+assert(
+  environment_text:find('✗ **[environment] Skills** — Invalid skill metadata', 1, true),
+  'environment failure is absent from conversation'
+)
+local prompt_buf = vim.fn.bufnr('AI Prompt')
+local prompt_submit = vim.api.nvim_buf_call(prompt_buf, function()
+  return vim.fn.maparg('<CR>', 'n', false, true)
+end)
+local invoked_command
+protocol.send = function(message_type, payload)
+  invoked_command = { type = message_type, payload = payload }
+  return 'command-request'
+end
+vim.bo[prompt_buf].modifiable = true
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { '/context' })
+prompt_submit.callback()
+protocol.send = original_send
+assert(invoked_command.type == 'command.invoke')
+assert(invoked_command.payload.name == 'context')
+assert(buffer_text(coordinator_buf):find('# You\n\n/context', 1, true))
+assert(not buffer_text(coordinator_buf):find('[command]', 1, true))
+fleet._on_event({
+  v = 1,
+  type = 'command.result',
+  requestId = 'command-request',
+  memberId = 'coordinator',
+  target = 'conversation',
+  done = true,
+  payload = {
+    target = 'coordinator',
+    name = 'context',
+    result = { kind = 'text', text = 'Context usage output' },
+  },
+})
+assert(buffer_text(coordinator_buf):find('# Copilot\n\nContext usage output', 1, true))
+fleet._on_event({
+  v = 1,
+  id = 'command-prompt-queued',
+  type = 'prompt.queued',
+  memberId = 'coordinator',
+  target = 'activity',
+  done = false,
+  payload = {
+    id = 'command-prompt-1',
+    source = 'command',
+    content = '/delegate implementation',
+  },
+})
+local command_prompt_row = assert(line_with(coordinator_buf, '[prompt] Prompt'))
+assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — queued', 1, true))
+fleet._on_event({
+  v = 1,
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'busy' },
+})
+assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — processing…', 1, true))
+assert(line_with(coordinator_buf, '[prompt] Prompt') == command_prompt_row)
+fleet._on_event({
+  v = 1,
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+assert(buffer_text(coordinator_buf):find('✓ **[prompt] Prompt** — completed', 1, true))
+assert(line_with(coordinator_buf, '[prompt] Prompt') == command_prompt_row)
+require('native_copilot.buffers').remove_timeline(
+  'coordinator',
+  'prompt:command-prompt-1'
+)
+fleet._on_event({
+  v = 1,
+  id = 'failed-prompt-queued',
+  type = 'prompt.queued',
+  memberId = 'coordinator',
+  payload = { id = 'failed-prompt', source = 'command' },
+})
+fleet._on_event({
+  v = 1,
+  type = 'request.error',
+  requestId = 'failed-prompt',
+  payload = { message = 'Prompt submission failed' },
+})
+assert(buffer_text(coordinator_buf):find('✗ **[prompt] Prompt** — Prompt submission failed', 1, true))
+fleet._on_event({
+  v = 1,
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'busy' },
+})
+assert(not buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — processing…', 1, true))
+require('native_copilot.buffers').remove_timeline('coordinator', 'prompt:failed-prompt')
+protocol.send = function(message_type, payload)
+  invoked_command = { type = message_type, payload = payload }
+  return 'prompt-request'
+end
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { 'Implement the feature' })
+prompt_submit.callback()
+protocol.send = original_send
+assert(invoked_command.type == 'prompt.send')
+assert(buffer_text(coordinator_buf):find('# You\n\nImplement the feature', 1, true))
+local prompt_row = assert(line_with(coordinator_buf, '[prompt] Prompt'))
+assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — queued', 1, true))
+fleet._on_event({
+  v = 1,
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'busy' },
+})
+assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — processing…', 1, true))
+assert(line_with(coordinator_buf, '[prompt] Prompt') == prompt_row)
+fleet._on_event({
+  v = 1,
+  id = 'steering-scheduled-run',
+  type = 'scheduled.prompt',
+  memberId = 'coordinator',
+  payload = {
+    eventId = 'steering-scheduled-run',
+    content = '[Scheduled prompt #8] Check the active deployment',
+    source = 'schedule-8',
+    delivery = 'steering',
+  },
+})
+assert(line_count_with(coordinator_buf, '[prompt] Prompt') == 2)
+assert(line_count_with(coordinator_buf, '[prompt] Prompt** — processing…') == 2)
+fleet._on_event({
+  v = 1,
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+assert(line_count_with(coordinator_buf, '[prompt] Prompt** — completed') == 2)
+assert(line_with(coordinator_buf, '[prompt] Prompt') == prompt_row)
+fleet._on_event({
+  v = 1,
+  type = 'schedule.created',
+  memberId = 'coordinator',
+  payload = {
+    id = 7,
+    intervalMs = 300000,
+    recurring = true,
+    prompt = 'Check deployment health',
+  },
+})
+local schedule_row = assert(line_with(coordinator_buf, '[schedule] Schedule #7'))
+assert(buffer_text(coordinator_buf):find('○ **[schedule] Schedule #7** — every 300s', 1, true))
+fleet._on_event({
+  v = 1,
+  type = 'schedule.rearmed',
+  memberId = 'coordinator',
+  payload = { id = 7, nextRunAt = 1787701200000 },
+})
+assert(buffer_text(coordinator_buf):find('○ **[schedule] Schedule #7** — rearmed', 1, true))
+assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
+vim.api.nvim_set_current_win(coordinator_win)
+vim.api.nvim_win_set_cursor(coordinator_win, { schedule_row, 0 })
+conversation_maps.details.callback()
+local schedule_detail_buf = vim.api.nvim_get_current_buf()
+assert(buffer_text(schedule_detail_buf):find('Check deployment health', 1, true))
+assert(buffer_text(schedule_detail_buf):find('every 300s', 1, true))
+vim.api.nvim_buf_call(schedule_detail_buf, function()
+  vim.fn.maparg('q', 'n', false, true).callback()
+end)
+fleet._on_event({
+  v = 1,
+  type = 'scheduled.prompt',
+  memberId = 'coordinator',
+  payload = {
+    eventId = 'scheduled-run-7',
+    content = 'Check deployment health',
+    source = 'scheduled-prompt',
+    delivery = 'queued',
+  },
+})
+assert(buffer_text(coordinator_buf):find('# You\n\nCheck deployment health', 1, true))
+assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — queued', 1, true))
+fleet._on_event({
+  v = 1,
+  type = 'schedule.cancelled',
+  memberId = 'coordinator',
+  payload = { id = 7 },
+})
+assert(buffer_text(coordinator_buf):find('– **[schedule] Schedule #7** — cancelled', 1, true))
+assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
 local native_picker
 local original_select = vim.ui.select
 vim.ui.select = function(items, opts, on_choice)
@@ -384,7 +578,7 @@ assert(native_picker.items[1].task.id == 'running-agent')
 fleet.show_overview()
 
 local wins = vim.api.nvim_tabpage_list_wins(0)
-assert(#wins == 6, ('expected four agent windows, one task strip, and one prompt, got %d'):format(#wins))
+assert(#wins == 5, ('expected four agent windows and one prompt, got %d'):format(#wins))
 local visible = {}
 for _, win in ipairs(wins) do
   visible[vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))] = true
@@ -421,7 +615,7 @@ assert(text:find('Hidden retained line 40.', 1, true))
 fleet.show_member('observer')
 assert(buffers.get_member('observer').unread == 0)
 assert(vim.api.nvim_get_current_buf() == observer_buf)
-assert(#vim.api.nvim_tabpage_list_wins(0) == 3, 'member view does not contain one task strip')
+assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'member view should contain conversation and prompt')
 assert(
   vim.api.nvim_win_get_cursor(0)[1] == vim.api.nvim_buf_line_count(observer_buf),
   'opening a conversation did not follow its last line'
@@ -463,9 +657,10 @@ fleet._on_event({
     data = { toolCallId = 'tool-call-1', toolName = 'view', arguments = { path = 'secret' } },
   },
 })
-task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('○ [tool] view — processing…', 1, true))
-assert(not task_text:find('secret', 1, true))
+conversation_text = buffer_text(observer_buf)
+assert(conversation_text:find('○ **[tool] view** — processing…', 1, true))
+assert(not conversation_text:find('secret', 1, true))
+local tool_row = assert(line_with(observer_buf, '[tool] view'))
 fleet._on_event({
   v = 1,
   id = 'tool-complete',
@@ -482,6 +677,22 @@ fleet._on_event({
     },
   },
 })
+vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
+vim.api.nvim_win_set_cursor(0, { assert(line_with(observer_buf, '[tool] view')), 0 })
+local observer_enter = vim.api.nvim_buf_call(observer_buf, function()
+  return vim.fn.maparg('<CR>', 'n', false, true)
+end)
+observer_enter.callback()
+local tool_detail_buf = vim.api.nvim_get_current_buf()
+local tool_detail_text = buffer_text(tool_detail_buf)
+assert(vim.api.nvim_win_get_config(0).relative == 'editor')
+assert(tool_detail_text:find('Arguments:', 1, true))
+assert(tool_detail_text:find('secret', 1, true))
+assert(tool_detail_text:find('Result:', 1, true))
+assert(tool_detail_text:find('tool output must stay hidden', 1, true))
+vim.api.nvim_buf_call(tool_detail_buf, function()
+  vim.fn.maparg('q', 'n', false, true).callback()
+end)
 fleet._on_event({
   v = 1,
   id = 'observer-response',
@@ -507,16 +718,15 @@ fleet._on_event({
   },
 })
 conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
-assert(not conversation_text:find('> **Tool**', 1, true))
 assert(not conversation_text:find('tool output must stay hidden', 1, true))
 assert(not conversation_text:find('secret', 1, true))
-task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
-assert(task_text:find('✓ [tool] view — completed', 1, true))
-assert(not task_text:find('tool output must stay hidden', 1, true))
-assert(not task_text:find('secret', 1, true))
 assert(
-  vim.api.nvim_win_get_cursor(task_win)[1] == vim.api.nvim_buf_line_count(task_buf),
-  'tool activity did not follow the newest task-pane row'
+  conversation_text:find('✓ **[tool] view** — completed', 1, true),
+  'tool status did not update in place'
+)
+assert(
+  line_with(observer_buf, '[tool] view') == tool_row,
+  'tool completion moved instead of updating its chronological row'
 )
 assert(conversation_text:find('Assistant output remains normally highlighted.', 1, true))
 assert(
@@ -586,7 +796,7 @@ assert(conversation_text:find('Dynamically discovered command output.', 1, true)
 
 fleet.close()
 fleet.show_member('observer')
-assert(#vim.api.nvim_tabpage_list_wins(0) == 3, 'UI reopen did not restore one task strip')
+assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'UI reopen did not restore conversation and prompt')
 assert(
   vim.api.nvim_win_get_cursor(0)[1] == vim.api.nvim_buf_line_count(observer_buf),
   'reopened conversation did not follow its last line'

@@ -53,7 +53,6 @@ require("native_copilot").setup({
   stream_flush_ms = 80,
   render_debounce_ms = 200,
   follow_bottom = true,
-  task_height = 5,
   task_detail_height = 12,
   frontend = {
     completion = "native", -- "blink" when the optional source is configured
@@ -108,31 +107,24 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
+| `<Enter>` on an inline `[task]`, `[tool]`, or `[schedule]` row | Open details in a floating pane |
+| `q` / `<BS>` in activity details | Close the floating detail pane |
+| `dd` in task details | Cancel the running or waiting task |
 
-The read-only task buffer between the conversation and prompt continuously tracks work for the
-selected recipient. `○` is running or waiting, `✓` completed, `✗` failed, and `–` cancelled.
-Completed rows remain as session history and the buffer follows new work while remaining normally
-scrollable. Its buffer-local actions are:
+The conversation is also the chronological activity timeline. Background tasks, environment
+initialization, foreground tools, submitted-prompt lifecycle, and schedules appear as compact
+quoted rows. `○` is queued, processing, or waiting, `✓` completed, `✗` failed, and `–` cancelled.
+Each row keeps a stable position and updates in place as its state changes, so completion does not
+reorder earlier work.
 
-| Binding | Task action |
-|---|---|
-| `<Enter>` | Show progress details in the same task window |
-| `<BS>` / `q` | Return from details to the task list |
-| `dd` | Cancel the running or waiting task under the cursor |
-| `r` | Refresh task state |
-
-Use `/tasks` or `:NativeCopilotTasks` to focus this task buffer.
-
-The same pane shows Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other
-environment initialization as non-actionable `[environment]` rows. These rows update in place,
-remain outside the task action mappings, and contribute an `environment completed/total` summary
-to the winbar. Successful loading does not add conversation messages; loading failures remain
-visible both as failed environment rows and concise inline conversation errors.
-
-Foreground tool calls also appear as non-actionable `[tool]` rows. A row moves to the bottom when
-its status changes from processing to completed or failed. Only the tool name and status are shown;
-arguments and result content remain out of both the task pane and conversation. The pane retains
-the 20 most recently updated tool calls.
+Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
+non-actionable `[environment]` rows. Foreground tools use `[tool]` rows and expose only the tool
+name and status in the timeline; `<Enter>` reveals their arguments and result or error in the
+floating detail pane. Submitted prompts use `[prompt]` rows that transition in place from queued to
+processing to completed or failed. Slash commands are rendered as normal `# You` turns rather than
+duplicated `[command]` rows; their text output remains under `# Copilot`, and any work they start is
+represented by the resulting task, tool, environment, prompt, or schedule rows. Use `/tasks` or
+`:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
 When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
 `Reject` prompt. Fleet permission profiles remain hard ceilings: requests outside a member's
@@ -242,29 +234,41 @@ Streaming deltas are batched and appended only to the changed buffer tail. Rich 
 
 Conversation windows follow the final line when opened, switched, reopened, rendered, or updated by streaming output. Set `follow_bottom = false` to preserve the current viewport instead.
 
-SDK-provided reasoning summaries, intent, and errors appear inline in the conversation using the
-muted `Comment` highlight, similar to Copilot CLI's timeline. Tool execution status belongs to the
-task pane instead. Whether reasoning content is emitted depends on the selected model and GitHub
+SDK-provided reasoning summaries, intent, errors, tools, prompts, schedules, tasks, and environment status
+appear inline in the conversation, similar to Copilot CLI's timeline. Whether reasoning content is
+emitted depends on the selected model and GitHub
 Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
-Environment initialization appears in the task strip rather than adding successful loading
-messages to the conversation. Each session reports runtime/configuration discovery and loaded
-counts for tools, instructions, skills, MCP servers, plugins, and agents through rows that update
-in place. The task-strip winbar shows the member as `loading` until initialization finishes and
-summarizes settled components. MCP connection-state changes update the same pane; loading failures
-also remain visible as muted inline conversation errors.
+Each session reports runtime/configuration discovery and loaded counts for tools, instructions,
+skills, MCP servers, plugins, and agents through conversation rows that update in place. MCP
+connection-state changes update the original server row without disturbing chronology.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it opens a task picker. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
+
+The client-native command set is intentionally small:
+
+- `/fleet` starts, stops, or recovers configured multi-session Fleets.
+- `/tasks` browses typed SDK background tasks and opens their floating details.
+- `/resume` lists and safely resumes workspace sessions.
+- `/mcp-reload` reloads MCP connections without replacing the current session.
+
+All other commands use the active runtime's dynamic command catalog and invocation result.
 
 `/mcp-reload` and `:NativeCopilotReloadMcp` call the SDK's session-scoped
 `session.rpc.mcp.reload()` API. They stop and reconnect the selected session's MCP servers,
-refresh the environment rows in the task pane, and do not restart or replace the Copilot session.
+refresh the inline environment rows, and do not restart or replace the Copilot session.
 
 Native scheduled prompts and session-store support are enabled for every SDK session. The model can
 therefore use `manage_schedule` and `sql` when the connected Copilot runtime exposes them. `todos`
 and `todo_deps` are tables in the per-session SQLite database used through `sql`; they are not
 separate tools. Availability is still subject to the installed Copilot CLI/runtime version and its
 feature policy.
+
+`/every`, `/after`, and model-created `manage_schedule` entries appear as stable `[schedule]` rows.
+Creation, re-arming, and cancellation update the original row. When a schedule fires, its message
+appears as a `# You` turn with a normal `[prompt]` lifecycle row, including a queued state when the
+selected session is already busy. Press `<Enter>` on a schedule row to inspect its prompt and
+cadence without expanding that content in the main timeline.
 
 Command behavior follows the result returned by the SDK:
 
@@ -285,11 +289,13 @@ top-level sessions and mailbox routing instead.
 
 The SDK does expose typed task-management RPCs, which the plugin uses directly:
 
-- `:NativeCopilotTasks` focuses the live task list for the selected session.
+- `:NativeCopilotTasks` opens a picker for the selected session's tracked tasks.
 - `:NativeCopilotCancelBackground` cancels every background subagent in the selected session.
 - `:NativeCopilotAbort` aborts the selected session's foreground turn while keeping the session usable.
 
-Cancelling all background agents does not terminate promoted attached shell processes. A running shell tracked by the task registry can instead be selected and cancelled through `:NativeCopilotTasks`.
+Cancelling all background agents does not terminate promoted attached shell processes. A running
+shell tracked by the task registry can instead be selected through `:NativeCopilotTasks` and
+cancelled from its floating detail pane.
 
 ### Optional blink.cmp source
 

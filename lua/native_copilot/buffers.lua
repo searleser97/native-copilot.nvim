@@ -4,6 +4,7 @@ local registry = {}
 local render_generation = {}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local message_anchor_namespace = vim.api.nvim_create_namespace('native_copilot_message_anchor')
+local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local options = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
@@ -104,6 +105,7 @@ local function create_buffer(name, member_id, view_id)
     active_message = nil,
     message_anchor = nil,
     deferred_activity = nil,
+    timeline = {},
   }
 end
 
@@ -323,6 +325,117 @@ function M.append_activity_block(member_id, heading, content)
   view.active_activity = nil
   view.activity_streaming = false
   if not view.streaming then finalize_render(view) end
+end
+
+local function timeline_lines(kind, label, status, detail)
+  local symbols = {
+    running = '○',
+    idle = '○',
+    completed = '✓',
+    failed = '✗',
+    cancelled = '–',
+  }
+  local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
+  return {
+    '',
+    ('> %s **[%s] %s**%s'):format(symbols[status] or '?', kind, label, suffix),
+    '',
+  }
+end
+
+function M.upsert_timeline(member_id, item_id, item)
+  local entry = M.ensure_member(member_id)
+  local view = entry.views.conversation
+  flush(view)
+  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
+  view.dirty = true
+  render_markdown(view.buf, false)
+
+  local record = view.timeline[item_id]
+  local lines = timeline_lines(item.kind, item.label, item.status, item.detail)
+  local start_row
+  if record then
+    local position = vim.api.nvim_buf_get_extmark_by_id(
+      view.buf,
+      timeline_namespace,
+      record.extmark,
+      { details = true }
+    )
+    if #position > 0 then
+      start_row = position[1]
+      local end_row = position[3].end_row or (start_row + record.line_count)
+      with_modifiable(view.buf, function()
+        vim.api.nvim_buf_set_lines(view.buf, start_row, end_row, false, lines)
+      end)
+    end
+  end
+
+  if not start_row then
+    start_row = vim.api.nvim_buf_line_count(view.buf)
+    with_modifiable(view.buf, function()
+      vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
+    end)
+    record = {}
+    view.timeline[item_id] = record
+  end
+
+  record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
+    id = record.extmark,
+    end_row = start_row + #lines,
+    end_col = 0,
+    right_gravity = false,
+    end_right_gravity = true,
+  })
+  record.line_count = #lines
+  record.item = vim.deepcopy(item)
+  record.item.id = item_id
+  follow_bottom(view)
+  if not view.streaming and not view.activity_streaming then finalize_render(view) end
+end
+
+function M.remove_timeline(member_id, item_id)
+  local entry = registry[member_id]
+  local view = entry and entry.views.conversation
+  local record = view and view.timeline[item_id]
+  if not record then return end
+  local position = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    timeline_namespace,
+    record.extmark,
+    { details = true }
+  )
+  if #position > 0 then
+    local end_row = position[3].end_row or (position[1] + record.line_count)
+    with_modifiable(view.buf, function()
+      vim.api.nvim_buf_set_lines(view.buf, position[1], end_row, false, {})
+    end)
+  end
+  view.timeline[item_id] = nil
+  finalize_render(view)
+end
+
+function M.timeline_item_at_cursor(buf, row)
+  for member_id, entry in pairs(registry) do
+    local view = entry.views.conversation
+    if view.buf == buf then
+      local zero_row = row - 1
+      for _, record in pairs(view.timeline) do
+        local position = vim.api.nvim_buf_get_extmark_by_id(
+          view.buf,
+          timeline_namespace,
+          record.extmark,
+          { details = true }
+        )
+        if #position > 0 then
+          local end_row = position[3].end_row or (position[1] + record.line_count)
+          if zero_row >= position[1] and zero_row < end_row then
+            return record.item, member_id
+          end
+        end
+      end
+      return nil, member_id
+    end
+  end
 end
 
 function M.append_conversation_delta(member_id, message_id, content)

@@ -46,7 +46,6 @@ local defaults = {
   database_path = default_database,
   workspace = nil,
   prompt_height = 8,
-  task_height = 5,
   task_detail_height = 12,
   overview_max_agents = 4,
   render_debounce_ms = 200,
@@ -69,11 +68,12 @@ local state = {
   main_win = nil,
   prompt_win = nil,
   prompt_buf = nil,
-  task_win = nil,
-  task_buf = nil,
-  task_rows = {},
   task_detail = nil,
   task_progress = nil,
+  task_detail_buf = nil,
+  task_detail_win = nil,
+  task_detail_member = nil,
+  detail_item = nil,
   status_buf = nil,
   selected = 'standard',
   mode = 'stopped',
@@ -89,6 +89,10 @@ local state = {
   permission_queue = {},
   permission_prompt_open = false,
   tool_calls = {},
+  prompt_calls = {},
+  prompt_queues = {},
+  active_prompts = {},
+  schedules = {},
 }
 
 local function notify(message, level)
@@ -178,6 +182,107 @@ local function complete_slash_input()
   return true
 end
 
+local function invoke_command(target, name, input)
+  return send('command.invoke', {
+    target = target,
+    name = name,
+    input = input,
+  })
+end
+
+local function update_prompt_call(request_id, status, detail)
+  local call = state.prompt_calls[request_id]
+  if not call then return end
+  call.status = status
+  buffers.upsert_timeline(call.member_id, 'prompt:' .. request_id, {
+    kind = 'prompt',
+    label = 'Prompt',
+    status = status,
+    detail = detail or status,
+  })
+end
+
+local function track_prompt(member_id, request_id, status)
+  if not request_id then return end
+  state.prompt_calls[request_id] = {
+    member_id = member_id,
+    status = status,
+  }
+  if status == 'running' then
+    state.active_prompts[member_id] = state.active_prompts[member_id] or {}
+    table.insert(state.active_prompts[member_id], request_id)
+  else
+    state.prompt_queues[member_id] = state.prompt_queues[member_id] or {}
+    table.insert(state.prompt_queues[member_id], request_id)
+  end
+  update_prompt_call(request_id, status, status == 'running' and 'processing…' or 'queued')
+end
+
+local function start_next_prompt(member_id)
+  if #(state.active_prompts[member_id] or {}) > 0 then return end
+  local queue = state.prompt_queues[member_id] or {}
+  local request_id = table.remove(queue, 1)
+  if not request_id then return end
+  state.active_prompts[member_id] = { request_id }
+  update_prompt_call(request_id, 'running', 'processing…')
+end
+
+local function complete_active_prompt(member_id)
+  local request_ids = state.active_prompts[member_id] or {}
+  if #request_ids == 0 then return end
+  for _, request_id in ipairs(request_ids) do
+    update_prompt_call(request_id, 'completed', 'completed')
+  end
+  state.active_prompts[member_id] = nil
+  start_next_prompt(member_id)
+end
+
+local function fail_prompt(request_id, detail)
+  local call = state.prompt_calls[request_id]
+  if not call then return end
+  local member_id = call.member_id
+  for index = #(state.prompt_queues[member_id] or {}), 1, -1 do
+    if state.prompt_queues[member_id][index] == request_id then
+      table.remove(state.prompt_queues[member_id], index)
+    end
+  end
+  for index = #(state.active_prompts[member_id] or {}), 1, -1 do
+    if state.active_prompts[member_id][index] == request_id then
+      table.remove(state.active_prompts[member_id], index)
+    end
+  end
+  update_prompt_call(request_id, 'failed', detail or 'failed')
+end
+
+local function schedule_description(schedule)
+  if schedule.selfPaced then return 'self-paced' end
+  if schedule.intervalMs then
+    local seconds = math.floor(schedule.intervalMs / 1000)
+    return schedule.recurring == false and ('after %ds'):format(seconds)
+      or ('every %ds'):format(seconds)
+  end
+  if schedule.cron then return 'cron ' .. schedule.cron end
+  if schedule.at then return 'at ' .. os.date('%Y-%m-%d %H:%M:%S', math.floor(schedule.at / 1000)) end
+  return schedule.recurring == false and 'one shot' or 'scheduled'
+end
+
+local function update_schedule(member_id, schedule_id, updates)
+  local key = member_id .. ':' .. tostring(schedule_id)
+  local schedule = vim.tbl_deep_extend('force', state.schedules[key] or {}, updates or {})
+  state.schedules[key] = schedule
+  buffers.upsert_timeline(member_id, 'schedule:' .. tostring(schedule_id), {
+    kind = 'schedule',
+    label = ('Schedule #%s'):format(schedule_id),
+    status = schedule.status or 'idle',
+    detail = schedule.detail or schedule_description(schedule),
+    details = {
+      prompt = schedule.displayPrompt or schedule.prompt,
+      schedule = schedule_description(schedule),
+      nextRunAt = schedule.nextRunAt,
+    },
+  })
+end
+
 local function submit_prompt()
   local content = vim.trim(table.concat(prompt_lines(), '\n'))
   if content == '' then
@@ -191,6 +296,7 @@ local function submit_prompt()
   set_prompt_lines({ '' })
   local command = commands.parse(content)
   if command then
+    buffers.append_block(state.selected, 'conversation', 'You', content)
     if command.name:lower() == 'tasks' then
       M.select_task()
       return
@@ -212,13 +318,11 @@ local function submit_prompt()
       send('mcp.reload', { target = state.selected })
       return
     end
-    send('command.invoke', {
-      target = state.selected,
-      name = command.name,
-      input = command.input,
-    })
+    invoke_command(state.selected, command.name, command.input)
   else
-    send('prompt.send', { target = state.selected, content = content })
+    buffers.append_block(state.selected, 'conversation', 'You', content)
+    local request_id = send('prompt.send', { target = state.selected, content = content })
+    track_prompt(state.selected, request_id, 'idle')
   end
 end
 
@@ -288,39 +392,14 @@ local function task_description(task)
 end
 
 local function task_at_cursor()
-  if not state.task_buf or vim.api.nvim_get_current_buf() ~= state.task_buf then return nil end
-  if state.task_detail then return state.task_detail end
-  return state.task_rows[vim.api.nvim_win_get_cursor(0)[1]]
+  local item, member_id = buffers.timeline_item_at_cursor(
+    vim.api.nvim_get_current_buf(),
+    vim.api.nvim_win_get_cursor(0)[1]
+  )
+  return item, member_id
 end
 
-local function task_status_label(tasks)
-  local counts = { active = 0, completed = 0, failed = 0, cancelled = 0 }
-  for _, task in ipairs(tasks) do
-    if task.status == 'running' or task.status == 'idle' then
-      counts.active = counts.active + 1
-    elseif counts[task.status] ~= nil then
-      counts[task.status] = counts[task.status] + 1
-    end
-  end
-  local parts = {}
-  if counts.active > 0 then table.insert(parts, ('○ %d active'):format(counts.active)) end
-  if counts.completed > 0 then table.insert(parts, ('✓ %d done'):format(counts.completed)) end
-  if counts.failed > 0 then table.insert(parts, ('✗ %d failed'):format(counts.failed)) end
-  if counts.cancelled > 0 then table.insert(parts, ('– %d cancelled'):format(counts.cancelled)) end
-  return #parts > 0 and table.concat(parts, '  ') or 'idle'
-end
-
-local function environment_status_label(environment)
-  if not environment or #environment.order == 0 then return nil end
-  local settled = 0
-  for _, component in ipairs(environment.order) do
-    local item = environment.components[component]
-    if item and item.status ~= 'running' then settled = settled + 1 end
-  end
-  return ('environment %d/%d'):format(settled, #environment.order)
-end
-
-local function update_tool_call(member_id, call_id, tool_name, status)
+local function update_tool_call(member_id, call_id, tool_name, status, details)
   local activity = state.tool_calls[member_id]
   if not activity then
     activity = { order = {}, items = {} }
@@ -344,6 +423,14 @@ local function update_tool_call(member_id, call_id, tool_name, status)
   table.insert(activity.order, call_id)
   item.name = tool_name or item.name
   item.status = status
+  item.details = vim.tbl_deep_extend('force', item.details or {}, details or {})
+  buffers.upsert_timeline(member_id, 'tool:' .. call_id, {
+    kind = 'tool',
+    label = item.name,
+    status = status,
+    detail = status == 'running' and 'processing…' or status,
+    details = item.details,
+  })
 
   while #activity.order > 20 do
     local oldest = table.remove(activity.order, 1)
@@ -362,6 +449,7 @@ local function update_environment(member_id, component, status, detail)
 
   if component ~= 'Copilot environment' and environment.components['Copilot environment'] then
     environment.components['Copilot environment'] = nil
+    buffers.remove_timeline(member_id, 'environment:Copilot environment')
     for index, name in ipairs(environment.order) do
       if name == 'Copilot environment' then
         table.remove(environment.order, index)
@@ -376,25 +464,81 @@ local function update_environment(member_id, component, status, detail)
     status = status,
     detail = detail,
   }
+  buffers.upsert_timeline(member_id, 'environment:' .. component, {
+    kind = 'environment',
+    label = component,
+    status = status,
+    detail = detail or status,
+  })
 end
 
-local function set_task_lines(lines)
-  if not state.task_buf or not vim.api.nvim_buf_is_valid(state.task_buf) then return end
-  vim.bo[state.task_buf].readonly = false
-  vim.bo[state.task_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.task_buf, 0, -1, false, lines)
-  vim.bo[state.task_buf].modifiable = false
-  vim.bo[state.task_buf].readonly = true
+local function merge_tasks(member_id, incoming)
+  local current = state.tasks[member_id] or {}
+  local by_id = {}
+  for _, task in ipairs(current) do by_id[task.id] = task end
+  for _, task in ipairs(incoming or {}) do
+    if by_id[task.id] then
+      local updated = vim.tbl_deep_extend('force', by_id[task.id], task)
+      for index, candidate in ipairs(current) do
+        if candidate.id == task.id then
+          current[index] = updated
+          break
+        end
+      end
+      by_id[task.id] = updated
+    else
+      table.insert(current, task)
+      by_id[task.id] = task
+    end
+    local current_task = by_id[task.id]
+    buffers.upsert_timeline(member_id, 'task:' .. task.id, {
+      kind = 'task',
+      label = ('[%s] %s'):format(current_task.type or 'task', task_description(current_task)),
+      status = current_task.status or 'idle',
+      task = current_task,
+    })
+  end
+  state.tasks[member_id] = current
+  if state.task_detail and state.task_detail.id and by_id[state.task_detail.id] then
+    state.task_detail = by_id[state.task_detail.id]
+  end
 end
 
-local function render_task_buffer()
-  if not state.task_buf or not vim.api.nvim_buf_is_valid(state.task_buf) then return end
-  local tasks = state.tasks[state.selected] or {}
-  state.task_rows = {}
-  if state.task_detail then
-    local task = state.task_detail
-    local progress = state.task_progress
-    local lines = {
+local function cancel_cursor_task()
+  local item, member_id = task_at_cursor()
+  local task = item and item.kind == 'task' and item.task or nil
+  if not task and state.task_detail then
+    task = state.task_detail
+    member_id = state.task_detail_member
+  end
+  if not task then return end
+  if task.status ~= 'running' and task.status ~= 'idle' then
+    notify(('Task %s is already %s.'):format(task.id or '', task.status or 'finished'))
+    return
+  end
+  send('tasks.cancel', { target = member_id or state.selected, taskId = task.id })
+end
+
+local function close_task_detail()
+  if state.task_detail_win and vim.api.nvim_win_is_valid(state.task_detail_win) then
+    vim.api.nvim_win_close(state.task_detail_win, true)
+  end
+  state.task_detail_win = nil
+  state.task_detail = nil
+  state.task_progress = nil
+  state.task_detail_member = nil
+  state.detail_item = nil
+end
+
+local function render_task_detail()
+  local buf = state.task_detail_buf
+  local item = state.detail_item
+  local task = state.task_detail
+  if not buf or not vim.api.nvim_buf_is_valid(buf) or not item then return end
+  local progress = state.task_progress
+  local lines
+  if item.kind == 'task' and task then
+    lines = {
       ('%s [%s] %s'):format(
         task_symbols[task.status] or '?',
         task.type or 'task',
@@ -422,152 +566,117 @@ local function render_task_buffer()
     else
       table.insert(lines, 'No progress details are available.')
     end
-    set_task_lines(lines)
-    for _, win in ipairs(vim.fn.win_findbuf(state.task_buf)) do
-      vim.wo[win].winbar = (' Task details · %s  |  <BS>/q back  |  dd cancel '):format(
-        task.status or 'unknown'
-      )
-      vim.api.nvim_win_set_height(win, options.task_detail_height)
-    end
-    return
-  end
-
-  local lines = {}
-  local environment = state.environment[state.selected]
-  for _, component in ipairs(environment and environment.order or {}) do
-    local item = environment.components[component]
-    if item then
-      table.insert(lines, ('%s [environment] %s — %s'):format(
+  else
+    lines = {
+      ('%s [%s] %s'):format(
         task_symbols[item.status] or '?',
-        item.component,
-        item.detail or item.status
-      ))
-    end
-  end
-  for _, task in ipairs(tasks) do
-    table.insert(lines, ('%s [%s] %s'):format(
-      task_symbols[task.status] or '?',
-      task.type or 'task',
-      task_description(task)
-    ))
-    state.task_rows[#lines] = task
-  end
-  local tool_activity = state.tool_calls[state.selected]
-  for _, call_id in ipairs(tool_activity and tool_activity.order or {}) do
-    local tool = tool_activity.items[call_id]
-    if tool then
-      table.insert(lines, ('%s [tool] %s — %s'):format(
-        task_symbols[tool.status] or '?',
-        tool.name or 'tool',
-        tool.status == 'running' and 'processing…' or tool.status
-      ))
-    end
-  end
-  if #lines == 0 then lines = { 'No tracked tasks or environment activity.' } end
-  set_task_lines(lines)
-  local entry = buffers.get_member(state.selected)
-  local target = entry and entry.display_name or state.selected
-  local member_state = entry and entry.state or 'unknown'
-  local status = task_status_label(tasks)
-  local environment_status = environment_status_label(environment)
-  if environment_status then status = status .. '  ' .. environment_status end
-  for _, win in ipairs(vim.fn.win_findbuf(state.task_buf)) do
-    vim.wo[win].winbar = (' Tasks · %s · %s · %s  |  <Enter> details  |  dd cancel '):format(
-      target,
-      member_state,
-      status
-    )
-    vim.api.nvim_win_set_height(win, options.task_height)
-    vim.api.nvim_win_set_cursor(win, { #lines, 0 })
-  end
-end
-
-local function merge_tasks(member_id, incoming)
-  local current = state.tasks[member_id] or {}
-  local by_id = {}
-  for _, task in ipairs(current) do by_id[task.id] = task end
-  for _, task in ipairs(incoming or {}) do
-    if by_id[task.id] then
-      local updated = vim.tbl_deep_extend('force', by_id[task.id], task)
-      for index, candidate in ipairs(current) do
-        if candidate.id == task.id then
-          current[index] = updated
-          break
-        end
+        item.kind or 'activity',
+        item.label or 'Activity'
+      ),
+      ('Status: %s'):format(item.status or 'unknown'),
+      '',
+    }
+    local details = item.details or {}
+    local fields = item.kind == 'tool'
+        and {
+          { 'Arguments', details.arguments },
+          { 'Result', details.result },
+          { 'Error', details.error },
+        }
+      or {
+        { 'Prompt', details.prompt },
+        { 'Schedule', details.schedule },
+        { 'Next run', details.nextRunAt },
+      }
+    local populated = false
+    for _, field in ipairs(fields) do
+      if field[2] ~= nil and field[2] ~= '' then
+        populated = true
+        table.insert(lines, field[1] .. ':')
+        vim.list_extend(lines, vim.split(vim.inspect(field[2]), '\n', { plain = true }))
+        table.insert(lines, '')
       end
-      by_id[task.id] = updated
-    else
-      table.insert(current, task)
-      by_id[task.id] = task
     end
+    if not populated then table.insert(lines, 'No additional details are available.') end
   end
-  state.tasks[member_id] = current
-  if state.task_detail and state.task_detail.id and by_id[state.task_detail.id] then
-    state.task_detail = by_id[state.task_detail.id]
-  end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
 end
 
-local function cancel_cursor_task()
-  local task = task_at_cursor()
-  if not task then return end
-  if task.status ~= 'running' and task.status ~= 'idle' then
-    notify(('Task %s is already %s.'):format(task.id or '', task.status or 'finished'))
-    return
-  end
-  send('tasks.cancel', { target = state.selected, taskId = task.id })
-end
-
-local function show_cursor_task()
-  local task = task_at_cursor()
-  if not task then return end
-  state.task_detail = task
-  state.task_progress = nil
-  render_task_buffer()
-  send('tasks.progress', { target = state.selected, taskId = task.id })
-end
-
-local function show_task_list()
-  if not state.task_detail then return end
-  state.task_detail = nil
-  state.task_progress = nil
-  render_task_buffer()
-end
-
-local function ensure_task_buffer()
-  if state.task_buf and vim.api.nvim_buf_is_valid(state.task_buf) then return state.task_buf end
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, 'native-copilot://tasks')
+local function ensure_detail_buffer()
+  local buf = state.task_detail_buf
+  if buf and vim.api.nvim_buf_is_valid(buf) then return buf end
+  buf = vim.api.nvim_create_buf(false, true)
+  state.task_detail_buf = buf
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
-  vim.bo[buf].filetype = 'native-copilot-tasks'
+  vim.bo[buf].filetype = 'markdown'
   vim.bo[buf].modifiable = false
-  vim.bo[buf].readonly = true
+  vim.keymap.set('n', 'q', close_task_detail, { buffer = buf, desc = 'Close activity details' })
+  vim.keymap.set('n', '<BS>', close_task_detail, {
+    buffer = buf,
+    desc = 'Close activity details',
+  })
   vim.keymap.set('n', 'dd', cancel_cursor_task, {
     buffer = buf,
-    desc = 'Cancel Copilot task under cursor',
+    desc = 'Cancel this Copilot task',
   })
-  vim.keymap.set('n', '<CR>', show_cursor_task, {
-    buffer = buf,
-    desc = 'Show Copilot task details',
-  })
-  vim.keymap.set('n', '<BS>', show_task_list, {
-    buffer = buf,
-    desc = 'Return to Copilot task list',
-  })
-  vim.keymap.set('n', 'q', show_task_list, {
-    buffer = buf,
-    desc = 'Return to Copilot task list',
-  })
-  vim.keymap.set('n', 'r', function()
-    send('tasks.list', { target = state.selected, purpose = 'refresh' })
-  end, {
-    buffer = buf,
-    desc = 'Refresh Copilot tasks',
-  })
-  state.task_buf = buf
-  render_task_buffer()
   return buf
+end
+
+local function open_detail_window()
+  local buf = ensure_detail_buffer()
+  render_task_detail()
+  local width = math.max(40, math.min(100, vim.o.columns - 8))
+  local height = math.max(6, math.min(options.task_detail_height, vim.o.lines - 6))
+  if state.task_detail_win and vim.api.nvim_win_is_valid(state.task_detail_win) then
+    vim.api.nvim_win_set_buf(state.task_detail_win, buf)
+    vim.api.nvim_set_current_win(state.task_detail_win)
+    return
+  end
+  state.task_detail_win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    width = width,
+    height = height,
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Copilot activity details ',
+    title_pos = 'center',
+  })
+end
+
+local function show_task(task, member_id)
+  if not task then return end
+  state.task_detail = task
+  state.task_progress = nil
+  state.task_detail_member = member_id or state.selected
+  state.detail_item = {
+    kind = 'task',
+    label = task_description(task),
+    status = task.status,
+    task = task,
+  }
+  open_detail_window()
+  send('tasks.progress', { target = state.task_detail_member, taskId = task.id })
+end
+
+local function show_cursor_task()
+  local item, member_id = task_at_cursor()
+  if not item then return end
+  if item.kind == 'task' then
+    show_task(item.task, member_id)
+    return
+  end
+  if item.kind ~= 'tool' and item.kind ~= 'schedule' then return end
+  state.task_detail = nil
+  state.task_progress = nil
+  state.task_detail_member = member_id
+  state.detail_item = item
+  open_detail_window()
 end
 
 local function ordered_members()
@@ -611,11 +720,16 @@ local function configure_agent_buffer(member_id, buf)
         focus_prompt()
       end
     else
-      vim.cmd('normal! j')
+      local item = buffers.timeline_item_at_cursor(buf, vim.api.nvim_win_get_cursor(0)[1])
+      if item and (item.kind == 'task' or item.kind == 'tool' or item.kind == 'schedule') then
+        show_cursor_task()
+      else
+        vim.cmd('normal! j')
+      end
     end
   end, {
     buffer = buf,
-    desc = 'Select Copilot recipient in overview',
+    desc = 'Open task details or select Copilot recipient',
   })
 end
 
@@ -634,8 +748,6 @@ local function close_non_prompt_windows()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(state.tab)) do
     if vim.api.nvim_win_get_buf(win) == state.prompt_buf then
       prompt_win = win
-    elseif win == state.task_win then
-      -- Keep the task strip between the main view and prompt.
     elseif not keep then
       keep = win
     end
@@ -649,7 +761,6 @@ local function close_non_prompt_windows()
     if
       win ~= keep
       and win ~= prompt_win
-      and win ~= state.task_win
       and vim.api.nvim_win_is_valid(win)
     then
       pcall(vim.api.nvim_win_close, win, true)
@@ -675,13 +786,6 @@ local function ensure_ui()
   vim.api.nvim_win_set_buf(state.prompt_win, ensure_prompt_buffer())
   vim.api.nvim_win_set_height(state.prompt_win, options.prompt_height)
   vim.wo[state.prompt_win].winfixheight = true
-  vim.cmd('aboveleft split')
-  state.task_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.task_win, ensure_task_buffer())
-  vim.api.nvim_win_set_height(state.task_win, options.task_height)
-  vim.wo[state.task_win].winfixheight = true
-  vim.wo[state.task_win].cursorline = true
-  render_task_buffer()
   update_prompt_label()
   vim.api.nvim_set_current_win(state.prompt_win)
 end
@@ -707,12 +811,12 @@ end
 
 function M.close()
   if not is_ui_open() then return end
+  close_task_detail()
   vim.api.nvim_set_current_tabpage(state.tab)
   vim.cmd('tabclose')
   state.tab = nil
   state.main_win = nil
   state.prompt_win = nil
-  state.task_win = nil
   state.overview = false
 end
 
@@ -729,18 +833,17 @@ function M.show_member(member_id, view_id)
   end
   state.overview = false
   state.selected = member_id
-  state.task_detail = nil
-  state.task_progress = nil
+  close_task_detail()
   local win = close_non_prompt_windows()
   vim.api.nvim_win_set_buf(win, entry.views[view_id or 'conversation'].buf)
   buffers.mark_read(member_id)
   update_prompt_label()
-  render_task_buffer()
   vim.api.nvim_set_current_win(win)
 end
 
 function M.show_overview()
   ensure_ui()
+  close_task_detail()
   local members = ordered_members()
   if #members == 0 then return end
   state.overview = true
@@ -985,13 +1088,7 @@ end
 function M.select_task()
   if not start_host() then return end
   ensure_ui()
-  state.task_detail = nil
-  state.task_progress = nil
-  render_task_buffer()
-  if state.task_win and vim.api.nvim_win_is_valid(state.task_win) then
-    vim.api.nvim_set_current_win(state.task_win)
-  end
-  send('tasks.list', { target = state.selected, purpose = 'view' })
+  send('tasks.list', { target = state.selected, purpose = 'select' })
 end
 
 function M.cancel_background()
@@ -1176,18 +1273,42 @@ function M._on_event(message)
         })
       end
       picker(result.title or ('/' .. result.command), entries, function(item)
-        send('command.invoke', {
-          target = payload.target or member_id,
-          name = result.command,
-          input = item.option.name,
-        })
+        invoke_command(payload.target or member_id, result.command, item.option.name)
       end)
     end
     return
   elseif message.type == 'tasks.list' then
-    if payload.purpose == 'view' or payload.purpose == 'refresh' then
-      merge_tasks(payload.target or event_member(message), payload.tasks or {})
-      render_task_buffer()
+    local target = payload.target or event_member(message)
+    if payload.purpose == 'refresh' then
+      merge_tasks(target, payload.tasks or {})
+      return
+    end
+    if payload.purpose == 'select' then
+      merge_tasks(target, payload.tasks or {})
+      local entries = {}
+      for _, task in ipairs(state.tasks[target] or {}) do
+        table.insert(entries, {
+          display = ('%s [%s] %s'):format(
+            task_symbols[task.status] or '?',
+            task.type or 'task',
+            task_description(task)
+          ),
+          ordinal = table.concat({
+            task.status or '',
+            task.type or '',
+            task_description(task),
+            task.id or '',
+          }, ' '),
+          task = task,
+        })
+      end
+      if #entries == 0 then
+        notify(('No tracked tasks for %s.'):format(target))
+      else
+        picker(('Copilot tasks — %s'):format(target), entries, function(item)
+          show_task(item.task, target)
+        end)
+      end
       return
     end
     local active = {}
@@ -1217,10 +1338,13 @@ function M._on_event(message)
     return
   elseif message.type == 'tasks.cancelled' then
     if payload.cancelled then
-      for _, task in ipairs(state.tasks[payload.target or event_member(message)] or {}) do
-        if task.id == payload.taskId then task.status = 'cancelled' end
+      local target = payload.target or event_member(message)
+      for _, task in ipairs(state.tasks[target] or {}) do
+        if task.id == payload.taskId then
+          task.status = 'cancelled'
+          merge_tasks(target, { task })
+        end
       end
-      render_task_buffer()
       notify(('Cancelled background task %s.'):format(payload.taskId or ''))
     else
       notify(
@@ -1231,7 +1355,7 @@ function M._on_event(message)
     return
   elseif message.type == 'tasks.changed' then
     merge_tasks(event_member(message), payload.tasks or {})
-    render_task_buffer()
+    if state.task_detail then render_task_detail() end
     if state.status_buf and vim.api.nvim_buf_is_valid(state.status_buf) then
       update_status_buffer()
     end
@@ -1239,7 +1363,7 @@ function M._on_event(message)
   elseif message.type == 'tasks.progress' then
     if state.task_detail and state.task_detail.id == payload.taskId then
       state.task_progress = payload.progress
-      render_task_buffer()
+      render_task_detail()
     end
     return
   elseif message.type == 'tasks.error' then
@@ -1257,7 +1381,6 @@ function M._on_event(message)
     local member_id = event_member(message)
     buffers.set_state(member_id, 'loading')
     update_environment(member_id, component, 'running', payload.message or 'Loading...')
-    render_task_buffer()
     return
   elseif message.type == 'environment.loaded' then
     local component = payload.component or 'Environment'
@@ -1277,19 +1400,12 @@ function M._on_event(message)
       if #parts > 0 then detail = table.concat(parts, ', ') end
     end
     update_environment(event_member(message), component, 'completed', detail)
-    render_task_buffer()
     return
   elseif message.type == 'environment.error' then
     local member_id = event_member(message)
     local component = payload.component or 'Environment'
     local detail = payload.message or 'Loading failed'
     update_environment(member_id, component, 'failed', detail)
-    render_task_buffer()
-    buffers.append_activity_block(
-      member_id,
-      component .. ' error',
-      detail
-    )
     return
   elseif message.type == 'environment.status' then
     local detail = payload.status or 'unknown'
@@ -1310,7 +1426,6 @@ function M._on_event(message)
       row_status,
       detail
     )
-    render_task_buffer()
     return
   elseif message.type == 'session.recreated' then
     buffers.append_activity_block(
@@ -1320,6 +1435,9 @@ function M._on_event(message)
     )
     return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
+    if state.prompt_calls[message.requestId] then
+      fail_prompt(message.requestId, payload.message)
+    end
     notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
     return
   elseif message.type == 'fleet.requested' then
@@ -1332,11 +1450,16 @@ function M._on_event(message)
   elseif message.type == 'fleet.loading' then
     commands.reset_catalogs()
     state.command_requests = {}
+    close_task_detail()
     buffers.reset()
     state.configured_buffers = {}
     state.tasks = {}
     state.environment = {}
     state.tool_calls = {}
+    state.prompt_calls = {}
+    state.prompt_queues = {}
+    state.active_prompts = {}
+    state.schedules = {}
     state.mode = 'fleet-loading'
     state.active_fleet = payload.fleetId
     state.member_order = {}
@@ -1359,16 +1482,20 @@ function M._on_event(message)
       )
     end
     if is_ui_open() and state.selected then M.show_member(state.selected) end
-    render_task_buffer()
     return
   elseif message.type == 'session.loading' then
     commands.reset_catalogs()
     state.command_requests = {}
+    close_task_detail()
     buffers.reset()
     state.configured_buffers = {}
     state.tasks = {}
     state.environment = {}
     state.tool_calls = {}
+    state.prompt_calls = {}
+    state.prompt_queues = {}
+    state.active_prompts = {}
+    state.schedules = {}
     state.task_detail = nil
     state.task_progress = nil
     state.mode = 'standard-loading'
@@ -1378,15 +1505,13 @@ function M._on_event(message)
     ensure_member('standard', 'Copilot')
     buffers.set_state('standard', 'loading')
     if is_ui_open() then M.show_member('standard') end
-    render_task_buffer()
     return
   elseif message.type == 'mode.changed' then
     commands.reset_catalogs()
     state.command_requests = {}
+    close_task_detail()
     state.mode = payload.mode or 'stopped'
     state.active_fleet = payload.fleetId
-    state.task_detail = nil
-    state.task_progress = nil
     if payload.mode == 'standard' then
       state.member_order = { 'standard' }
       state.selected = 'standard'
@@ -1404,7 +1529,6 @@ function M._on_event(message)
       M.show_member(state.selected)
       focus_prompt()
     end
-    render_task_buffer()
     return
   end
 
@@ -1412,8 +1536,34 @@ function M._on_event(message)
   local entry = ensure_member(member_id)
   if message.type == 'session.history' then
     for _, event in ipairs(payload.events or {}) do history_event(member_id, event) end
+  elseif message.type == 'scheduled.prompt' then
+    local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
+    buffers.append_block(member_id, 'conversation', 'You', content)
+    local prompt_id = 'scheduled:' .. tostring(payload.eventId or message.id)
+    track_prompt(member_id, prompt_id, payload.delivery == 'queued' and 'idle' or 'running')
+  elseif message.type == 'prompt.queued' then
+    track_prompt(member_id, tostring(payload.id or message.id), 'idle')
+  elseif message.type == 'prompt.failed' then
+    fail_prompt(tostring(payload.id or message.id), payload.message)
+  elseif message.type == 'schedule.created' then
+    update_schedule(member_id, payload.id, vim.tbl_extend('force', payload, {
+      status = 'idle',
+    }))
+  elseif message.type == 'schedule.cancelled' then
+    update_schedule(member_id, payload.id, {
+      status = 'cancelled',
+      detail = 'cancelled',
+    })
+  elseif message.type == 'schedule.rearmed' then
+    update_schedule(member_id, payload.id, {
+      status = 'idle',
+      detail = 'rearmed',
+      nextRunAt = payload.nextRunAt
+        and os.date('%Y-%m-%d %H:%M:%S', math.floor(payload.nextRunAt / 1000))
+        or nil,
+    })
   elseif message.type == 'prompt.accepted' then
-    buffers.append_block(member_id, 'conversation', 'You', payload.content or '')
+    -- The user turn is rendered immediately on submission so queued work is visible without delay.
   elseif message.type == 'conversation.delta' then
     buffers.append_conversation_delta(member_id, payload.messageId or message.id, payload.content or '')
   elseif message.type == 'conversation.message' then
@@ -1436,8 +1586,9 @@ function M._on_event(message)
     if event_type == 'tool.execution_start' then
       local call_id = data.toolCallId or message.id
       local tool_name = data.toolName or data.mcpToolName or 'tool'
-      update_tool_call(member_id, call_id, tool_name, 'running')
-      render_task_buffer()
+      update_tool_call(member_id, call_id, tool_name, 'running', {
+        arguments = data.arguments,
+      })
     elseif event_type == 'tool.execution_complete' then
       local call_id = data.toolCallId or message.id
       local activity = state.tool_calls[member_id]
@@ -1446,9 +1597,12 @@ function M._on_event(message)
         member_id,
         call_id,
         existing and existing.name or 'tool',
-        data.success == true and 'completed' or 'failed'
+        data.success == true and 'completed' or 'failed',
+        {
+          result = data.result,
+          error = data.error,
+        }
       )
-      render_task_buffer()
     else
       local detail = data.intent or data.message or vim.inspect(data)
       buffers.append_activity_block(member_id, event_type, tostring(detail))
@@ -1459,8 +1613,13 @@ function M._on_event(message)
     buffers.append_activity_block(member_id, 'Error', payload.message or vim.inspect(payload))
     buffers.set_state(member_id, 'error')
   elseif message.type == 'member.state' then
-    buffers.set_state(member_id, payload.state or 'unknown')
-    render_task_buffer()
+    local member_state = payload.state or 'unknown'
+    buffers.set_state(member_id, member_state)
+    if member_state == 'busy' then
+      start_next_prompt(member_id)
+    elseif member_state == 'idle' then
+      complete_active_prompt(member_id)
+    end
   elseif message.type == 'mailbox.queued' or message.type == 'mailbox.delivered' then
     buffers.append_block(
       member_id,
