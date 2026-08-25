@@ -363,7 +363,7 @@ function M.upsert_timeline(member_id, item_id, item)
     )
     if #position > 0 then
       start_row = position[1]
-      local end_row = position[3].end_row or (start_row + record.line_count)
+      local end_row = start_row + record.line_count
       with_modifiable(view.buf, function()
         vim.api.nvim_buf_set_lines(view.buf, start_row, end_row, false, lines)
       end)
@@ -384,7 +384,7 @@ function M.upsert_timeline(member_id, item_id, item)
     end_row = start_row + #lines,
     end_col = 0,
     right_gravity = false,
-    end_right_gravity = true,
+    end_right_gravity = false,
   })
   record.line_count = #lines
   record.item = vim.deepcopy(item)
@@ -405,7 +405,7 @@ function M.remove_timeline(member_id, item_id)
     { details = true }
   )
   if #position > 0 then
-    local end_row = position[3].end_row or (position[1] + record.line_count)
+    local end_row = position[1] + record.line_count
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, position[1], end_row, false, {})
     end)
@@ -427,7 +427,7 @@ function M.timeline_item_at_cursor(buf, row)
           { details = true }
         )
         if #position > 0 then
-          local end_row = position[3].end_row or (position[1] + record.line_count)
+          local end_row = position[1] + record.line_count
           if zero_row >= position[1] and zero_row < end_row then
             return record.item, member_id
           end
