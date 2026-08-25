@@ -1,5 +1,5 @@
-local root = vim.env.COPILOT_FLEET_ROOT
-assert(root and root ~= '', 'COPILOT_FLEET_ROOT is required')
+local root = vim.env.NATIVE_COPILOT_ROOT
+assert(root and root ~= '', 'NATIVE_COPILOT_ROOT is required')
 vim.opt.runtimepath:prepend(root)
 
 local render_calls = {}
@@ -9,8 +9,9 @@ package.loaded['render-markdown'] = {
   render = function(context) table.insert(render_calls, context) end,
 }
 
-local buffers = require('copilot_fleet.buffers')
-local commands = require('copilot_fleet.commands')
+local buffers = require('native_copilot.buffers')
+local commands = require('native_copilot.commands')
+assert(require('copilot_fleet') == require('native_copilot'), 'legacy module alias is broken')
 assert(commands.parse('/autopilot on').name == 'autopilot')
 assert(commands.parse('/autopilot on').input == 'on')
 assert(commands.parse('/refine first line\nsecond line').input == 'first line\nsecond line')
@@ -65,10 +66,10 @@ assert(start_column == 12)
 assert(completion_matches[1].word == 'src/')
 commands.set_catalog('reviewer', command_catalog)
 assert(commands.catalog('reviewer') == command_catalog)
-local blink_source = require('copilot_fleet.blink').new()
+local blink_source = require('native_copilot.blink').new()
 local blink_buf = vim.api.nvim_create_buf(false, true)
-vim.b[blink_buf].copilot_fleet_prompt = true
-vim.b[blink_buf].copilot_fleet_target = 'reviewer'
+vim.b[blink_buf].native_copilot_prompt = true
+vim.b[blink_buf].native_copilot_target = 'reviewer'
 local blink_response
 blink_source:get_completions({
   bufnr = blink_buf,
@@ -94,7 +95,7 @@ buffers.setup({ render_debounce_ms = 30 })
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
 assert(vim.bo[member.views.conversation.buf].filetype == 'markdown')
-assert(vim.b[member.views.conversation.buf].copilot_fleet == true)
+assert(vim.b[member.views.conversation.buf].native_copilot == true)
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Please review this.')
 buffers.append_activity_delta('reviewer', 'reasoning-1', 'Checking the ')
@@ -125,7 +126,7 @@ assert(count == 1, 'stream final message was duplicated')
 local _, reasoning_count = text:gsub('Checking the implementation%.', '')
 assert(reasoning_count == 1, 'stream final reasoning was duplicated')
 
-local namespace = vim.api.nvim_get_namespaces().copilot_fleet_inline_activity
+local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
 local activity_marks = vim.api.nvim_buf_get_extmarks(
   member.views.conversation.buf,
   namespace,
@@ -164,7 +165,7 @@ buffers.append_activity_block('reviewer', 'Error', 'Activity-only terminal outpu
 vim.wait(80)
 assert(#render_calls == 3, 'activity-only output did not render while member state was busy')
 
-require('copilot_fleet').setup({
+require('native_copilot').setup({
   mappings = {
     toggle = '<leader>ait',
     fleet = '<leader>aif',
@@ -177,6 +178,9 @@ assert(vim.fn.maparg('<leader>ais', 'n') ~= '')
 assert(vim.fn.exists(':CopilotFleetTasks') == 2)
 assert(vim.fn.exists(':CopilotFleetAbort') == 2)
 assert(vim.fn.exists(':CopilotFleetCancelBackground') == 2)
+assert(vim.fn.exists(':NativeCopilotTasks') == 2)
+assert(vim.fn.exists(':NativeCopilotAbort') == 2)
+assert(vim.fn.exists(':NativeCopilotCancelBackground') == 2)
 
 buffers.reset()
 print('nvim smoke passed')

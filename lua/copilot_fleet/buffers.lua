@@ -2,8 +2,8 @@ local M = {}
 
 local registry = {}
 local render_generation = {}
-local activity_namespace = vim.api.nvim_create_namespace('copilot_fleet_inline_activity')
-local message_anchor_namespace = vim.api.nvim_create_namespace('copilot_fleet_message_anchor')
+local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
+local message_anchor_namespace = vim.api.nvim_create_namespace('native_copilot_message_anchor')
 local options = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
@@ -77,7 +77,7 @@ end
 
 local function create_buffer(name, member_id, view_id)
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, ('copilot-fleet://%s/%s'):format(member_id, view_id))
+  vim.api.nvim_buf_set_name(buf, ('native-copilot://%s/%s'):format(member_id, view_id))
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
@@ -87,6 +87,9 @@ local function create_buffer(name, member_id, view_id)
   vim.b[buf].copilot_fleet = true
   vim.b[buf].copilot_fleet_member = member_id
   vim.b[buf].copilot_fleet_view = view_id
+  vim.b[buf].native_copilot = true
+  vim.b[buf].native_copilot_member = member_id
+  vim.b[buf].native_copilot_view = view_id
   local initial_lines = { '# ' .. name, '' }
   with_modifiable(buf, function()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)

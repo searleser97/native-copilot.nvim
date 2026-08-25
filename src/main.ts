@@ -22,13 +22,20 @@ function option(name: string): string | undefined {
 }
 
 function hostOptions(): HostOptions {
-  const workspace = resolve(option("--workspace") ?? env.COPILOT_FLEET_WORKSPACE ?? process.cwd());
+  const workspace = resolve(
+    option("--workspace") ??
+      env.NATIVE_COPILOT_WORKSPACE ??
+      env.COPILOT_FLEET_WORKSPACE ??
+      process.cwd(),
+  );
   const configRoot =
+    env.NATIVE_COPILOT_CONFIG_HOME ??
     env.COPILOT_FLEET_CONFIG_HOME ??
     (process.platform === "win32"
       ? resolve(env.LOCALAPPDATA ?? homedir(), "nvim")
       : resolve(env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "nvim"));
   const dataRoot =
+    env.NATIVE_COPILOT_DATA_HOME ??
     env.COPILOT_FLEET_DATA_HOME ??
     (process.platform === "win32"
       ? resolve(env.LOCALAPPDATA ?? homedir(), "nvim-data")
@@ -36,13 +43,22 @@ function hostOptions(): HostOptions {
   return {
     workspace,
     configPath: resolve(
-      option("--config") ?? env.COPILOT_FLEET_CONFIG ?? resolve(configRoot, "copilot", "fleets.json"),
+      option("--config") ??
+        env.NATIVE_COPILOT_CONFIG ??
+        env.COPILOT_FLEET_CONFIG ??
+        resolve(configRoot, "copilot", "fleets.json"),
     ),
     databasePath: resolve(
-      option("--db") ?? env.COPILOT_FLEET_DATABASE ?? resolve(dataRoot, "copilot-fleet", "state.sqlite"),
+      option("--db") ??
+        env.NATIVE_COPILOT_DATABASE ??
+        env.COPILOT_FLEET_DATABASE ??
+        resolve(dataRoot, "native-copilot", "state.sqlite"),
     ),
     runtimeCommand:
-      env.COPILOT_FLEET_RUNTIME_COMMAND ?? env.NVIM_COPILOT_CMD ?? env.COPILOT_CLI_CMD,
+      env.NATIVE_COPILOT_RUNTIME_COMMAND ??
+      env.COPILOT_FLEET_RUNTIME_COMMAND ??
+      env.NVIM_COPILOT_CMD ??
+      env.COPILOT_CLI_CMD,
   };
 }
 

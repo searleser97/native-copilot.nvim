@@ -24,7 +24,7 @@ local function log_stderr(data)
   if #lines == 0 then return end
   local directory = vim.fn.stdpath('state')
   vim.fn.mkdir(directory, 'p')
-  vim.fn.writefile(lines, directory .. '/copilot-fleet.log', 'a')
+  vim.fn.writefile(lines, directory .. '/native-copilot.log', 'a')
 end
 
 local function process_line(line)
@@ -32,7 +32,7 @@ local function process_line(line)
   local ok, message = pcall(vim.json.decode, line)
   if not ok or type(message) ~= 'table' then
     vim.schedule(function()
-      vim.notify('Copilot Fleet received invalid host output. See copilot-fleet.log.', vim.log.levels.ERROR)
+      vim.notify('Native Copilot received invalid host output. See native-copilot.log.', vim.log.levels.ERROR)
     end)
     log_stderr({ 'Invalid host NDJSON: ' .. line })
     return
@@ -70,7 +70,7 @@ function M.start(opts, on_event)
   local host = plugin_root() .. '/dist/main.js'
   if vim.fn.filereadable(host) ~= 1 then
     vim.notify(
-      'Copilot Fleet host is not built. Run npm install && npm run build in ' .. plugin_root(),
+      'Native Copilot host is not built. Run npm install && npm run build in ' .. plugin_root(),
       vim.log.levels.ERROR
     )
     return false
@@ -89,7 +89,7 @@ function M.start(opts, on_event)
   state.job = vim.fn.jobstart(command, {
     cwd = opts.workspace or vim.uv.cwd(),
     env = opts.runtime_command and {
-      COPILOT_FLEET_RUNTIME_COMMAND = opts.runtime_command,
+      NATIVE_COPILOT_RUNTIME_COMMAND = opts.runtime_command,
     } or nil,
     stdout_buffered = false,
     stderr_buffered = false,
@@ -101,14 +101,14 @@ function M.start(opts, on_event)
       state.partial = ''
       if not expected then
         vim.schedule(function()
-          vim.notify(('Copilot Fleet host exited with code %d.'):format(code), vim.log.levels.ERROR)
+          vim.notify(('Native Copilot host exited with code %d.'):format(code), vim.log.levels.ERROR)
         end)
       end
     end,
   })
   if state.job <= 0 then
     state.job = nil
-    vim.notify('Could not start the Copilot Fleet host.', vim.log.levels.ERROR)
+    vim.notify('Could not start the Native Copilot host.', vim.log.levels.ERROR)
     return false
   end
   return true
@@ -116,7 +116,7 @@ end
 
 function M.send(message_type, payload)
   if not M.is_running() then
-    return nil, 'Copilot Fleet host is not running'
+    return nil, 'Native Copilot host is not running'
   end
   local id = request_id()
   local encoded = vim.json.encode({
@@ -127,7 +127,7 @@ function M.send(message_type, payload)
   })
   local written = vim.fn.chansend(state.job, encoded .. '\n')
   if written == 0 then
-    return nil, 'Could not write to the Copilot Fleet host'
+    return nil, 'Could not write to the Native Copilot host'
   end
   return id
 end

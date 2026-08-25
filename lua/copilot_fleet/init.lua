@@ -3,6 +3,10 @@ local buffers = require('copilot_fleet.buffers')
 local commands = require('copilot_fleet.commands')
 
 local M = {}
+local data_root = vim.fn.stdpath('data')
+local legacy_database = data_root .. '/copilot-fleet/state.sqlite'
+local default_database = data_root .. '/native-copilot/state.sqlite'
+if vim.fn.filereadable(legacy_database) == 1 then default_database = legacy_database end
 
 local function client_commands(fleets)
   local choices = {}
@@ -36,7 +40,7 @@ local defaults = {
   node_command = 'node',
   runtime_command = vim.env.NVIM_COPILOT_CMD or vim.env.COPILOT_CLI_CMD,
   config_path = vim.fn.stdpath('config') .. '/copilot/fleets.json',
-  database_path = vim.fn.stdpath('data') .. '/copilot-fleet/state.sqlite',
+  database_path = default_database,
   workspace = nil,
   prompt_height = 8,
   task_height = 5,
@@ -84,7 +88,7 @@ local state = {
 }
 
 local function notify(message, level)
-  vim.notify(message, level or vim.log.levels.INFO, { title = 'Copilot Fleet' })
+  vim.notify(message, level or vim.log.levels.INFO, { title = 'Native Copilot' })
 end
 
 local function is_ui_open()
@@ -138,6 +142,7 @@ local function update_prompt_label()
   local target = entry and entry.display_name or state.selected
   if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
     vim.b[state.prompt_buf].copilot_fleet_target = state.selected
+    vim.b[state.prompt_buf].native_copilot_target = state.selected
   end
   vim.wo[state.prompt_win].winbar =
     (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
@@ -223,6 +228,7 @@ local function ensure_prompt_buffer()
   vim.bo[buf].filetype = 'markdown'
   vim.b[buf].ai_prompt = true
   vim.b[buf].copilot_fleet_prompt = true
+  vim.b[buf].native_copilot_prompt = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
   vim.keymap.set('n', '<CR>', submit_prompt, {
     buffer = buf,
@@ -483,11 +489,11 @@ end
 local function ensure_task_buffer()
   if state.task_buf and vim.api.nvim_buf_is_valid(state.task_buf) then return state.task_buf end
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, 'copilot-fleet://tasks')
+  vim.api.nvim_buf_set_name(buf, 'native-copilot://tasks')
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
-  vim.bo[buf].filetype = 'copilot-fleet-tasks'
+  vim.bo[buf].filetype = 'native-copilot-tasks'
   vim.bo[buf].modifiable = false
   vim.bo[buf].readonly = true
   vim.keymap.set('n', 'dd', cancel_cursor_task, {
@@ -706,15 +712,16 @@ end
 local function update_status_buffer()
   if not state.status_buf or not vim.api.nvim_buf_is_valid(state.status_buf) then
     state.status_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(state.status_buf, 'copilot-fleet://status')
+    vim.api.nvim_buf_set_name(state.status_buf, 'native-copilot://status')
     vim.bo[state.status_buf].buftype = 'nofile'
     vim.bo[state.status_buf].bufhidden = 'hide'
     vim.bo[state.status_buf].swapfile = false
     vim.bo[state.status_buf].filetype = 'markdown'
     vim.b[state.status_buf].copilot_fleet = true
+    vim.b[state.status_buf].native_copilot = true
   end
   local lines = {
-    '# Copilot Fleet Status',
+    '# Native Copilot Status',
     '',
     ('- **Mode:** %s'):format(state.mode),
     ('- **Fleet:** %s'):format(state.active_fleet or 'none'),
@@ -1237,7 +1244,7 @@ function M._on_event(message)
     )
     return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
-    notify(payload.message or 'Copilot Fleet request failed.', vim.log.levels.ERROR)
+    notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
     return
   elseif message.type == 'fleet.requested' then
     buffers.append_activity_block(
@@ -1393,6 +1400,13 @@ function M.setup(user_options)
   vim.keymap.set('n', options.mappings.select, M.select, {
     desc = 'Select Copilot mode, agent, or view',
   })
+  vim.api.nvim_create_user_command('NativeCopilotToggle', M.toggle, {})
+  vim.api.nvim_create_user_command('NativeCopilotSelect', M.select_fleet, {})
+  vim.api.nvim_create_user_command('NativeCopilotAgents', M.select, {})
+  vim.api.nvim_create_user_command('NativeCopilotStatus', M.show_status, {})
+  vim.api.nvim_create_user_command('NativeCopilotTasks', M.select_task, {})
+  vim.api.nvim_create_user_command('NativeCopilotAbort', M.abort, {})
+  vim.api.nvim_create_user_command('NativeCopilotCancelBackground', M.cancel_background, {})
   vim.api.nvim_create_user_command('CopilotFleetToggle', M.toggle, {})
   vim.api.nvim_create_user_command('CopilotFleetSelect', M.select_fleet, {})
   vim.api.nvim_create_user_command('CopilotFleetAgents', M.select, {})

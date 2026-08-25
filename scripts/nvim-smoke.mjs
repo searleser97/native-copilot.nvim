@@ -6,7 +6,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 for (const script of ["nvim_smoke.lua", "nvim_ui_smoke.lua"]) {
   const result = spawnSync("nvim", ["--headless", "--clean", "-l", resolve(root, "test", script)], {
     cwd: root,
-    env: { ...process.env, COPILOT_FLEET_ROOT: root },
+    env: { ...process.env, NATIVE_COPILOT_ROOT: root },
     encoding: "utf8",
     windowsHide: true,
   });

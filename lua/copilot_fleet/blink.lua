@@ -8,7 +8,7 @@ function Source.new()
 end
 
 function Source:enabled()
-  return vim.b.copilot_fleet_prompt == true
+  return vim.b.native_copilot_prompt == true or vim.b.copilot_fleet_prompt == true
 end
 
 function Source:get_trigger_characters()
@@ -53,7 +53,8 @@ local function response(context, catalog)
 end
 
 function Source:get_completions(context, callback)
-  local target = vim.b[context.bufnr].copilot_fleet_target
+  local target = vim.b[context.bufnr].native_copilot_target
+    or vim.b[context.bufnr].copilot_fleet_target
   if not target then
     callback({ items = {} })
     return
@@ -68,7 +69,7 @@ function Source:get_completions(context, callback)
   local unsubscribe = commands.on_catalog(target, function(available)
     if not cancelled then callback(response(context, available)) end
   end)
-  local ok, fleet = pcall(require, 'copilot_fleet')
+  local ok, fleet = pcall(require, 'native_copilot')
   if ok then fleet.ensure_commands(target) end
   return function()
     cancelled = true

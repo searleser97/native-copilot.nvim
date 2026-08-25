@@ -1,4 +1,4 @@
-# copilot-fleet.nvim
+# native-copilot.nvim
 
 A native Neovim interface for GitHub Copilot with two explicit operating modes:
 
@@ -12,6 +12,7 @@ The Neovim plugin owns a local Node.js host through versioned NDJSON over stdio.
 - Neovim 0.10 or newer
 - Node.js `^20.19.0` or `>=22.12.0`
 - GitHub Copilot access and a Copilot CLI login
+- An authenticated [GitHub CLI](https://cli.github.com/) (`gh auth login`) for the built-in GitHub MCP server
 - Optional picker UI through [Telescope](https://github.com/nvim-telescope/telescope.nvim)
 - Optional rich rendering through [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim)
 
@@ -22,7 +23,7 @@ The Copilot SDK is a local dependency of this repository. A global SDK installat
 Build the host:
 
 ```powershell
-Set-Location E:\copilot-fleet.nvim
+Set-Location E:\native-copilot.nvim
 npm install
 npm run build
 ```
@@ -31,14 +32,14 @@ Load the local plugin with `lazy.nvim`:
 
 ```lua
 {
-  "searleser97/copilot-fleet.nvim",
+  "searleser97/native-copilot.nvim",
   lazy = false,
   build = "npm install --no-audit --no-fund && npm run build",
   dependencies = {
     "MeanderingProgrammer/render-markdown.nvim",
   },
   config = function()
-    require("copilot_fleet").setup()
+    require("native_copilot").setup()
   end,
 }
 ```
@@ -46,7 +47,7 @@ Load the local plugin with `lazy.nvim`:
 UI and rendering defaults can be adjusted in `setup`:
 
 ```lua
-require("copilot_fleet").setup({
+require("native_copilot").setup({
   -- Defaults to NVIM_COPILOT_CMD, then COPILOT_CLI_CMD, when either is set.
   runtime_command = nil,
   stream_flush_ms = 80,
@@ -83,10 +84,16 @@ On first use, the plugin copies `examples\fleets.json` to the editable user conf
 Runtime state is stored at:
 
 ```text
-%LOCALAPPDATA%\nvim-data\copilot-fleet\state.sqlite
+%LOCALAPPDATA%\nvim-data\native-copilot\state.sqlite
 ```
 
 No credentials or tokens belong in `fleets.json`.
+
+The built-in `github-mcp-server` authenticates through `gh auth token` at session startup. The
+token is read directly from the GitHub CLI credential store, passed to the SDK in memory, and is
+never written to plugin configuration, logs, SQLite, or conversation buffers. Existing
+installations continue using a legacy `copilot-fleet\state.sqlite` database when present so Fleet
+recovery history is preserved.
 
 ## Key bindings
 
@@ -116,7 +123,7 @@ scrollable. Its buffer-local actions are:
 | `dd` | Cancel the running or waiting task under the cursor |
 | `r` | Refresh task state |
 
-Use `/tasks` or `:CopilotFleetTasks` to focus this task buffer.
+Use `/tasks` or `:NativeCopilotTasks` to focus this task buffer.
 
 The same pane shows Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other
 environment initialization as non-actionable `[environment]` rows. These rows update in place,
@@ -132,19 +139,22 @@ Closing the prompt rejects the request, and pending requests are rejected when t
 Commands mirror the primary mappings:
 
 ```vim
-:CopilotFleetToggle
-:CopilotFleetSelect
-:CopilotFleetAgents
-:CopilotFleetStatus
-:CopilotFleetTasks
-:CopilotFleetAbort
-:CopilotFleetCancelBackground
+:NativeCopilotToggle
+:NativeCopilotSelect
+:NativeCopilotAgents
+:NativeCopilotStatus
+:NativeCopilotTasks
+:NativeCopilotAbort
+:NativeCopilotCancelBackground
 ```
+
+The previous `require("copilot_fleet")`, `copilot_fleet.blink`, and `:CopilotFleet*` names remain
+as compatibility aliases, so existing configurations continue to load during migration.
 
 Selection uses `vim.ui.select` by default. To use Telescope for Copilot Fleet pickers, install it separately and opt in explicitly:
 
 ```lua
-require("copilot_fleet").setup({
+require("native_copilot").setup({
   frontend = {
     picker = "telescope",
   },
@@ -178,7 +188,7 @@ runs record their owning host process, so opening another Neovim instance does n
 the first instance's work. Runs whose owning host has exited become recoverable.
 
 Neovim always starts in Standard mode with one Copilot session. A configured multi-session Fleet is
-created only when `/fleet`, `<leader>aif`, or `:CopilotFleetSelect` explicitly selects it, or when
+created only when `/fleet`, `<leader>aif`, or `:NativeCopilotSelect` explicitly selects it, or when
 Standard Copilot invokes the guarded `start_fleet` tool. The latter waits for the current Standard
 turn to become idle. Only members with `autoStart` are connected initially; other top-level member
 sessions remain visibly in `standby` until first prompted, queried for session commands, or sent a
@@ -259,16 +269,16 @@ by the configured-Fleet `/fleet` picker because it must restore multiple session
 state as one run.
 
 The embedded SDK registry's built-in `/fleet` would start a native subagent workflow inside one
-session. `copilot-fleet.nvim` replaces it so `/fleet` consistently controls configured independent
+session. `native-copilot.nvim` replaces it so `/fleet` consistently controls configured independent
 top-level sessions and mailbox routing instead.
 
 The SDK does expose typed task-management RPCs, which the plugin uses directly:
 
-- `:CopilotFleetTasks` focuses the live task list for the selected session.
-- `:CopilotFleetCancelBackground` cancels every background subagent in the selected session.
-- `:CopilotFleetAbort` aborts the selected session's foreground turn while keeping the session usable.
+- `:NativeCopilotTasks` focuses the live task list for the selected session.
+- `:NativeCopilotCancelBackground` cancels every background subagent in the selected session.
+- `:NativeCopilotAbort` aborts the selected session's foreground turn while keeping the session usable.
 
-Cancelling all background agents does not terminate promoted attached shell processes. A running shell tracked by the task registry can instead be selected and cancelled through `:CopilotFleetTasks`.
+Cancelling all background agents does not terminate promoted attached shell processes. A running shell tracked by the task registry can instead be selected and cancelled through `:NativeCopilotTasks`.
 
 ### Optional blink.cmp source
 
@@ -277,14 +287,14 @@ Cancelling all background agents does not terminate promoted attached shell proc
 ```lua
 sources = {
   default = function()
-    if vim.b.copilot_fleet_prompt then return { "copilot_fleet" } end
+    if vim.b.native_copilot_prompt then return { "native_copilot" } end
     return { "lsp", "buffer", "snippets", "path" }
   end,
   providers = {
-    copilot_fleet = {
+    native_copilot = {
       name = "Copilot",
-      module = "copilot_fleet.blink",
-      enabled = function() return vim.b.copilot_fleet_prompt == true end,
+      module = "native_copilot.blink",
+      enabled = function() return vim.b.native_copilot_prompt == true end,
       score_offset = 100,
     },
   },
@@ -316,5 +326,5 @@ npm run build
 The host’s stdout is protocol-only NDJSON. Diagnostics are written to stderr; Neovim appends them to:
 
 ```text
-stdpath("state")\copilot-fleet.log
+stdpath("state")\native-copilot.log
 ```

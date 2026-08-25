@@ -1,5 +1,5 @@
 {
-  "name": "copilot-fleet.nvim",
+  "name": "native-copilot.nvim",
   "version": "0.1.0",
   "private": true,
   "description": "Native Neovim UI and durable multi-agent host for GitHub Copilot",

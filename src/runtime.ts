@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import {
@@ -6,6 +7,7 @@ import {
   RuntimeConnection,
   defineTool,
   type CopilotSession,
+  type McpAuthHandler,
   type PermissionHandler,
   type PermissionRequest,
   type PermissionRequestResult,
@@ -147,7 +149,29 @@ export function instanceSessionId(
   scope: string,
   memberId: string,
 ): string {
-  return `fleet-${projectKey(workspace)}-${instanceId}-${scope}-${memberId}`;
+  return `native-copilot-${projectKey(workspace)}-${instanceId}-${scope}-${memberId}`;
+}
+
+export function githubCliAuthToken(): Promise<string> {
+  return new Promise((resolveToken, rejectToken) => {
+    execFile(
+      "gh",
+      ["auth", "token"],
+      { encoding: "utf8", windowsHide: true, maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error) {
+          rejectToken(new Error("GitHub CLI authentication is unavailable.", { cause: error }));
+          return;
+        }
+        const token = stdout.trim();
+        if (token === "") {
+          rejectToken(new Error("GitHub CLI returned an empty authentication token."));
+          return;
+        }
+        resolveToken(token);
+      },
+    );
+  });
 }
 
 function expandPath(value: string, workspace: string): string {
@@ -409,6 +433,48 @@ export class CopilotRuntime {
     };
   }
 
+  private mcpAuthHandler(memberId: string): McpAuthHandler {
+    return async (request) => {
+      if (request.serverName !== "github-mcp-server") {
+        this.emit(
+          "environment.error",
+          {
+            component: `${request.serverName} authentication`,
+            message: "This MCP server requires a host authentication provider.",
+          },
+          { memberId, target: "activity", done: true },
+        );
+        return { kind: "cancelled" };
+      }
+
+      const component = "GitHub MCP authentication";
+      this.emit(
+        "environment.progress",
+        { component, message: "Reading credentials from the authenticated GitHub CLI" },
+        { memberId, target: "activity", done: false },
+      );
+      try {
+        const accessToken = await githubCliAuthToken();
+        this.emit(
+          "environment.loaded",
+          { component, items: [{ status: "authenticated" }] },
+          { memberId, target: "activity", done: true },
+        );
+        return { kind: "token", accessToken };
+      } catch {
+        this.emit(
+          "environment.error",
+          {
+            component,
+            message: "Run `gh auth login` and restart the Copilot session.",
+          },
+          { memberId, target: "activity", done: true },
+        );
+        return { kind: "cancelled" };
+      }
+    };
+  }
+
   private refreshTasks(live: LiveSession): void {
     const refresh = ++live.taskRefresh;
     void live.session.rpc.tasks
@@ -447,7 +513,7 @@ export class CopilotRuntime {
 
   private memberConfig(member: ResolvedMember, tools: Tool<any>[]): SessionConfig {
     const config: SessionConfig = {
-      clientName: "copilot-fleet.nvim",
+      clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,
       streaming: true,
       includeSubAgentStreamingEvents: false,
@@ -457,6 +523,7 @@ export class CopilotRuntime {
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: member.initialPrompt },
       onPermissionRequest: this.permissionHandler(member.permission, member.id),
+      onMcpAuthRequest: this.mcpAuthHandler(member.id),
       tools,
       availableTools: sdkToolPatterns(member.permission.tools.allow),
       excludedTools: sdkToolPatterns(member.permission.tools.deny),
@@ -473,7 +540,7 @@ export class CopilotRuntime {
   private standardSessionConfig(standard: StandardConfig): SessionConfig {
     const permission = this.standardPermission();
     const config: SessionConfig = {
-      clientName: "copilot-fleet.nvim",
+      clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,
       streaming: true,
       reasoningSummary: standard.reasoningSummary ?? "detailed",
@@ -482,6 +549,7 @@ export class CopilotRuntime {
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: standard.initialPrompt },
       onPermissionRequest: this.permissionHandler(permission, "standard"),
+      onMcpAuthRequest: this.mcpAuthHandler("standard"),
       tools: [this.createStartFleetTool()],
       availableTools: sdkToolPatterns(permission.tools.allow),
       excludedTools: sdkToolPatterns(permission.tools.deny),

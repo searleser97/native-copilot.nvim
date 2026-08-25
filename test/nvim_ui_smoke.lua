@@ -1,8 +1,8 @@
-local root = vim.env.COPILOT_FLEET_ROOT
-assert(root and root ~= '', 'COPILOT_FLEET_ROOT is required')
+local root = vim.env.NATIVE_COPILOT_ROOT
+assert(root and root ~= '', 'NATIVE_COPILOT_ROOT is required')
 vim.opt.runtimepath:prepend(root)
 
-local fleet = require('copilot_fleet')
+local fleet = require('native_copilot')
 fleet.setup({ overview_max_agents = 4 })
 local hidden_lines = {}
 for index = 1, 40 do
@@ -18,7 +18,7 @@ fleet._on_event({
   },
 })
 assert(
-  vim.b[vim.api.nvim_get_current_buf()].copilot_fleet_prompt == true,
+  vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt == true,
   'mode initialization did not return focus to the input buffer'
 )
 fleet._on_event({
@@ -39,10 +39,10 @@ fleet._on_event({
     },
   },
 })
-local loading_entry = require('copilot_fleet.buffers').get_member('coordinator')
+local loading_entry = require('native_copilot.buffers').get_member('coordinator')
 assert(loading_entry.state == 'loading', 'Fleet member did not enter loading state')
 assert(
-  require('copilot_fleet.buffers').get_member('observer').state == 'standby',
+  require('native_copilot.buffers').get_member('observer').state == 'standby',
   'lazy Fleet member did not remain in standby'
 )
 local loading_text = table.concat(
@@ -67,7 +67,7 @@ fleet._on_event({
   },
 })
 assert(
-  vim.b[vim.api.nvim_get_current_buf()].copilot_fleet_prompt == true,
+  vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt == true,
   'Fleet initialization did not return focus to the input buffer'
 )
 fleet._on_event({
@@ -81,10 +81,10 @@ fleet._on_event({
     },
   },
 })
-local command_catalog = require('copilot_fleet.commands').catalog('coordinator')
-assert(require('copilot_fleet.commands').find(command_catalog, 'tasks').kind == 'client')
-assert(require('copilot_fleet.commands').find(command_catalog, 'fleet').kind == 'client')
-assert(require('copilot_fleet.commands').find(command_catalog, 'resume').kind == 'client')
+local command_catalog = require('native_copilot.commands').catalog('coordinator')
+assert(require('native_copilot.commands').find(command_catalog, 'tasks').kind == 'client')
+assert(require('native_copilot.commands').find(command_catalog, 'fleet').kind == 'client')
+assert(require('native_copilot.commands').find(command_catalog, 'resume').kind == 'client')
 fleet._on_event({
   v = 1,
   id = 'tasks-changed',
@@ -115,7 +115,7 @@ fleet._on_event({
     },
   },
 })
-local task_buf = vim.fn.bufnr('copilot-fleet://tasks')
+local task_buf = vim.fn.bufnr('native-copilot://tasks')
 assert(task_buf > 0, 'task buffer was not created')
 assert(vim.bo[task_buf].modifiable == false)
 assert(vim.bo[task_buf].readonly == true)
@@ -140,7 +140,7 @@ assert(task_maps.details.buffer == 1, 'task details mapping is not buffer-local'
 assert(task_maps.back.buffer == 1, 'task back mapping is not buffer-local')
 vim.api.nvim_set_current_win(task_win)
 vim.api.nvim_win_set_cursor(task_win, { 1, 0 })
-local protocol = require('copilot_fleet.protocol')
+local protocol = require('native_copilot.protocol')
 local original_send = protocol.send
 protocol.send = function() return 'ui-smoke-request' end
 task_maps.details.callback()
@@ -196,7 +196,7 @@ fleet._on_event({
     },
   },
 })
-local coordinator_buf = require('copilot_fleet.buffers').buffer('coordinator', 'conversation')
+local coordinator_buf = require('native_copilot.buffers').buffer('coordinator', 'conversation')
 local environment_text = table.concat(
   vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false),
   '\n'
@@ -372,16 +372,16 @@ local visible = {}
 for _, win in ipairs(wins) do
   visible[vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))] = true
 end
-assert(visible['copilot-fleet://coordinator/conversation'])
-assert(visible['copilot-fleet://planner/conversation'])
-assert(visible['copilot-fleet://implementer/conversation'])
-assert(visible['copilot-fleet://reviewer/conversation'])
+assert(visible['native-copilot://coordinator/conversation'])
+assert(visible['native-copilot://planner/conversation'])
+assert(visible['native-copilot://implementer/conversation'])
+assert(visible['native-copilot://reviewer/conversation'])
 local prompt_visible = false
 for name in pairs(visible) do
   if vim.fn.fnamemodify(name, ':t') == 'AI Prompt' then prompt_visible = true end
 end
 assert(prompt_visible, 'missing prompt buffer; visible=' .. vim.inspect(visible))
-assert(not visible['copilot-fleet://observer/conversation'])
+assert(not visible['native-copilot://observer/conversation'])
 
 fleet._on_event({
   v = 1,
@@ -395,7 +395,7 @@ fleet._on_event({
     content = table.concat(hidden_lines, '\n'),
   },
 })
-local buffers = require('copilot_fleet.buffers')
+local buffers = require('native_copilot.buffers')
 assert(buffers.get_member('observer').unread == 1)
 local observer_buf = buffers.buffer('observer', 'conversation')
 local text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
@@ -427,7 +427,7 @@ local conversation_text = table.concat(
   '\n'
 )
 assert(conversation_text:find('The SDK-provided reasoning summary is visible.', 1, true))
-local namespace = vim.api.nvim_get_namespaces().copilot_fleet_inline_activity
+local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
 local activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
   details = true,
 })

@@ -19,7 +19,7 @@ afterEach(() => {
 
 describe("FleetDatabase", () => {
   it("maps one stable Copilot session across multiple runs", () => {
-    const path = resolve(tmpdir(), `copilot-fleet-db-${process.pid}-${Date.now()}.sqlite`);
+    const path = resolve(tmpdir(), `native-copilot-db-${process.pid}-${Date.now()}.sqlite`);
     paths.push(path);
     const database = new FleetDatabase(path);
     database.createRun("run-1", "standard", null, "C:\\work", 1001);
@@ -35,7 +35,7 @@ describe("FleetDatabase", () => {
   });
 
   it("migrates the original unique-session schema without losing mappings", () => {
-    const path = resolve(tmpdir(), `copilot-fleet-db-v1-${process.pid}-${Date.now()}.sqlite`);
+    const path = resolve(tmpdir(), `native-copilot-db-v1-${process.pid}-${Date.now()}.sqlite`);
     paths.push(path);
     const original = new DatabaseSync(path);
     original.exec(`
@@ -79,7 +79,7 @@ describe("FleetDatabase", () => {
   });
 
   it("only interrupts runs whose owning Neovim host is gone", () => {
-    const path = resolve(tmpdir(), `copilot-fleet-db-owner-${process.pid}-${Date.now()}.sqlite`);
+    const path = resolve(tmpdir(), `native-copilot-db-owner-${process.pid}-${Date.now()}.sqlite`);
     paths.push(path);
     const database = new FleetDatabase(path);
     database.createRun("live-run", "fleet", "engineering", "C:\\work", 1001);
@@ -93,7 +93,7 @@ describe("FleetDatabase", () => {
   });
 
   it("lists and reclaims inactive Fleet sessions without exposing active runs", () => {
-    const path = resolve(tmpdir(), `copilot-fleet-db-resume-${process.pid}-${Date.now()}.sqlite`);
+    const path = resolve(tmpdir(), `native-copilot-db-resume-${process.pid}-${Date.now()}.sqlite`);
     paths.push(path);
     const database = new FleetDatabase(path);
     database.createRun("inactive-run", "fleet", "engineering", "C:\\work", 1001);
@@ -114,7 +114,7 @@ describe("FleetDatabase", () => {
   });
 
   it("keeps mailbox claims scoped to one recovered Fleet run", () => {
-    const path = resolve(tmpdir(), `copilot-fleet-db-mail-${process.pid}-${Date.now()}.sqlite`);
+    const path = resolve(tmpdir(), `native-copilot-db-mail-${process.pid}-${Date.now()}.sqlite`);
     paths.push(path);
     const database = new FleetDatabase(path);
     database.createRun("older-run", "fleet", "engineering", "C:\\work", 1001);

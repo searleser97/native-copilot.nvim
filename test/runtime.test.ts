@@ -71,6 +71,12 @@ describe("instanceSessionId", () => {
     expect(reviewer).not.toBe(planner);
   });
 
+  it("uses the Native Copilot prefix for new session IDs", () => {
+    expect(instanceSessionId("E:\\repo", "instance-a", "standard", "copilot")).toMatch(
+      /^native-copilot-/,
+    );
+  });
+
   it("enforces the Fleet permission ceiling before managed approval", () => {
     const request = {
       kind: "shell" as const,

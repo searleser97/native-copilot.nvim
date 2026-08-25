@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const mode = process.argv.includes("--fleet") ? "fleet" : "standard";
-const database = resolve(tmpdir(), `copilot-fleet-sdk-smoke-${process.pid}.sqlite`);
+const database = resolve(tmpdir(), `native-copilot-sdk-smoke-${process.pid}.sqlite`);
 const child = spawn(
   process.execPath,
   [
@@ -146,7 +146,7 @@ async function runStandard() {
       `Unexpected /context result: ${JSON.stringify(commandResult.payload?.result ?? null)}`,
     );
   }
-  const marker = "copilot-fleet-standard-smoke-ok";
+  const marker = "native-copilot-standard-smoke-ok";
   await request("prompt.send", {
     target: "standard",
     content: `Reply with exactly this text and nothing else: ${marker}`,
