@@ -186,6 +186,83 @@ async function main(): Promise<void> {
         );
         return;
       }
+      case "model.list": {
+        const target = requiredString(payload, "target", command.type);
+        const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;
+        protocol.send(
+          "model.list",
+          {
+            target,
+            state: await runtime.modelState(target),
+            ...(purpose === undefined ? {} : { purpose }),
+          },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "model.switch": {
+        const target = requiredString(payload, "target", command.type);
+        const modelId = requiredString(payload, "modelId", command.type);
+        protocol.send(
+          "model.changed",
+          { target, model: await runtime.switchModel(target, modelId) },
+          { requestId: command.id, memberId: target, target: "conversation", done: true },
+        );
+        return;
+      }
+      case "mcp.list": {
+        const target = requiredString(payload, "target", command.type);
+        const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;
+        const action = typeof payload.action === "string" ? payload.action : undefined;
+        protocol.send(
+          "mcp.list",
+          {
+            target,
+            servers: await runtime.listMcp(target),
+            ...(purpose === undefined ? {} : { purpose }),
+            ...(action === undefined ? {} : { action }),
+          },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "mcp.enable":
+      case "mcp.disable": {
+        const target = requiredString(payload, "target", command.type);
+        const serverName = requiredString(payload, "serverName", command.type);
+        protocol.send(
+          "mcp.changed",
+          {
+            target,
+            serverName,
+            enabled: command.type === "mcp.enable",
+            state: await runtime.setMcpEnabled(target, serverName, command.type === "mcp.enable"),
+          },
+          { requestId: command.id, memberId: target, target: "conversation", done: true },
+        );
+        return;
+      }
+      case "mcp.show": {
+        const target = requiredString(payload, "target", command.type);
+        const serverName = requiredString(payload, "serverName", command.type);
+        const servers = await runtime.listMcp(target);
+        protocol.send(
+          "mcp.show",
+          { target, serverName, servers },
+          { requestId: command.id, memberId: target, target: "conversation", done: true },
+        );
+        return;
+      }
+      case "mcp.tools": {
+        const target = requiredString(payload, "target", command.type);
+        const serverName = requiredString(payload, "serverName", command.type);
+        protocol.send(
+          "mcp.tools",
+          { target, serverName, tools: await runtime.listMcpTools(target, serverName) },
+          { requestId: command.id, memberId: target, target: "conversation", done: true },
+        );
+        return;
+      }
       case "mode.standard":
         await runtime.openStandard();
         protocol.send("request.complete", { type: command.type }, {

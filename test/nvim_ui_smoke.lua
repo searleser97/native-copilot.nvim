@@ -86,6 +86,8 @@ assert(require('native_copilot.commands').find(command_catalog, 'tasks').kind ==
 assert(require('native_copilot.commands').find(command_catalog, 'fleet').kind == 'client')
 assert(require('native_copilot.commands').find(command_catalog, 'resume').kind == 'client')
 assert(require('native_copilot.commands').find(command_catalog, 'mcp-reload').kind == 'client')
+assert(require('native_copilot.commands').find(command_catalog, 'mcp').kind == 'client')
+assert(require('native_copilot.commands').find(command_catalog, 'model').kind == 'client')
 fleet._on_event({
   v = 1,
   id = 'tasks-changed',
@@ -219,16 +221,41 @@ local environment_text = table.concat(
   '\n'
 )
 assert(
-  environment_text:find(
-    '✓ **[environment] MCP servers** — 1 connected, 1 failed',
-    1,
-    true
-  )
+  environment_text:find('✓ **[environment] MCP github** — connected', 1, true)
+)
+assert(
+  environment_text:find('✗ **[environment] MCP local** — failed', 1, true)
 )
 assert(
   not environment_text:find('Copilot environment', 1, true),
   'generic environment row was not replaced in place'
 )
+local github_mcp_row = assert(line_with(coordinator_buf, '[environment] MCP github'))
+local local_mcp_row = assert(line_with(coordinator_buf, '[environment] MCP local'))
+assert(local_mcp_row - github_mcp_row == 2, 'MCP rows should have exactly one blank line between them')
+fleet._on_event({
+  v = 1,
+  type = 'environment.status',
+  memberId = 'coordinator',
+  payload = {
+    component = 'MCP github',
+    status = 'pending',
+  },
+})
+assert(buffer_text(coordinator_buf):find('○ **[environment] MCP github** — pending', 1, true))
+assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
+fleet._on_event({
+  v = 1,
+  type = 'environment.status',
+  memberId = 'coordinator',
+  payload = {
+    component = 'MCP github',
+    status = 'connected',
+  },
+})
+assert(buffer_text(coordinator_buf):find('✓ **[environment] MCP github** — connected', 1, true))
+assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
+assert(line_count_with(coordinator_buf, '[environment] MCP github') == 1)
 local task_action_sent = false
 protocol.send = function()
   task_action_sent = true
@@ -236,7 +263,7 @@ protocol.send = function()
 end
 vim.api.nvim_set_current_win(coordinator_win)
 vim.api.nvim_win_set_cursor(coordinator_win, {
-  assert(line_with(coordinator_buf, '[environment] MCP servers')),
+  assert(line_with(coordinator_buf, '[environment] MCP github')),
   0,
 })
 conversation_maps.details.callback()
@@ -292,6 +319,102 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):find('# Copilot\n\nContext usage output', 1, true))
+protocol.send = function(message_type, payload)
+  invoked_command = { type = message_type, payload = payload }
+  return 'model-list-request'
+end
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { '/model' })
+prompt_submit.callback()
+protocol.send = original_send
+assert(invoked_command.type == 'model.list')
+assert(invoked_command.payload.target == 'coordinator')
+local original_select = vim.ui.select
+local model_picker
+protocol.send = function(message_type, payload)
+  invoked_command = { type = message_type, payload = payload }
+  return 'model-switch-request'
+end
+vim.ui.select = function(items, opts, on_choice)
+  model_picker = { items = items, opts = opts }
+  on_choice(items[2])
+end
+fleet._on_event({
+  v = 1,
+  type = 'model.list',
+  memberId = 'coordinator',
+  payload = {
+    target = 'coordinator',
+    purpose = 'select',
+    state = {
+      current = { modelId = 'gpt-5.4' },
+      models = {
+        { id = 'gpt-5.4', name = 'GPT-5.4' },
+        { id = 'claude-sonnet-5', name = 'Claude Sonnet 5' },
+      },
+    },
+  },
+})
+vim.ui.select = original_select
+protocol.send = original_send
+assert(model_picker.opts.prompt:find('current: gpt%-5%.4'))
+assert(invoked_command.type == 'model.switch')
+assert(invoked_command.payload.modelId == 'claude-sonnet-5')
+fleet._on_event({
+  v = 1,
+  type = 'model.changed',
+  memberId = 'coordinator',
+  payload = { model = { modelId = 'claude-sonnet-5' } },
+})
+assert(buffer_text(coordinator_buf):find('Model switched to `claude-sonnet-5`.', 1, true))
+protocol.send = function(message_type, payload)
+  invoked_command = { type = message_type, payload = payload }
+  return 'mcp-list-request'
+end
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { '/mcp list' })
+prompt_submit.callback()
+protocol.send = original_send
+assert(invoked_command.type == 'mcp.list')
+assert(invoked_command.payload.purpose == 'display')
+fleet._on_event({
+  v = 1,
+  type = 'mcp.list',
+  memberId = 'coordinator',
+  payload = {
+    target = 'coordinator',
+    purpose = 'display',
+    servers = {
+      { name = 'github-mcp-server', status = 'connected' },
+      { name = 'local-tools', status = 'disabled' },
+    },
+  },
+})
+assert(buffer_text(coordinator_buf):find('| github-mcp-server | connected |', 1, true))
+local mcp_picker_count = 0
+protocol.send = function(message_type, payload)
+  invoked_command = { type = message_type, payload = payload }
+  return 'mcp-action-request'
+end
+vim.ui.select = function(items, _, on_choice)
+  mcp_picker_count = mcp_picker_count + 1
+  on_choice(items[1])
+end
+fleet._on_event({
+  v = 1,
+  type = 'mcp.list',
+  memberId = 'coordinator',
+  payload = {
+    target = 'coordinator',
+    purpose = 'select',
+    servers = {
+      { name = 'github-mcp-server', status = 'connected' },
+    },
+  },
+})
+vim.ui.select = original_select
+protocol.send = original_send
+assert(mcp_picker_count == 2)
+assert(invoked_command.type == 'mcp.show')
+assert(invoked_command.payload.serverName == 'github-mcp-server')
 fleet._on_event({
   v = 1,
   id = 'command-prompt-queued',
@@ -442,7 +565,7 @@ fleet._on_event({
 assert(buffer_text(coordinator_buf):find('– **[schedule] Schedule #7** — cancelled', 1, true))
 assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
 local native_picker
-local original_select = vim.ui.select
+original_select = vim.ui.select
 vim.ui.select = function(items, opts, on_choice)
   native_picker = { items = items, opts = opts }
   on_choice(nil)

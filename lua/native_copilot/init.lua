@@ -36,6 +36,28 @@ local function client_commands(fleets)
       description = 'Reload MCP servers without restarting the Copilot session',
       kind = 'client',
     },
+    {
+      name = 'mcp',
+      description = 'Inspect and manage MCP servers for the current session',
+      kind = 'client',
+      input = {
+        hint = 'list|show|tools|enable|disable|reload [server]',
+        choices = {
+          { name = 'list', description = 'List MCP servers' },
+          { name = 'show', description = 'Show one MCP server' },
+          { name = 'tools', description = 'List tools for one MCP server' },
+          { name = 'enable', description = 'Enable one MCP server' },
+          { name = 'disable', description = 'Disable one MCP server' },
+          { name = 'reload', description = 'Reload all MCP servers' },
+        },
+      },
+    },
+    {
+      name = 'model',
+      description = 'Inspect or switch the current session model',
+      kind = 'client',
+      input = { hint = 'model id' },
+    },
   }
 end
 
@@ -317,6 +339,37 @@ local function submit_prompt()
     elseif command.name:lower() == 'mcp-reload' then
       send('mcp.reload', { target = state.selected })
       return
+    elseif command.name:lower() == 'model' then
+      if command.input then
+        send('model.switch', { target = state.selected, modelId = command.input })
+      else
+        send('model.list', { target = state.selected, purpose = 'select' })
+      end
+      return
+    elseif command.name:lower() == 'mcp' then
+      local action, server_name = (command.input or ''):match('^(%S+)%s*(.*)$')
+      action = action and action:lower() or 'select'
+      server_name = server_name ~= '' and server_name or nil
+      if action == 'reload' then
+        send('mcp.reload', { target = state.selected })
+      elseif action == 'list' then
+        send('mcp.list', { target = state.selected, purpose = 'display' })
+      elseif action == 'show' or action == 'tools' or action == 'enable' or action == 'disable' then
+        if server_name then
+          send('mcp.' .. action, { target = state.selected, serverName = server_name })
+        else
+          send('mcp.list', {
+            target = state.selected,
+            purpose = 'action',
+            action = action,
+          })
+        end
+      elseif action == 'select' then
+        send('mcp.list', { target = state.selected, purpose = 'select' })
+      else
+        notify(('Unknown /mcp action: %s'):format(action), vim.log.levels.ERROR)
+      end
+      return
     end
     invoke_command(state.selected, command.name, command.input)
   else
@@ -438,6 +491,19 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   end
 end
 
+local function remove_environment(member_id, component)
+  local environment = state.environment[member_id]
+  if not environment or not environment.components[component] then return end
+  environment.components[component] = nil
+  buffers.remove_timeline(member_id, 'environment:' .. component)
+  for index, name in ipairs(environment.order) do
+    if name == component then
+      table.remove(environment.order, index)
+      return
+    end
+  end
+end
+
 local function update_environment(member_id, component, status, detail)
   member_id = member_id or 'standard'
   component = component or 'Environment'
@@ -448,14 +514,7 @@ local function update_environment(member_id, component, status, detail)
   end
 
   if component ~= 'Copilot environment' and environment.components['Copilot environment'] then
-    environment.components['Copilot environment'] = nil
-    buffers.remove_timeline(member_id, 'environment:Copilot environment')
-    for index, name in ipairs(environment.order) do
-      if name == 'Copilot environment' then
-        table.remove(environment.order, index)
-        break
-      end
-    end
+    remove_environment(member_id, 'Copilot environment')
   end
 
   if not environment.components[component] then table.insert(environment.order, component) end
@@ -1208,6 +1267,72 @@ local function history_event(member_id, event)
   end
 end
 
+local function model_id(model)
+  return model.selectionId or model.id or model.modelId or model.name
+end
+
+local function model_name(model)
+  return model.name or model.displayName or model_id(model) or 'Unknown model'
+end
+
+local function send_mcp_action(target, action, server_name)
+  send('mcp.' .. action, {
+    target = target,
+    serverName = server_name,
+  })
+end
+
+local function select_mcp_server(target, servers, action)
+  local entries = {}
+  for _, server in ipairs(servers or {}) do
+    table.insert(entries, {
+      display = ('%s — %s'):format(server.name, server.status or 'unknown'),
+      ordinal = table.concat({
+        server.name or '',
+        server.status or '',
+        server.error or '',
+      }, ' '),
+      server = server,
+    })
+  end
+  if #entries == 0 then
+    notify('No MCP servers are configured for this session.', vim.log.levels.INFO)
+    return
+  end
+  picker(action and ('MCP server — ' .. action) or 'MCP servers', entries, function(item)
+    local server = item.server
+    if action then
+      send_mcp_action(target, action, server.name)
+      return
+    end
+    local actions = {
+      { display = 'Show server details', action = 'show' },
+      { display = 'List server tools', action = 'tools' },
+      {
+        display = server.status == 'disabled' and 'Enable server' or 'Disable server',
+        action = server.status == 'disabled' and 'enable' or 'disable',
+      },
+      { display = 'Reload all MCP servers', action = 'reload' },
+    }
+    picker(('MCP — %s'):format(server.name), actions, function(selected)
+      if selected.action == 'reload' then
+        send('mcp.reload', { target = target })
+      else
+        send_mcp_action(target, selected.action, server.name)
+      end
+    end)
+  end)
+end
+
+local function append_mcp_list(member_id, servers)
+  local lines = { '| Server | Status |', '| --- | --- |' }
+  for _, server in ipairs(servers or {}) do
+    table.insert(lines, ('| %s | %s |'):format(server.name or '?', server.status or 'unknown'))
+  end
+  if #lines == 2 then table.insert(lines, '| _None configured_ | — |') end
+  buffers.append_block(member_id, 'conversation', 'Copilot', table.concat(lines, '\n'))
+end
+
 function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
@@ -1253,6 +1378,103 @@ function M._on_event(message)
     state.command_requests[target] = nil
     commands.set_catalog(target, available)
     if payload.purpose ~= 'cache' then show_commands(target, available) end
+    return
+  elseif message.type == 'model.list' then
+    local target = payload.target or event_member(message)
+    local model_state = payload.state or {}
+    local current = model_state.current or {}
+    local current_id = current.modelId
+    local entries = {}
+    for _, model in ipairs(model_state.models or {}) do
+      local id = model_id(model)
+      table.insert(entries, {
+        display = ('%s%s — %s'):format(
+          id == current_id and '✓ ' or '',
+          model_name(model),
+          id or 'unknown'
+        ),
+        ordinal = table.concat({ model_name(model), id or '' }, ' '),
+        model = model,
+      })
+    end
+    if #entries == 0 then
+      notify('No models are available for this session.', vim.log.levels.INFO)
+      return
+    end
+    picker(('Copilot model — current: %s'):format(current_id or 'unknown'), entries, function(item)
+      local id = model_id(item.model)
+      if id and id ~= current_id then
+        send('model.switch', { target = target, modelId = id })
+      end
+    end)
+    return
+  elseif message.type == 'model.changed' then
+    local model = payload.model or {}
+    buffers.append_block(
+      event_member(message),
+      'conversation',
+      'Copilot',
+      ('Model switched to `%s`.'):format(model.modelId or model_id(model) or 'unknown')
+    )
+    return
+  elseif message.type == 'mcp.list' then
+    local target = payload.target or event_member(message)
+    if payload.purpose == 'display' then
+      append_mcp_list(target, payload.servers or {})
+    else
+      select_mcp_server(target, payload.servers or {}, payload.action)
+    end
+    return
+  elseif message.type == 'mcp.show' then
+    local server
+    for _, candidate in ipairs(payload.servers or {}) do
+      if candidate.name == payload.serverName then
+        server = candidate
+        break
+      end
+    end
+    if not server then
+      notify(('MCP server not found: %s'):format(payload.serverName or '?'), vim.log.levels.ERROR)
+      return
+    end
+    buffers.append_block(
+      event_member(message),
+      'conversation',
+      'Copilot',
+      ('**MCP server `%s`**\n\n```lua\n%s\n```'):format(server.name, vim.inspect(server))
+    )
+    return
+  elseif message.type == 'mcp.tools' then
+    local lines = { ('**Tools from `%s`**'):format(payload.serverName or '?'), '' }
+    for _, tool in ipairs(payload.tools or {}) do
+      table.insert(lines, ('- `%s` — %s'):format(tool.name or '?', tool.description or ''))
+    end
+    if #lines == 2 then table.insert(lines, '_No tools are currently exposed._') end
+    buffers.append_block(event_member(message), 'conversation', 'Copilot', table.concat(lines, '\n'))
+    return
+  elseif message.type == 'mcp.changed' then
+    local status = payload.enabled and 'enabled' or 'disabled'
+    local server
+    for _, candidate in ipairs(payload.state and payload.state.servers or {}) do
+      if candidate.name == payload.serverName then
+        server = candidate
+        break
+      end
+    end
+    if server then
+      update_environment(
+        event_member(message),
+        'MCP ' .. (server.name or payload.serverName),
+        server.status == 'failed' and 'failed' or 'completed',
+        server.status or status
+      )
+    end
+    buffers.append_block(
+      event_member(message),
+      'conversation',
+      'Copilot',
+      ('MCP server `%s` %s.'):format(payload.serverName or '?', status)
+    )
     return
   elseif message.type == 'command.result' then
     local member_id = event_member(message)
@@ -1387,17 +1609,24 @@ function M._on_event(message)
     local items = payload.items or {}
     local detail = ('%d loaded'):format(#items)
     if component == 'MCP servers' then
-      local statuses = {}
+      local member_id = event_member(message)
+      remove_environment(member_id, component)
+      local current = {}
       for _, server in ipairs(items) do
+        local server_component = 'MCP ' .. (server.name or 'unknown')
+        current[server_component] = true
         local status = server.status or 'unknown'
-        statuses[status] = (statuses[status] or 0) + 1
+        local row_status = status == 'failed' and 'failed'
+          or status == 'disabled' and 'cancelled'
+          or (status == 'pending' or status == 'connecting' or status == 'starting') and 'running'
+          or 'completed'
+        update_environment(member_id, server_component, row_status, status)
       end
-      local parts = {}
-      for status, count in pairs(statuses) do
-        table.insert(parts, ('%d %s'):format(count, status))
+      local environment = state.environment[member_id]
+      for name in pairs(vim.deepcopy(environment and environment.components or {})) do
+        if name:find('^MCP ') and not current[name] then remove_environment(member_id, name) end
       end
-      table.sort(parts)
-      if #parts > 0 then detail = table.concat(parts, ', ') end
+      return
     end
     update_environment(event_member(message), component, 'completed', detail)
     return
@@ -1411,8 +1640,14 @@ function M._on_event(message)
     local detail = payload.status or 'unknown'
     if payload.error and payload.error ~= '' then detail = detail .. ': ' .. payload.error end
     local row_status = 'completed'
-    if payload.status == 'connecting' or payload.status == 'starting' then
+    if
+      payload.status == 'pending'
+      or payload.status == 'connecting'
+      or payload.status == 'starting'
+    then
       row_status = 'running'
+    elseif payload.status == 'disabled' or payload.status == 'stopped' then
+      row_status = 'cancelled'
     elseif
       payload.status == 'failed'
       or payload.status == 'error'

@@ -370,6 +370,38 @@ export class CopilotRuntime {
     return (await live.session.rpc.commands.list()).commands;
   }
 
+  async modelState(target: string): Promise<unknown> {
+    const live = await this.activeSession(target);
+    const [models, current] = await Promise.all([
+      live.session.rpc.model.list(),
+      live.session.rpc.model.getCurrent(),
+    ]);
+    return { models: models.list, current };
+  }
+
+  async switchModel(target: string, modelId: string): Promise<unknown> {
+    const live = await this.activeSession(target);
+    return live.session.rpc.model.switchTo({ modelId });
+  }
+
+  async listMcp(target: string): Promise<unknown[]> {
+    const live = await this.activeSession(target);
+    return (await live.session.rpc.mcp.list()).servers;
+  }
+
+  async setMcpEnabled(target: string, serverName: string, enabled: boolean): Promise<unknown> {
+    const live = await this.activeSession(target);
+    const result = enabled
+      ? await live.session.rpc.mcp.enable({ serverName })
+      : await live.session.rpc.mcp.disable({ serverName });
+    return { result, servers: (await live.session.rpc.mcp.list()).servers };
+  }
+
+  async listMcpTools(target: string, serverName: string): Promise<unknown[]> {
+    const live = await this.activeSession(target);
+    return (await live.session.rpc.mcp.listTools({ serverName })).tools;
+  }
+
   async invokeCommand(target: string, name: string, input?: string): Promise<unknown> {
     const live = await this.activeSession(target);
     const result = await live.session.rpc.commands.invoke({

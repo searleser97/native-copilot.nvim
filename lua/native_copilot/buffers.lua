@@ -337,7 +337,6 @@ local function timeline_lines(kind, label, status, detail)
   }
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   return {
-    '',
     ('> %s **[%s] %s**%s'):format(symbols[status] or '?', kind, label, suffix),
     '',
   }

@@ -250,6 +250,9 @@ The client-native command set is intentionally small:
 - `/fleet` starts, stops, or recovers configured multi-session Fleets.
 - `/tasks` browses typed SDK background tasks and opens their floating details.
 - `/resume` lists and safely resumes workspace sessions.
+- `/model` opens the selected session's model picker; `/model <id>` switches directly.
+- `/mcp` opens a server/action picker. `/mcp list`, `show`, `tools`, `enable`, `disable`, and
+  `reload` are also available directly.
 - `/mcp-reload` reloads MCP connections without replacing the current session.
 
 All other commands use the active runtime's dynamic command catalog and invocation result.
@@ -274,14 +277,16 @@ Command behavior follows the result returned by the SDK:
 
 - Text and completion results are appended to the conversation.
 - Agent-prompt results are submitted to the selected agent as a normal turn.
-- Commands requiring a subcommand open a Telescope picker; argument choices are also available through completion. For example, `/mcp` exposes `list`, `show`, `enable`, `disable`, and `reload`.
+- Commands requiring a subcommand open a picker; repeated `select-subcommand` results support nested
+  command selection, while SDK-provided argument choices remain available through completion.
 
-Other than the explicit client-native `/fleet` and `/tasks` integrations, commands come from
-`session.rpc.commands.list()`. CLI-owned general session navigation such as `/new` and `/clear` is
-not currently exposed by the SDK session command registry. The plugin implements `/resume` through
-the SDK client's typed `listSessions()` and `resumeSession()` APIs. Fleet recovery remains handled
-by the configured-Fleet `/fleet` picker because it must restore multiple session IDs and mailbox
-state as one run.
+Other than the explicit client-native `/fleet`, `/tasks`, `/resume`, `/model`, and `/mcp`
+integrations, commands come from `session.rpc.commands.list()`. The model and MCP overrides use
+typed session RPCs so commands that are interactive in Copilot CLI remain actionable rather than
+returning an inert completion. CLI-owned general session navigation such as `/new` and `/clear` is
+not currently exposed by the SDK session command registry. Fleet recovery remains handled by the
+configured-Fleet `/fleet` picker because it must restore multiple session IDs and mailbox state as
+one run.
 
 The embedded SDK registry's built-in `/fleet` would start a native subagent workflow inside one
 session. `native-copilot.nvim` replaces it so `/fleet` consistently controls configured independent
