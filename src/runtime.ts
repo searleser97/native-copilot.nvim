@@ -80,6 +80,7 @@ interface LiveSession {
   session: CopilotSession;
   runId: string;
   memberId: string;
+  modelId?: string;
   busy: boolean;
   sequence: number;
   taskRefresh: number;
@@ -376,12 +377,24 @@ export class CopilotRuntime {
       live.session.rpc.model.list(),
       live.session.rpc.model.getCurrent(),
     ]);
-    return { models: models.list, current };
+    const modelId =
+      current.modelId ??
+      live.modelId ??
+      models.list.find((model) => model.is_chat_default)?.id;
+    return {
+      models: models.list,
+      current: {
+        ...current,
+        ...(modelId === undefined ? {} : { modelId }),
+      },
+    };
   }
 
   async switchModel(target: string, modelId: string): Promise<unknown> {
     const live = await this.activeSession(target);
-    return live.session.rpc.model.switchTo({ modelId });
+    const result = await live.session.rpc.model.switchTo({ modelId });
+    live.modelId = result.modelId;
+    return result;
   }
 
   async listMcp(target: string): Promise<unknown[]> {
@@ -770,6 +783,7 @@ export class CopilotRuntime {
       session,
       runId,
       memberId,
+      modelId: config.model,
       busy: false,
       sequence: 0,
       taskRefresh: 0,
