@@ -7,7 +7,6 @@ import {
   RuntimeConnection,
   defineTool,
   type CopilotSession,
-  type McpAuthHandler,
   type PermissionHandler,
   type PermissionRequest,
   type PermissionRequestResult,
@@ -91,6 +90,8 @@ interface EnvironmentProbe {
   component: string;
   load: (session: CopilotSession) => Promise<unknown[]>;
 }
+
+type McpAuthHandler = NonNullable<SessionConfig["onMcpAuthRequest"]>;
 
 type ActiveMode =
   | { kind: "standard"; runId: string }
