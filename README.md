@@ -33,6 +33,7 @@ Load the local plugin with `lazy.nvim`:
 {
   "searleser97/copilot-fleet.nvim",
   lazy = false,
+  build = "npm install --no-audit --no-fund && npm run build",
   dependencies = {
     "nvim-telescope/telescope.nvim",
     "MeanderingProgrammer/render-markdown.nvim",
