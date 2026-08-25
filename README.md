@@ -78,8 +78,6 @@ No credentials or tokens belong in `fleets.json`.
 | `<leader>ait` | Toggle the native Copilot tab; starts Standard Copilot when needed |
 | `<leader>aif` | Select/start a valid Fleet, or stop Fleet mode |
 | `<leader>ais` | Telescope picker for overview, status, member, and view |
-| `<leader>aik` | List active background tasks and select one to cancel |
-| `<leader>aix` | Abort the selected agent's current foreground turn |
 | `[a` / `]a` | Previous/next member conversation |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
@@ -182,9 +180,9 @@ The embedded SDK registry currently exposes `/fleet`, but not `/tasks` or `/suba
 
 The SDK does expose typed task-management RPCs, which the plugin uses directly:
 
-- `:CopilotFleetTasks` or `<leader>aik` lists running/idle agent and shell tasks for the selected session and cancels the selected task.
+- `:CopilotFleetTasks` lists running/idle agent and shell tasks for the selected session and cancels the selected task.
 - `:CopilotFleetCancelBackground` cancels every background subagent in the selected session.
-- `:CopilotFleetAbort` or `<leader>aix` aborts the selected session's foreground turn while keeping the session usable.
+- `:CopilotFleetAbort` aborts the selected session's foreground turn while keeping the session usable.
 
 Cancelling all background agents does not terminate promoted attached shell processes. A running shell tracked by the task registry can instead be selected and cancelled through `:CopilotFleetTasks`.
 

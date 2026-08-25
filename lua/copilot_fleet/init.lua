@@ -22,8 +22,6 @@ local defaults = {
     toggle = '<leader>ait',
     fleet = '<leader>aif',
     select = '<leader>ais',
-    tasks = '<leader>aik',
-    abort = '<leader>aix',
   },
 }
 
@@ -785,12 +783,6 @@ function M.setup(user_options)
   })
   vim.keymap.set('n', options.mappings.select, M.select, {
     desc = 'Select Copilot mode, agent, or view',
-  })
-  vim.keymap.set('n', options.mappings.tasks, M.select_task, {
-    desc = 'Cancel a Copilot background task',
-  })
-  vim.keymap.set('n', options.mappings.abort, M.abort, {
-    desc = 'Abort the selected Copilot turn',
   })
   vim.api.nvim_create_user_command('CopilotFleetToggle', M.toggle, {})
   vim.api.nvim_create_user_command('CopilotFleetSelect', M.select_fleet, {})
