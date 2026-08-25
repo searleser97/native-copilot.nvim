@@ -31,8 +31,7 @@ Load the local plugin with `lazy.nvim`:
 
 ```lua
 {
-  dir = "E:\\copilot-fleet.nvim",
-  name = "copilot-fleet.nvim",
+  "searleser97/copilot-fleet.nvim",
   lazy = false,
   dependencies = {
     "nvim-telescope/telescope.nvim",
