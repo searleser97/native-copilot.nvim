@@ -5,6 +5,7 @@
     "id": "standard",
     "displayName": "Copilot",
     "initialPrompt": "You are a general-purpose software engineering assistant. Work directly with the user, inspect before editing, and validate completed changes.",
+    "reasoningSummary": "detailed",
     "permissionProfile": "workspace-write"
   },
   "permissionProfiles": {

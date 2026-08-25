@@ -10,10 +10,15 @@ local defaults = {
   workspace = nil,
   prompt_height = 8,
   overview_max_agents = 4,
+  show_activity = true,
+  activity_width = 48,
+  render_debounce_ms = 200,
+  stream_flush_ms = 80,
   mappings = {
     toggle = '<leader>ait',
     fleet = '<leader>aif',
     select = '<leader>ais',
+    reasoning = '<leader>air',
   },
 }
 
@@ -22,6 +27,7 @@ local state = {
   tab = nil,
   main_win = nil,
   prompt_win = nil,
+  activity_win = nil,
   prompt_buf = nil,
   status_buf = nil,
   selected = 'standard',
@@ -30,6 +36,7 @@ local state = {
   member_order = { 'standard' },
   fleets = {},
   overview = false,
+  activity_visible = true,
   configured_buffers = {},
 }
 
@@ -211,7 +218,18 @@ local function close_non_prompt_windows()
   end
   state.main_win = keep
   state.prompt_win = prompt_win
+  state.activity_win = nil
   return keep
+end
+
+local function open_activity_pane(entry, main_win)
+  if not state.activity_visible then return end
+  vim.api.nvim_set_current_win(main_win)
+  vim.cmd('rightbelow vsplit')
+  state.activity_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(state.activity_win, entry.views.activity.buf)
+  local width = math.min(options.activity_width, math.max(20, math.floor(vim.o.columns * 0.4)))
+  pcall(vim.api.nvim_win_set_width, state.activity_win, width)
 end
 
 local function ensure_ui()
@@ -229,6 +247,7 @@ local function ensure_ui()
   vim.api.nvim_win_set_buf(state.prompt_win, ensure_prompt_buffer())
   vim.api.nvim_win_set_height(state.prompt_win, options.prompt_height)
   vim.wo[state.prompt_win].winfixheight = true
+  open_activity_pane(entry, state.main_win)
   update_prompt_label()
   vim.api.nvim_set_current_win(state.prompt_win)
 end
@@ -258,6 +277,7 @@ function M.close()
   state.tab = nil
   state.main_win = nil
   state.prompt_win = nil
+  state.activity_win = nil
   state.overview = false
 end
 
@@ -276,9 +296,21 @@ function M.show_member(member_id, view_id)
   state.selected = member_id
   local win = close_non_prompt_windows()
   vim.api.nvim_win_set_buf(win, entry.views[view_id or 'conversation'].buf)
+  if state.activity_visible and (view_id == nil or view_id == 'conversation') then
+    open_activity_pane(entry, win)
+  end
   buffers.mark_read(member_id)
   update_prompt_label()
   vim.api.nvim_set_current_win(win)
+end
+
+function M.toggle_activity()
+  if not is_ui_open() then
+    M.open()
+    return
+  end
+  state.activity_visible = not state.activity_visible
+  M.show_member(state.selected)
 end
 
 function M.show_overview()
@@ -550,6 +582,11 @@ end
 
 function M.setup(user_options)
   options = vim.tbl_deep_extend('force', vim.deepcopy(defaults), user_options or {})
+  state.activity_visible = options.show_activity
+  buffers.setup({
+    render_debounce_ms = options.render_debounce_ms,
+    stream_flush_ms = options.stream_flush_ms,
+  })
   vim.keymap.set('n', options.mappings.toggle, M.toggle, {
     desc = 'Toggle native Copilot',
   })
@@ -559,10 +596,14 @@ function M.setup(user_options)
   vim.keymap.set('n', options.mappings.select, M.select, {
     desc = 'Select Copilot mode, agent, or view',
   })
+  vim.keymap.set('n', options.mappings.reasoning, M.toggle_activity, {
+    desc = 'Toggle Copilot reasoning and activity',
+  })
   vim.api.nvim_create_user_command('CopilotFleetToggle', M.toggle, {})
   vim.api.nvim_create_user_command('CopilotFleetSelect', M.select_fleet, {})
   vim.api.nvim_create_user_command('CopilotFleetAgents', M.select, {})
   vim.api.nvim_create_user_command('CopilotFleetStatus', M.show_status, {})
+  vim.api.nvim_create_user_command('CopilotFleetReasoning', M.toggle_activity, {})
   vim.api.nvim_create_autocmd('BufWinEnter', {
     callback = function(args) buffers.on_shown(args.buf) end,
   })

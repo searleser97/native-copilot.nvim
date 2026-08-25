@@ -1,6 +1,7 @@
 export const PROTOCOL_VERSION = 1 as const;
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningSummary = "none" | "concise" | "detailed";
 
 export interface StandardConfig {
   id: string;
@@ -8,6 +9,7 @@ export interface StandardConfig {
   initialPrompt: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  reasoningSummary?: ReasoningSummary;
   permissionProfile: string;
 }
 
@@ -36,6 +38,7 @@ export interface AgentDefinition {
   initialPrompt: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  reasoningSummary?: ReasoningSummary;
   permissionProfile: string;
   ui?: {
     icon?: string;
@@ -59,6 +62,7 @@ export interface FleetMember {
   promptAppend?: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  reasoningSummary?: ReasoningSummary;
   permissionNarrowing?: PermissionNarrowing;
   recipients: string[];
   recipientGroups?: string[];
@@ -99,6 +103,7 @@ export interface ResolvedMember {
   initialPrompt: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  reasoningSummary: ReasoningSummary;
   permission: PermissionProfile;
   recipients: Set<string>;
   canBroadcast: boolean;

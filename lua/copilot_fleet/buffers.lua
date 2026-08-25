@@ -2,6 +2,10 @@ local M = {}
 
 local registry = {}
 local render_generation = {}
+local options = {
+  render_debounce_ms = 200,
+  stream_flush_ms = 80,
+}
 
 local function with_modifiable(buf, operation)
   if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -13,12 +17,18 @@ end
 
 local function render_markdown(buf, enabled)
   if not vim.api.nvim_buf_is_valid(buf) then return end
+  local wins = vim.fn.win_findbuf(buf)
+  if enabled and #wins == 0 then return end
   pcall(vim.api.nvim_buf_call, buf, function()
     local ok, renderer = pcall(require, 'render-markdown')
     if not ok then return end
     if enabled then
       renderer.buf_enable()
-      vim.api.nvim_exec_autocmds('TextChanged', { buffer = buf, modeline = false })
+      renderer.render({
+        buf = buf,
+        win = wins,
+        event = 'CopilotFleet',
+      })
     else
       renderer.buf_disable()
     end
@@ -40,7 +50,7 @@ local function finalize_render(view)
     end
     render_markdown(view.buf, true)
     view.dirty = false
-  end, 180)
+  end, options.render_debounce_ms)
 end
 
 local function create_buffer(name, member_id, view_id)
@@ -55,8 +65,13 @@ local function create_buffer(name, member_id, view_id)
   vim.b[buf].copilot_fleet = true
   vim.b[buf].copilot_fleet_member = member_id
   vim.b[buf].copilot_fleet_view = view_id
+  local initial_lines = { '# ' .. name, '' }
+  if view_id == 'activity' then
+    table.insert(initial_lines, '_Waiting for SDK reasoning summaries, intent, and tool activity._')
+    table.insert(initial_lines, '')
+  end
   with_modifiable(buf, function()
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '# ' .. name, '' })
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
   end)
   render_markdown(buf, false)
   return {
@@ -126,7 +141,11 @@ local function schedule_flush(view)
   view.flush_scheduled = true
   vim.defer_fn(function()
     if vim.api.nvim_buf_is_valid(view.buf) then flush(view) end
-  end, 80)
+  end, options.stream_flush_ms)
+end
+
+function M.setup(user_options)
+  options = vim.tbl_deep_extend('force', options, user_options or {})
 end
 
 local function append(view, text, final)

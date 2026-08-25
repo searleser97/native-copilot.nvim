@@ -60,6 +60,39 @@ assert(text:find('Hidden buffers retain this message.', 1, true))
 fleet.show_member('observer')
 assert(buffers.get_member('observer').unread == 0)
 assert(vim.api.nvim_get_current_buf() == observer_buf)
+local activity_visible = false
+for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+  if vim.api.nvim_win_get_buf(win) == buffers.buffer('observer', 'activity') then
+    activity_visible = true
+  end
+end
+assert(activity_visible, 'reasoning and activity pane is not visible')
+fleet._on_event({
+  v = 1,
+  id = 'reasoning-summary',
+  type = 'activity.reasoning',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    reasoningId = 'reasoning-summary',
+    content = 'The SDK-provided reasoning summary is visible.',
+  },
+})
+local activity_text = table.concat(
+  vim.api.nvim_buf_get_lines(buffers.buffer('observer', 'activity'), 0, -1, false),
+  '\n'
+)
+assert(activity_text:find('The SDK-provided reasoning summary is visible.', 1, true))
 
+fleet.close()
+fleet.show_member('observer')
+local reopened_activity_visible = false
+for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+  if vim.api.nvim_win_get_buf(win) == buffers.buffer('observer', 'activity') then
+    reopened_activity_visible = true
+  end
+end
+assert(reopened_activity_visible, 'reasoning and activity pane is missing after UI reopen')
 fleet.close()
 print('nvim UI smoke passed')

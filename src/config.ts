@@ -15,6 +15,7 @@ import type {
 const idPattern = /^[a-z0-9][a-z0-9._-]*$/;
 const id = z.string().min(1).regex(idPattern, "must be a stable lowercase identifier");
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
+const reasoningSummary = z.enum(["none", "concise", "detailed"]);
 const stringList = z.array(z.string().min(1));
 
 const permissionProfileSchema = z.object({
@@ -48,6 +49,7 @@ const fleetMemberSchema = z.object({
   promptAppend: z.string().optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: reasoningEffort.optional(),
+  reasoningSummary: reasoningSummary.optional(),
   permissionNarrowing: permissionNarrowingSchema.optional(),
   recipients: z.array(id),
   recipientGroups: z.array(id).optional(),
@@ -78,6 +80,7 @@ export const fleetConfigSchema = z.object({
     initialPrompt: z.string().min(1),
     model: z.string().min(1).optional(),
     reasoningEffort: reasoningEffort.optional(),
+    reasoningSummary: reasoningSummary.optional(),
     permissionProfile: id,
   }),
   permissionProfiles: z.record(id, permissionProfileSchema),
@@ -89,6 +92,7 @@ export const fleetConfigSchema = z.object({
       initialPrompt: z.string().min(1),
       model: z.string().min(1).optional(),
       reasoningEffort: reasoningEffort.optional(),
+      reasoningSummary: reasoningSummary.optional(),
       permissionProfile: id,
       ui: z
         .object({
@@ -246,6 +250,7 @@ export function validateFleet(
       displayName: member.displayName ?? agent.name,
       description: agent.description,
       initialPrompt,
+      reasoningSummary: member.reasoningSummary ?? agent.reasoningSummary ?? "detailed",
       permission: narrowPermission(
         profile,
         member.permissionNarrowing,

@@ -44,6 +44,17 @@ Load the local plugin with `lazy.nvim`:
 }
 ```
 
+UI and rendering defaults can be adjusted in `setup`:
+
+```lua
+require("copilot_fleet").setup({
+  show_activity = true,
+  activity_width = 48,
+  stream_flush_ms = 80,
+  render_debounce_ms = 200,
+})
+```
+
 On first use, the plugin copies `examples\fleets.json` to the editable user configuration:
 
 ```text
@@ -65,6 +76,7 @@ No credentials or tokens belong in `fleets.json`.
 | `<leader>ait` | Toggle the native Copilot tab; starts Standard Copilot when needed |
 | `<leader>aif` | Select/start a valid Fleet, or stop Fleet mode |
 | `<leader>ais` | Telescope picker for overview, status, member, and view |
+| `<leader>air` | Toggle the selected member's Reasoning & Activity pane |
 | `[a` / `]a` | Previous/next member conversation |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
@@ -77,6 +89,7 @@ Commands mirror the primary mappings:
 :CopilotFleetSelect
 :CopilotFleetAgents
 :CopilotFleetStatus
+:CopilotFleetReasoning
 ```
 
 ## Configuration
@@ -113,7 +126,7 @@ Fleet startup is all-or-nothing. Telescope marks invalid profiles and displays t
 
 ### Models
 
-`model` and `reasoningEffort` are optional on both catalog agents and Fleet members. Member values override catalog values. When omitted, the Copilot runtime chooses its default model. Use the host `models.list` protocol request to inspect the current account’s available models.
+`model`, `reasoningEffort`, and `reasoningSummary` are optional on both catalog agents and Fleet members. Member values override catalog values. `reasoningSummary` accepts `none`, `concise`, or `detailed` and defaults to `detailed`. When omitted, the Copilot runtime chooses its default model. Use the host `models.list` protocol request to inspect the current account’s available models.
 
 ## Messaging and recovery
 
@@ -129,9 +142,9 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 
 Conversation, activity/reasoning, mailbox, and status views are native `nofile` Markdown buffers. They retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
-Streaming deltas are batched and appended only to the changed buffer tail. Rich Markdown rendering is disabled while a response is streaming, enabled once at turn completion, and deferred for hidden buffers until they become visible.
+Streaming deltas are batched and appended only to the changed buffer tail. Rich Markdown rendering is disabled while a response is streaming, debounced at turn completion, scoped to windows where the buffer is visible, and deferred for hidden buffers until they become visible. Configure this with `stream_flush_ms` and `render_debounce_ms`.
 
-The activity view displays SDK-provided reasoning events, intent, tool activity, and errors. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden reasoning.
+The selected member's Reasoning & Activity pane is visible by default and displays SDK-provided reasoning summaries, intent, tool activity, and errors. Toggle it with `<leader>air`. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
 ## Lifecycle
 

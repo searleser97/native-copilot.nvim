@@ -25,6 +25,7 @@ describe("fleet configuration", () => {
     const result = validateFleet(config, "engineering", "C:\\work");
     expect(result.valid).toBe(true);
     expect(result.fleet?.members.get("planner")?.recipients).toContain("coordinator");
+    expect(result.fleet?.members.get("planner")?.reasoningSummary).toBe("detailed");
   });
 
   it("rejects a missing coordinator fallback edge", async () => {
