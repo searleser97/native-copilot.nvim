@@ -235,4 +235,3 @@ function M.reset()
   render_generation = {}
 end
 return M
-return M

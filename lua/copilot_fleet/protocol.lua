@@ -141,4 +141,3 @@ function M.stop_sync(timeout_ms)
   state.job = nil
 end
 return M
-return M
