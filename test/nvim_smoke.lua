@@ -10,6 +10,12 @@ package.loaded['render-markdown'] = {
 }
 
 local buffers = require('copilot_fleet.buffers')
+local commands = require('copilot_fleet.commands')
+assert(commands.parse('/autopilot on').name == 'autopilot')
+assert(commands.parse('/autopilot on').input == 'on')
+assert(commands.parse('/future-command').name == 'future-command')
+assert(commands.parse('normal prompt') == nil)
+assert(commands.prompt({ name = 'model', input = { hint = 'model name' } }) == '/model ')
 buffers.setup({ render_debounce_ms = 30 })
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')

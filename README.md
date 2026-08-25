@@ -77,6 +77,7 @@ No credentials or tokens belong in `fleets.json`.
 | `[a` / `]a` | Previous/next member conversation |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
+| `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
 
 Commands mirror the primary mappings:
@@ -141,6 +142,8 @@ Conversation, mailbox, and status views are native `nofile` Markdown buffers. In
 Streaming deltas are batched and appended only to the changed buffer tail. Rich Markdown rendering is disabled while a response is streaming, debounced at turn completion, scoped to windows where the buffer is visible, and deferred for hidden buffers until they become visible. Configure this with `stream_flush_ms` and `render_debounce_ms`.
 
 SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
+
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent.
 
 ## Lifecycle
 

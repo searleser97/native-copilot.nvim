@@ -125,6 +125,26 @@ async function main(): Promise<void> {
           { requestId: command.id, done: true },
         );
         return;
+      case "commands.list": {
+        const target = requiredString(payload, "target", command.type);
+        protocol.send(
+          "commands.list",
+          { target, commands: await runtime.listCommands(target) },
+          { requestId: command.id, done: true },
+        );
+        return;
+      }
+      case "command.invoke": {
+        const target = requiredString(payload, "target", command.type);
+        const name = requiredString(payload, "name", command.type);
+        const input = typeof payload.input === "string" ? payload.input : undefined;
+        protocol.send(
+          "command.result",
+          { target, name, result: await runtime.invokeCommand(target, name, input) },
+          { requestId: command.id, memberId: target, target: "conversation", done: true },
+        );
+        return;
+      }
       case "mode.standard":
         await runtime.openStandard();
         protocol.send("request.complete", { type: command.type }, {

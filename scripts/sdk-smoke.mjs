@@ -112,6 +112,31 @@ async function shutdown() {
 
 async function runStandard() {
   await request("mode.standard", {}, 120_000);
+  const commandRequestId = send("commands.list", { target: "standard" });
+  const commandList = await waitFor(
+    (event) => event.type === "commands.list" && event.requestId === commandRequestId,
+    "dynamic slash command list",
+  );
+  if (!Array.isArray(commandList.payload?.commands) || commandList.payload.commands.length === 0) {
+    throw new Error("The active Copilot session returned no slash commands");
+  }
+  const inspectionCommand = commandList.payload.commands.find((command) => command.name === "context");
+  if (!inspectionCommand) {
+    throw new Error("The active Copilot session did not expose the read-only /context smoke command");
+  }
+  const invokeRequestId = send("command.invoke", {
+    target: "standard",
+    name: inspectionCommand.name,
+  });
+  const commandResult = await waitFor(
+    (event) => event.type === "command.result" && event.requestId === invokeRequestId,
+    "slash command invocation",
+  );
+  if (!["text", "completed", "select-subcommand"].includes(commandResult.payload?.result?.kind)) {
+    throw new Error(
+      `Unexpected /context result: ${JSON.stringify(commandResult.payload?.result ?? null)}`,
+    );
+  }
   const marker = "copilot-fleet-standard-smoke-ok";
   await request("prompt.send", {
     target: "standard",
@@ -131,11 +156,22 @@ async function runStandard() {
       event.payload?.state === "idle",
     "Standard Copilot idle",
   );
-  console.log(`standard smoke passed: ${response.payload.content.trim()}`);
+  console.log(
+    `standard smoke passed with ${commandList.payload.commands.length} dynamic commands: ` +
+      response.payload.content.trim(),
+  );
 }
 
 async function runFleet() {
   await request("fleet.start", { fleetId: "engineering" }, 180_000);
+  const commandRequestId = send("commands.list", { target: "coordinator" });
+  const commandList = await waitFor(
+    (event) => event.type === "commands.list" && event.requestId === commandRequestId,
+    "Fleet member slash command list",
+  );
+  if (!Array.isArray(commandList.payload?.commands) || commandList.payload.commands.length === 0) {
+    throw new Error("The Fleet member session returned no slash commands");
+  }
   const marker = "reviewer-mailbox-smoke-ok";
   await request("prompt.send", {
     target: "coordinator",
@@ -166,7 +202,10 @@ async function runFleet() {
       event.payload?.state === "idle",
     "reviewer idle",
   );
-  console.log(`fleet mailbox smoke passed: ${response.payload.content.trim()}`);
+  console.log(
+    `fleet mailbox smoke passed with ${commandList.payload.commands.length} dynamic commands: ` +
+      response.payload.content.trim(),
+  );
 }
 
 try {

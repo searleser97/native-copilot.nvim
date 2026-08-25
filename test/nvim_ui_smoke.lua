@@ -137,6 +137,27 @@ for _, mark in ipairs(activity_marks) do
   assert(mark[4].end_row <= assistant_row, 'activity highlight leaked into assistant output')
 end
 
+fleet._on_event({
+  v = 1,
+  id = 'command-result',
+  type = 'command.result',
+  memberId = 'observer',
+  target = 'conversation',
+  done = true,
+  payload = {
+    target = 'observer',
+    name = 'future-command',
+    result = {
+      kind = 'text',
+      text = 'Dynamically discovered command output.',
+      markdown = true,
+    },
+  },
+})
+conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
+assert(conversation_text:find('## /future-command', 1, true))
+assert(conversation_text:find('Dynamically discovered command output.', 1, true))
+
 fleet.close()
 fleet.show_member('observer')
 assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'UI reopen created an unexpected activity pane')

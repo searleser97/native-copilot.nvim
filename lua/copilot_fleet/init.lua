@@ -1,5 +1,6 @@
 local protocol = require('copilot_fleet.protocol')
 local buffers = require('copilot_fleet.buffers')
+local commands = require('copilot_fleet.commands')
 
 local M = {}
 
@@ -102,7 +103,16 @@ local function submit_prompt()
     return
   end
   set_prompt_lines({ '' })
-  send('prompt.send', { target = state.selected, content = content })
+  local command = commands.parse(content)
+  if command then
+    send('command.invoke', {
+      target = state.selected,
+      name = command.name,
+      input = command.input,
+    })
+  else
+    send('prompt.send', { target = state.selected, content = content })
+  end
 end
 
 local function ensure_prompt_buffer()
@@ -128,6 +138,20 @@ local function ensure_prompt_buffer()
   end, {
     buffer = buf,
     desc = 'Insert AI prompt snippet',
+  })
+  vim.keymap.set('i', '/', function()
+    local row, column = unpack(vim.api.nvim_win_get_cursor(0))
+    local before = table.concat(vim.api.nvim_buf_get_lines(buf, 0, row - 1, false), '')
+      .. (vim.api.nvim_get_current_line():sub(1, column))
+    if before == '' then
+      vim.schedule(M.select_commands)
+      return ''
+    end
+    return '/'
+  end, {
+    buffer = buf,
+    expr = true,
+    desc = 'Browse Copilot slash commands',
   })
   state.prompt_buf = buf
   return buf
@@ -373,6 +397,38 @@ local function picker(title, entries, choose)
   }):find()
 end
 
+function M.select_commands()
+  if not start_host() then return end
+  ensure_ui()
+  send('commands.list', { target = state.selected })
+end
+
+local function show_commands(target, available)
+  local entries = {}
+  for _, command in ipairs(available) do
+    local aliases = command.aliases and #command.aliases > 0
+        and (' [' .. table.concat(command.aliases, ', ') .. ']')
+      or ''
+    table.insert(entries, {
+      display = ('/%s%s — %s'):format(command.name, aliases, command.description),
+      ordinal = command.name .. ' ' .. command.description .. ' ' .. table.concat(command.aliases or {}, ' '),
+      command = command,
+    })
+  end
+  picker(('Copilot commands — %s'):format(target), entries, function(item)
+    state.selected = target
+    ensure_ui()
+    local prompt = commands.prompt(item.command)
+    set_prompt_lines({ prompt })
+    update_prompt_label()
+    if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+      vim.api.nvim_set_current_win(state.prompt_win)
+      vim.api.nvim_win_set_cursor(state.prompt_win, { 1, #prompt })
+      vim.cmd('startinsert!')
+    end
+  end)
+end
+
 function M.select()
   if not start_host() then return end
   ensure_ui()
@@ -476,6 +532,36 @@ function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
     state.fleets = payload.fleets or {}
+    return
+  elseif message.type == 'commands.list' then
+    show_commands(payload.target or state.selected, payload.commands or {})
+    return
+  elseif message.type == 'command.result' then
+    local member_id = event_member(message)
+    local result = payload.result or {}
+    if result.kind == 'text' and result.text and result.text ~= '' then
+      buffers.append_block(member_id, 'conversation', '/' .. (payload.name or 'command'), result.text)
+    elseif result.kind == 'completed' and result.message and result.message ~= '' then
+      buffers.append_block(member_id, 'conversation', '/' .. (payload.name or 'command'), result.message)
+    elseif result.kind == 'agent-prompt' and result.notice and result.notice ~= '' then
+      buffers.append_activity_block(member_id, '/' .. (payload.name or 'command'), result.notice)
+    elseif result.kind == 'select-subcommand' then
+      local entries = {}
+      for _, option in ipairs(result.options or {}) do
+        table.insert(entries, {
+          display = ('%s — %s'):format(option.name, option.description),
+          ordinal = option.name .. ' ' .. option.description,
+          option = option,
+        })
+      end
+      picker(result.title or ('/' .. result.command), entries, function(item)
+        send('command.invoke', {
+          target = payload.target or member_id,
+          name = result.command,
+          input = item.option.name,
+        })
+      end)
+    end
     return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
     notify(payload.message or 'Copilot Fleet request failed.', vim.log.levels.ERROR)

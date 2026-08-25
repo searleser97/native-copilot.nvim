@@ -214,6 +214,57 @@ export class CopilotRuntime {
     return (await this.ensureClient()).listModels();
   }
 
+  private async activeSession(target: string): Promise<LiveSession> {
+    if (!this.active) {
+      await this.openStandard();
+    }
+    const live =
+      this.active!.kind === "standard"
+        ? this.live.get("standard")
+        : await this.ensureFleetMember(target);
+    if (!live) {
+      throw new Error(`Target "${target}" is not active.`);
+    }
+    return live;
+  }
+
+  async listCommands(target: string): Promise<unknown[]> {
+    const live = await this.activeSession(target);
+    return (await live.session.rpc.commands.list()).commands;
+  }
+
+  async invokeCommand(target: string, name: string, input?: string): Promise<unknown> {
+    const live = await this.activeSession(target);
+    const result = await live.session.rpc.commands.invoke({
+      name,
+      ...(input === undefined ? {} : { input }),
+    });
+    if (result.kind !== "agent-prompt") {
+      return result;
+    }
+
+    const id = randomUUID();
+    const display = result.displayPrompt || `/${name}${input ? ` ${input}` : ""}`;
+    this.db.enqueueMessage(id, live.runId, "user", live.memberId, "user", display);
+    try {
+      const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "enqueue" });
+      this.db.completeMessage(id);
+      this.emit(
+        "prompt.accepted",
+        { id, sdkMessageId, source: "user", target: live.memberId, content: display },
+        { runId: live.runId, memberId: live.memberId, target: "conversation" },
+      );
+      return {
+        kind: result.kind,
+        notice: result.notice,
+        runtimeSettingsChanged: result.runtimeSettingsChanged,
+      };
+    } catch (error) {
+      this.db.failMessage(id, error instanceof Error ? error.message : String(error), true);
+      throw error;
+    }
+  }
+
   private standardPermission(): PermissionProfile {
     const profile = this.config.permissionProfiles[this.config.standard.permissionProfile];
     if (!profile) {
@@ -579,17 +630,8 @@ export class CopilotRuntime {
   }
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
-    if (!this.active) {
-      await this.openStandard();
-    }
-    const runId = this.active!.runId;
-    const live =
-      this.active!.kind === "standard"
-        ? this.live.get("standard")
-        : await this.ensureFleetMember(target);
-    if (!live) {
-      throw new Error(`Target "${target}" is not active.`);
-    }
+    const live = await this.activeSession(target);
+    const runId = live.runId;
     const id = randomUUID();
     this.db.enqueueMessage(id, runId, "user", live.memberId, "user", content);
     try {
