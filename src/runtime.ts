@@ -67,8 +67,13 @@ function projectKey(workspace: string): string {
   return createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0, 12);
 }
 
-function stableSessionId(workspace: string, scope: string, memberId: string): string {
-  return `fleet-${projectKey(workspace)}-${scope}-${memberId}`;
+export function instanceSessionId(
+  workspace: string,
+  instanceId: string,
+  scope: string,
+  memberId: string,
+): string {
+  return `fleet-${projectKey(workspace)}-${instanceId}-${scope}-${memberId}`;
 }
 
 function expandPath(value: string, workspace: string): string {
@@ -183,6 +188,7 @@ export class CopilotRuntime {
   private client: CopilotClient | undefined;
   private knownSessionIds = new Set<string>();
   private readonly live = new Map<string, LiveSession>();
+  private readonly instanceId = randomUUID();
   private active: ActiveMode;
   private shuttingDown = false;
   private pendingFleetStart: string | undefined;
@@ -460,7 +466,7 @@ export class CopilotRuntime {
     return this.connectSession(
       this.active.runId,
       memberId,
-      stableSessionId(this.workspace, this.active.fleet.id, memberId),
+      instanceSessionId(this.workspace, this.instanceId, this.active.fleet.id, memberId),
       this.memberConfig(member, tools),
     );
   }
@@ -570,7 +576,7 @@ export class CopilotRuntime {
       await this.connectSession(
         runId,
         "standard",
-        stableSessionId(this.workspace, "standard", this.config.standard.id),
+        instanceSessionId(this.workspace, this.instanceId, "standard", this.config.standard.id),
         this.standardSessionConfig(this.config.standard),
       );
       this.emit("mode.changed", { mode: "standard" }, { runId });

@@ -14,8 +14,9 @@ local defaults = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
   follow_bottom = true,
-  completion = {
-    frontend = 'native',
+  frontend = {
+    completion = 'native',
+    picker = 'native',
   },
   mappings = {
     toggle = '<leader>ait',
@@ -99,8 +100,14 @@ local function update_prompt_label()
   end
   vim.wo[state.prompt_win].winbar =
     (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
-  if options.completion.frontend == 'blink' and M.ensure_commands then
+  if options.frontend.completion == 'blink' and M.ensure_commands then
     vim.schedule(function() M.ensure_commands(state.selected) end)
+  end
+end
+
+local function focus_prompt()
+  if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
+    vim.api.nvim_set_current_win(state.prompt_win)
   end
 end
 
@@ -169,7 +176,7 @@ local function ensure_prompt_buffer()
     buffer = buf,
     desc = 'Insert AI prompt snippet',
   })
-  if options.completion.frontend == 'native' then
+  if options.frontend.completion == 'native' then
     vim.keymap.set('i', '/', function()
       local row, column = unpack(vim.api.nvim_win_get_cursor(0))
       local before = table.concat(vim.api.nvim_buf_get_lines(buf, 0, row - 1, false), '')
@@ -235,7 +242,7 @@ local function configure_agent_buffer(member_id, buf)
       state.selected = member_id
       update_prompt_label()
       if state.prompt_win and vim.api.nvim_win_is_valid(state.prompt_win) then
-        vim.api.nvim_set_current_win(state.prompt_win)
+        focus_prompt()
       end
     else
       vim.cmd('normal! j')
@@ -403,11 +410,24 @@ function M.show_status()
 end
 
 local function picker(title, entries, choose)
-  local ok = pcall(require, 'telescope.pickers')
-  if not ok then
-    notify('Telescope is required for Copilot Fleet selection.', vim.log.levels.ERROR)
+  if options.frontend.picker == 'native' then
+    vim.ui.select(entries, {
+      prompt = title,
+      format_item = function(item) return item.display end,
+    }, function(item)
+      if item then choose(item) end
+    end)
     return
   end
+
+  if options.frontend.picker ~= 'telescope' then
+    notify(
+      ('Unknown picker frontend: %s'):format(options.frontend.picker),
+      vim.log.levels.ERROR
+    )
+    return
+  end
+
   local pickers = require('telescope.pickers')
   local finders = require('telescope.finders')
   local actions = require('telescope.actions')
@@ -635,7 +655,10 @@ function M._on_event(message)
       end
       state.selected = payload.entryMember or state.member_order[1]
     end
-    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
+    if is_ui_open() and buffers.get_member(state.selected) then
+      M.show_member(state.selected)
+      focus_prompt()
+    end
     return
   end
 

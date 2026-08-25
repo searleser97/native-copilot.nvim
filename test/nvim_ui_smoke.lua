@@ -8,6 +8,19 @@ local hidden_lines = {}
 for index = 1, 40 do
   table.insert(hidden_lines, ('Hidden retained line %d.'):format(index))
 end
+fleet.show_member('standard')
+fleet._on_event({
+  v = 1,
+  type = 'mode.changed',
+  payload = {
+    mode = 'standard',
+    displayName = 'Copilot',
+  },
+})
+assert(
+  vim.b[vim.api.nvim_get_current_buf()].copilot_fleet_prompt == true,
+  'mode initialization did not return focus to the input buffer'
+)
 fleet._on_event({
   v = 1,
   type = 'mode.changed',
@@ -24,6 +37,39 @@ fleet._on_event({
     },
   },
 })
+assert(
+  vim.b[vim.api.nvim_get_current_buf()].copilot_fleet_prompt == true,
+  'Fleet initialization did not return focus to the input buffer'
+)
+local native_picker
+local original_select = vim.ui.select
+vim.ui.select = function(items, opts, on_choice)
+  native_picker = { items = items, opts = opts }
+  on_choice(nil)
+end
+fleet._on_event({
+  v = 1,
+  type = 'command.result',
+  memberId = 'coordinator',
+  target = 'conversation',
+  done = true,
+  payload = {
+    target = 'coordinator',
+    name = 'tasks',
+    result = {
+      kind = 'select-subcommand',
+      command = 'tasks',
+      title = 'Tasks',
+      options = {
+        { name = 'list', description = 'List tasks' },
+      },
+    },
+  },
+})
+vim.ui.select = original_select
+assert(native_picker, 'native picker frontend was not used')
+assert(native_picker.opts.prompt == 'Tasks')
+assert(native_picker.items[1].option.name == 'list')
 fleet.show_overview()
 
 local wins = vim.api.nvim_tabpage_list_wins(0)

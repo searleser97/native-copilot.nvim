@@ -2,7 +2,7 @@
 
 A native Neovim interface for GitHub Copilot with two explicit operating modes:
 
-- **Standard Copilot**: one persistent, general-purpose Copilot session.
+- **Standard Copilot**: one general-purpose Copilot session per Neovim instance.
 - **Fleet mode**: any number of independently configured Copilot sessions with durable, ACL-controlled agent-to-agent messaging.
 
 The Neovim plugin owns a local Node.js host through versioned NDJSON over stdio. The host owns the official `@github/copilot-sdk`, Copilot sessions, configuration validation, and SQLite recovery state. It is not a daemon: exiting Neovim shuts down the host and all SDK-owned Copilot processes.
@@ -12,7 +12,7 @@ The Neovim plugin owns a local Node.js host through versioned NDJSON over stdio.
 - Neovim 0.10 or newer
 - Node.js `^20.19.0` or `>=22.12.0`
 - GitHub Copilot access and a Copilot CLI login
-- [Telescope](https://github.com/nvim-telescope/telescope.nvim)
+- Optional picker UI through [Telescope](https://github.com/nvim-telescope/telescope.nvim)
 - Optional rich rendering through [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim)
 
 The Copilot SDK is a local dependency of this repository. A global SDK installation is neither required nor used.
@@ -35,7 +35,6 @@ Load the local plugin with `lazy.nvim`:
   lazy = false,
   build = "npm install --no-audit --no-fund && npm run build",
   dependencies = {
-    "nvim-telescope/telescope.nvim",
     "MeanderingProgrammer/render-markdown.nvim",
   },
   config = function()
@@ -51,8 +50,9 @@ require("copilot_fleet").setup({
   stream_flush_ms = 80,
   render_debounce_ms = 200,
   follow_bottom = true,
-  completion = {
-    frontend = "native", -- "blink" when the optional source is configured
+  frontend = {
+    completion = "native", -- "blink" when the optional source is configured
+    picker = "native", -- "telescope" only when explicitly selected
   },
 })
 ```
@@ -94,6 +94,18 @@ Commands mirror the primary mappings:
 :CopilotFleetStatus
 ```
 
+Selection uses `vim.ui.select` by default. To use Telescope for Copilot Fleet pickers, install it separately and opt in explicitly:
+
+```lua
+require("copilot_fleet").setup({
+  frontend = {
+    picker = "telescope",
+  },
+})
+```
+
+The plugin does not select Telescope merely because it is installed.
+
 ## Configuration
 
 The JSON file separates reusable agents from Fleet-local members:
@@ -105,13 +117,14 @@ The JSON file separates reusable agents from Fleet-local members:
 - `entryMember` controls the initially selected recipient.
 - `coordinatorMember` is an ordinary member reference, not a hard-coded role.
 
-Each Fleet/member pair receives a different persistent Copilot session:
+Each Fleet/member pair receives a different Copilot session scoped to the current Neovim instance:
 
 ```text
-fleet-<workspace-hash>-<fleet-id>-<member-id>
+fleet-<workspace-hash>-<instance-id>-<fleet-id>-<member-id>
 ```
 
 The same catalog agent can therefore appear in multiple Fleets—or more than once in one Fleet under different member IDs—without sharing conversation context.
+Closing and reopening the Copilot tab in the same Neovim process keeps those sessions. Starting a new Neovim process creates fresh Standard and Fleet-member sessions instead of automatically resuming the previous process's transcript.
 
 ### Validation
 
@@ -152,9 +165,19 @@ SDK-provided reasoning summaries, intent, tool activity, and errors appear inlin
 
 Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata.
 
+Command behavior follows the result returned by the SDK:
+
+- Text and completion results are appended to the conversation.
+- Agent-prompt results are submitted to the selected agent as a normal turn.
+- Commands requiring a subcommand open a Telescope picker; argument choices are also available through completion. For example, `/mcp` exposes `list`, `show`, `enable`, `disable`, and `reload`.
+
+Only commands returned by `session.rpc.commands.list()` are available. CLI-owned session navigation such as `/resume`, `/new`, and `/clear` is not currently exposed by the SDK session command registry, so the plugin does not emulate those commands.
+
+The embedded SDK registry currently exposes `/fleet`, but not `/tasks` or `/subagents`. `/fleet` starts Copilot's native subagent workflow inside the currently selected session; this is separate from the plugin's configured multi-session Fleets and mailbox routing. Native task/subagent management cannot be surfaced until the SDK exposes the corresponding commands or task APIs to embedded clients.
+
 ### Optional blink.cmp source
 
-`blink.cmp` is not a plugin dependency. To use it as the completion frontend, set `completion.frontend = "blink"` above and register the source in your own blink configuration:
+`blink.cmp` is not a plugin dependency. To use it as the completion frontend, set `frontend.completion = "blink"` above and register the source in your own blink configuration:
 
 ```lua
 sources = {
