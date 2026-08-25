@@ -17,6 +17,9 @@ assert(vim.bo[member.views.conversation.buf].filetype == 'markdown')
 assert(vim.b[member.views.conversation.buf].copilot_fleet == true)
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Please review this.')
+buffers.append_activity_delta('reviewer', 'reasoning-1', 'Checking the ')
+buffers.append_activity_delta('reviewer', 'reasoning-1', 'implementation.')
+buffers.complete_activity('reviewer', 'reasoning-1', 'Checking the implementation.')
 buffers.append_conversation_delta('reviewer', 'message-1', 'The implementation ')
 buffers.append_conversation_delta('reviewer', 'message-1', 'looks correct.')
 buffers.complete_conversation('reviewer', 'message-1', 'The implementation looks correct.')
@@ -28,10 +31,34 @@ local text = table.concat(
 )
 assert(text:find('## You', 1, true))
 assert(text:find('Please review this.', 1, true))
+assert(text:find('> **Reasoning summary**', 1, true))
+assert(text:find('> Checking the implementation.', 1, true))
 assert(text:find('## Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
 local _, count = text:gsub('The implementation looks correct%.', '')
 assert(count == 1, 'stream final message was duplicated')
+local _, reasoning_count = text:gsub('Checking the implementation%.', '')
+assert(reasoning_count == 1, 'stream final reasoning was duplicated')
+
+local namespace = vim.api.nvim_get_namespaces().copilot_fleet_inline_activity
+local activity_marks = vim.api.nvim_buf_get_extmarks(
+  member.views.conversation.buf,
+  namespace,
+  0,
+  -1,
+  { details = true }
+)
+assert(#activity_marks == 1, 'streamed reasoning did not produce one inline highlight')
+assert(activity_marks[1][4].hl_group == 'Comment')
+local assistant_row
+for row, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line == '## Reviewer' then assistant_row = row - 1 end
+end
+assert(assistant_row, 'assistant heading row was not found')
+assert(
+  activity_marks[1][4].end_row <= assistant_row,
+  'inline activity highlight leaked into the assistant response'
+)
 assert(#render_calls == 0, 'hidden buffer was rendered')
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
 buffers.on_shown(member.views.conversation.buf)
@@ -39,6 +66,19 @@ vim.wait(80)
 assert(#render_calls == 1, 'visible buffer was not rendered once')
 assert(render_calls[1].buf == member.views.conversation.buf)
 assert(#render_calls[1].win == 1)
+
+buffers.append_block('reviewer', 'conversation', 'You', 'Inspect the render lifecycle.')
+buffers.append_activity_delta('reviewer', 'reasoning-2', 'Still reasoning...')
+vim.wait(80)
+assert(#render_calls == 1, 'Markdown rendered while reasoning was streaming')
+buffers.complete_activity('reviewer', 'reasoning-2', 'Still reasoning...')
+vim.wait(80)
+assert(#render_calls == 2, 'completed reasoning did not render')
+
+buffers.set_state('reviewer', 'busy')
+buffers.append_activity_block('reviewer', 'Error', 'Activity-only terminal output.')
+vim.wait(80)
+assert(#render_calls == 3, 'activity-only output did not render while member state was busy')
 
 require('copilot_fleet').setup({
   mappings = {
@@ -50,7 +90,6 @@ require('copilot_fleet').setup({
 assert(vim.fn.maparg('<leader>ait', 'n') ~= '')
 assert(vim.fn.maparg('<leader>aif', 'n') ~= '')
 assert(vim.fn.maparg('<leader>ais', 'n') ~= '')
-assert(vim.fn.maparg('<leader>air', 'n') ~= '')
 
 buffers.reset()
 print('nvim smoke passed')

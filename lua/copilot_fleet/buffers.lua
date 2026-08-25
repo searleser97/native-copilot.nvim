@@ -2,6 +2,7 @@ local M = {}
 
 local registry = {}
 local render_generation = {}
+local activity_namespace = vim.api.nvim_create_namespace('copilot_fleet_inline_activity')
 local options = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
@@ -45,7 +46,12 @@ local function finalize_render(view)
   local generation = render_generation[view.buf]
   vim.defer_fn(function()
     if not vim.api.nvim_buf_is_valid(view.buf) then return end
-    if render_generation[view.buf] ~= generation or view.streaming or not visible(view.buf) then
+    if
+      render_generation[view.buf] ~= generation
+      or view.streaming
+      or view.activity_streaming
+      or not visible(view.buf)
+    then
       return
     end
     render_markdown(view.buf, true)
@@ -66,10 +72,6 @@ local function create_buffer(name, member_id, view_id)
   vim.b[buf].copilot_fleet_member = member_id
   vim.b[buf].copilot_fleet_view = view_id
   local initial_lines = { '# ' .. name, '' }
-  if view_id == 'activity' then
-    table.insert(initial_lines, '_Waiting for SDK reasoning summaries, intent, and tool activity._')
-    table.insert(initial_lines, '')
-  end
   with_modifiable(buf, function()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
   end)
@@ -81,6 +83,7 @@ local function create_buffer(name, member_id, view_id)
     pending = '',
     flush_scheduled = false,
     streaming = false,
+    activity_streaming = false,
     dirty = false,
     active_message = nil,
   }
@@ -104,7 +107,6 @@ function M.ensure_member(member_id, display_name)
     views = {},
   }
   created.views.conversation = create_buffer(created.display_name, member_id, 'conversation')
-  created.views.activity = create_buffer(created.display_name .. ' — Activity', member_id, 'activity')
   created.views.messages = create_buffer(created.display_name .. ' — Messages', member_id, 'messages')
   registry[member_id] = created
   return created
@@ -134,6 +136,22 @@ local function flush(view)
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(view.buf, line_count - 1, line_count, false, replacement)
   end)
+  if view.active_activity then
+    view.active_activity.extmark = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      activity_namespace,
+      view.active_activity.start_row,
+      0,
+      {
+        id = view.active_activity.extmark,
+        end_row = vim.api.nvim_buf_line_count(view.buf),
+        end_col = 0,
+        hl_group = 'Comment',
+        hl_eol = true,
+        priority = 200,
+      }
+    )
+  end
 end
 
 local function schedule_flush(view)
@@ -167,9 +185,65 @@ function M.append_block(member_id, view_id, heading, content)
   append(view, ('\n## %s\n\n%s\n'):format(heading, content), true)
 end
 
+local function begin_inline_activity(view, activity_id, heading)
+  flush(view)
+  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
+  view.dirty = true
+  render_markdown(view.buf, false)
+  local start_row = vim.api.nvim_buf_line_count(view.buf)
+  view.active_activity = {
+    id = activity_id,
+    start_row = start_row,
+  }
+  view.pending = view.pending .. ('\n> **%s**\n>\n> '):format(heading)
+  flush(view)
+end
+
+function M.append_activity_delta(member_id, activity_id, content)
+  local entry = M.ensure_member(member_id)
+  local view = entry.views.conversation
+  if not view.active_activity or view.active_activity.id ~= activity_id then
+    begin_inline_activity(view, activity_id, 'Reasoning summary')
+  end
+  view.activity_streaming = true
+  view.pending = view.pending .. content:gsub('\n', '\n> ')
+  schedule_flush(view)
+end
+
+function M.complete_activity(member_id, activity_id, content)
+  local entry = M.ensure_member(member_id)
+  local view = entry.views.conversation
+  if view.active_activity and view.active_activity.id == activity_id then
+    view.pending = view.pending .. '\n'
+    flush(view)
+    view.active_activity = nil
+    view.activity_streaming = false
+    if not view.streaming then finalize_render(view) end
+  else
+    M.append_activity_block(member_id, 'Reasoning summary', content)
+  end
+end
+
+function M.append_activity_block(member_id, heading, content)
+  local entry = M.ensure_member(member_id)
+  local view = entry.views.conversation
+  begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
+  view.pending = view.pending .. content:gsub('\n', '\n> ') .. '\n'
+  flush(view)
+  view.active_activity = nil
+  view.activity_streaming = false
+  if not view.streaming then finalize_render(view) end
+end
+
 function M.append_conversation_delta(member_id, message_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  if view.active_activity then
+    view.pending = view.pending .. '\n'
+    flush(view)
+    view.active_activity = nil
+    view.activity_streaming = false
+  end
   if view.active_message ~= message_id then
     flush(view)
     view.active_message = message_id
@@ -185,28 +259,6 @@ function M.complete_conversation(member_id, message_id, content)
     append(view, '\n', true)
   else
     M.append_block(member_id, 'conversation', entry.display_name, content)
-  end
-  view.active_message = nil
-end
-
-function M.append_activity_delta(member_id, reasoning_id, content)
-  local entry = M.ensure_member(member_id)
-  local view = entry.views.activity
-  if view.active_message ~= reasoning_id then
-    flush(view)
-    view.active_message = reasoning_id
-    append(view, '\n## Reasoning summary\n\n', false)
-  end
-  append(view, content, false)
-end
-
-function M.complete_activity(member_id, reasoning_id, content)
-  local entry = M.ensure_member(member_id)
-  local view = entry.views.activity
-  if view.active_message == reasoning_id then
-    append(view, '\n', true)
-  else
-    M.append_block(member_id, 'activity', 'Reasoning summary', content)
   end
   view.active_message = nil
 end
@@ -233,7 +285,7 @@ function M.on_shown(buf)
     for _, view in pairs(entry.views) do
       if view.buf == buf then
         if view.id == 'conversation' then entry.unread = 0 end
-        if view.dirty and not view.streaming then
+        if view.dirty and not view.streaming and not view.activity_streaming then
           finalize_render(view)
         end
         return

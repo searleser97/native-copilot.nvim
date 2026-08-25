@@ -60,13 +60,7 @@ assert(text:find('Hidden buffers retain this message.', 1, true))
 fleet.show_member('observer')
 assert(buffers.get_member('observer').unread == 0)
 assert(vim.api.nvim_get_current_buf() == observer_buf)
-local activity_visible = false
-for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-  if vim.api.nvim_win_get_buf(win) == buffers.buffer('observer', 'activity') then
-    activity_visible = true
-  end
-end
-assert(activity_visible, 'reasoning and activity pane is not visible')
+assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'member view contains an unexpected activity pane')
 fleet._on_event({
   v = 1,
   id = 'reasoning-summary',
@@ -79,20 +73,72 @@ fleet._on_event({
     content = 'The SDK-provided reasoning summary is visible.',
   },
 })
-local activity_text = table.concat(
-  vim.api.nvim_buf_get_lines(buffers.buffer('observer', 'activity'), 0, -1, false),
+local conversation_text = table.concat(
+  vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false),
   '\n'
 )
-assert(activity_text:find('The SDK-provided reasoning summary is visible.', 1, true))
+assert(conversation_text:find('The SDK-provided reasoning summary is visible.', 1, true))
+local namespace = vim.api.nvim_get_namespaces().copilot_fleet_inline_activity
+local activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
+  details = true,
+})
+assert(#activity_marks > 0, 'inline activity has no muted highlight')
+assert(activity_marks[#activity_marks][4].hl_group == 'Comment')
+
+fleet._on_event({
+  v = 1,
+  id = 'tool-activity',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    eventType = 'Tool',
+    data = { toolName = 'view' },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'observer-response',
+  type = 'conversation.delta',
+  memberId = 'observer',
+  target = 'conversation',
+  done = false,
+  payload = {
+    messageId = 'observer-response',
+    content = 'Assistant output remains normally highlighted.',
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'observer-response',
+  type = 'conversation.message',
+  memberId = 'observer',
+  target = 'conversation',
+  done = true,
+  payload = {
+    messageId = 'observer-response',
+    content = 'Assistant output remains normally highlighted.',
+  },
+})
+conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
+assert(conversation_text:find('> **Tool**', 1, true))
+assert(conversation_text:find('> view', 1, true))
+assert(conversation_text:find('Assistant output remains normally highlighted.', 1, true))
+activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
+  details = true,
+})
+local assistant_row
+for row, line in ipairs(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false)) do
+  if line == '## Observer' then assistant_row = row - 1 end
+end
+assert(assistant_row, 'assistant response heading was not found')
+for _, mark in ipairs(activity_marks) do
+  assert(mark[4].end_row <= assistant_row, 'activity highlight leaked into assistant output')
+end
 
 fleet.close()
 fleet.show_member('observer')
-local reopened_activity_visible = false
-for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-  if vim.api.nvim_win_get_buf(win) == buffers.buffer('observer', 'activity') then
-    reopened_activity_visible = true
-  end
-end
-assert(reopened_activity_visible, 'reasoning and activity pane is missing after UI reopen')
+assert(#vim.api.nvim_tabpage_list_wins(0) == 2, 'UI reopen created an unexpected activity pane')
 fleet.close()
 print('nvim UI smoke passed')
