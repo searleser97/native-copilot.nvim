@@ -129,6 +129,10 @@ local task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false
 assert(task_text:find('○ [agent] Review implementation', 1, true))
 assert(task_text:find('✓ [shell] npm test', 1, true))
 assert(task_text:find('✗ [agent] Validate deployment', 1, true))
+assert(
+  vim.api.nvim_win_get_cursor(task_win)[1] == vim.api.nvim_buf_line_count(task_buf),
+  'task list did not follow the newest row'
+)
 local task_maps = vim.api.nvim_buf_call(task_buf, function()
   return {
     cancel = vim.fn.maparg('dd', 'n', false, true),
@@ -292,6 +296,15 @@ fleet._on_event({
         sessionId = 'previous-session',
         summary = 'Continue plugin work',
         modifiedTime = '2026-08-25T19:00:00.000Z',
+        modifiedAgoSeconds = 7200,
+        inUse = false,
+      },
+      {
+        sessionId = 'active-session',
+        summary = 'Used in another terminal',
+        modifiedTime = '2026-08-25T20:00:00.000Z',
+        modifiedAgoSeconds = 180,
+        inUse = true,
       },
     },
   },
@@ -300,6 +313,9 @@ vim.ui.select = original_select
 protocol.send = original_send
 assert(native_picker.opts.prompt == 'Resume Copilot session')
 assert(resumed_session == 'previous-session', 'session picker did not resume the selected session')
+assert(native_picker.items[1].display:find('2 hours ago', 1, true))
+assert(native_picker.items[2].display:find('[active elsewhere]', 1, true))
+assert(native_picker.items[2].display:find('3 minutes ago', 1, true))
 local permission_response
 local original_send = protocol.send
 vim.ui.select = function(items, opts, on_choice)
@@ -437,14 +453,33 @@ assert(activity_marks[#activity_marks][4].hl_group == 'Comment')
 
 fleet._on_event({
   v = 1,
-  id = 'tool-activity',
+  id = 'tool-start',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = false,
+  payload = {
+    eventType = 'tool.execution_start',
+    data = { toolCallId = 'tool-call-1', toolName = 'view', arguments = { path = 'secret' } },
+  },
+})
+task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
+assert(task_text:find('○ [tool] view — processing…', 1, true))
+assert(not task_text:find('secret', 1, true))
+fleet._on_event({
+  v = 1,
+  id = 'tool-complete',
   type = 'activity.event',
   memberId = 'observer',
   target = 'activity',
   done = true,
   payload = {
-    eventType = 'Tool',
-    data = { toolName = 'view' },
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'tool-call-1',
+      success = true,
+      result = { content = 'tool output must stay hidden' },
+    },
   },
 })
 fleet._on_event({
@@ -472,8 +507,17 @@ fleet._on_event({
   },
 })
 conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
-assert(conversation_text:find('> **Tool**', 1, true))
-assert(conversation_text:find('> view', 1, true))
+assert(not conversation_text:find('> **Tool**', 1, true))
+assert(not conversation_text:find('tool output must stay hidden', 1, true))
+assert(not conversation_text:find('secret', 1, true))
+task_text = table.concat(vim.api.nvim_buf_get_lines(task_buf, 0, -1, false), '\n')
+assert(task_text:find('✓ [tool] view — completed', 1, true))
+assert(not task_text:find('tool output must stay hidden', 1, true))
+assert(not task_text:find('secret', 1, true))
+assert(
+  vim.api.nvim_win_get_cursor(task_win)[1] == vim.api.nvim_buf_line_count(task_buf),
+  'tool activity did not follow the newest task-pane row'
+)
 assert(conversation_text:find('Assistant output remains normally highlighted.', 1, true))
 assert(
   vim.api.nvim_win_get_cursor(0)[1] == vim.api.nvim_buf_line_count(observer_buf),
@@ -512,7 +556,7 @@ activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
 })
 local assistant_row
 for row, line in ipairs(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false)) do
-  if line == '## Observer' then assistant_row = row - 1 end
+  if line == '# Copilot' then assistant_row = row - 1 end
 end
 assert(assistant_row, 'assistant response heading was not found')
 for _, mark in ipairs(activity_marks) do
@@ -537,7 +581,7 @@ fleet._on_event({
   },
 })
 conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
-assert(conversation_text:find('## /future-command', 1, true))
+assert(conversation_text:find('# Copilot', 1, true))
 assert(conversation_text:find('Dynamically discovered command output.', 1, true))
 
 fleet.close()

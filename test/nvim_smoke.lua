@@ -111,14 +111,15 @@ local text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
-assert(text:find('## You', 1, true))
+assert(text:find('# You', 1, true))
 assert(text:find('Please review this.', 1, true))
 assert(text:find('> **Reasoning summary**', 1, true))
 assert(text:find('> Checking the implementation.', 1, true))
-assert(text:find('## Reviewer', 1, true))
+assert(text:find('# Copilot', 1, true))
+assert(not text:find('# Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
-local assistant_heading = text:find('## Reviewer', 1, true)
+local assistant_heading = text:find('# Copilot', 1, true)
 assert(late_reasoning and assistant_heading and late_reasoning < assistant_heading)
 local _, count = text:gsub('The implementation looks correct%.', '')
 assert(count == 1, 'stream final message was duplicated')
@@ -136,7 +137,7 @@ local activity_marks = vim.api.nvim_buf_get_extmarks(
 assert(#activity_marks == 2, 'reasoning summaries did not produce two inline highlights')
 local assistant_row
 for row, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
-  if line == '## Reviewer' then assistant_row = row - 1 end
+  if line == '# Copilot' then assistant_row = row - 1 end
 end
 assert(assistant_row, 'assistant heading row was not found')
 for _, mark in ipairs(activity_marks) do

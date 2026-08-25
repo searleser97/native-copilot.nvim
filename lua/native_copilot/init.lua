@@ -88,6 +88,7 @@ local state = {
   command_requests = {},
   permission_queue = {},
   permission_prompt_open = false,
+  tool_calls = {},
 }
 
 local function notify(message, level)
@@ -319,6 +320,37 @@ local function environment_status_label(environment)
   return ('environment %d/%d'):format(settled, #environment.order)
 end
 
+local function update_tool_call(member_id, call_id, tool_name, status)
+  local activity = state.tool_calls[member_id]
+  if not activity then
+    activity = { order = {}, items = {} }
+    state.tool_calls[member_id] = activity
+  end
+  local item = activity.items[call_id]
+  if not item then
+    item = {
+      id = call_id,
+      name = tool_name,
+    }
+    activity.items[call_id] = item
+  else
+    for index, existing_id in ipairs(activity.order) do
+      if existing_id == call_id then
+        table.remove(activity.order, index)
+        break
+      end
+    end
+  end
+  table.insert(activity.order, call_id)
+  item.name = tool_name or item.name
+  item.status = status
+
+  while #activity.order > 20 do
+    local oldest = table.remove(activity.order, 1)
+    activity.items[oldest] = nil
+  end
+end
+
 local function update_environment(member_id, component, status, detail)
   member_id = member_id or 'standard'
   component = component or 'Environment'
@@ -419,6 +451,17 @@ local function render_task_buffer()
       task_description(task)
     ))
     state.task_rows[#lines] = task
+  end
+  local tool_activity = state.tool_calls[state.selected]
+  for _, call_id in ipairs(tool_activity and tool_activity.order or {}) do
+    local tool = tool_activity.items[call_id]
+    if tool then
+      table.insert(lines, ('%s [tool] %s — %s'):format(
+        task_symbols[tool.status] or '?',
+        tool.name or 'tool',
+        tool.status == 'running' and 'processing…' or tool.status
+      ))
+    end
   end
   if #lines == 0 then lines = { 'No tracked tasks or environment activity.' } end
   set_task_lines(lines)
@@ -751,6 +794,21 @@ function M.show_status()
   vim.api.nvim_set_current_win(win)
 end
 
+local function relative_age(seconds)
+  seconds = math.max(0, tonumber(seconds) or 0)
+  if seconds < 60 then return 'less than a minute ago' end
+  if seconds < 3600 then
+    local minutes = math.floor(seconds / 60)
+    return ('%d minute%s ago'):format(minutes, minutes == 1 and '' or 's')
+  end
+  if seconds < 86400 then
+    local hours = math.floor(seconds / 3600)
+    return ('%d hour%s ago'):format(hours, hours == 1 and '' or 's')
+  end
+  local days = math.floor(seconds / 86400)
+  return ('%d day%s ago'):format(days, days == 1 and '' or 's')
+end
+
 local function picker(title, entries, choose)
   if options.frontend.picker == 'native' then
     vim.ui.select(entries, {
@@ -1064,12 +1122,18 @@ function M._on_event(message)
     for _, session in ipairs(payload.sessions or {}) do
       local summary = session.summary
       if not summary or summary == '' then summary = session.sessionId end
+      local activity = session.inUse and '[active elsewhere] ' or ''
       table.insert(entries, {
-        display = ('%s — %s'):format(summary, session.modifiedTime or 'unknown time'),
+        display = ('%s%s — %s'):format(
+          activity,
+          summary,
+          relative_age(session.modifiedAgoSeconds)
+        ),
         ordinal = table.concat({
           summary,
           session.sessionId or '',
           session.modifiedTime or '',
+          session.inUse and 'active in use' or '',
         }, ' '),
         session = session,
       })
@@ -1079,6 +1143,10 @@ function M._on_event(message)
       return
     end
     picker('Resume Copilot session', entries, function(item)
+      if item.session.inUse then
+        notify('That Copilot session is active in another process.', vim.log.levels.WARN)
+        return
+      end
       send('session.resume', { sessionId = item.session.sessionId })
     end)
     return
@@ -1093,9 +1161,9 @@ function M._on_event(message)
     local member_id = event_member(message)
     local result = payload.result or {}
     if result.kind == 'text' and result.text and result.text ~= '' then
-      buffers.append_block(member_id, 'conversation', '/' .. (payload.name or 'command'), result.text)
+      buffers.append_block(member_id, 'conversation', 'Copilot', result.text)
     elseif result.kind == 'completed' and result.message and result.message ~= '' then
-      buffers.append_block(member_id, 'conversation', '/' .. (payload.name or 'command'), result.message)
+      buffers.append_block(member_id, 'conversation', 'Copilot', result.message)
     elseif result.kind == 'agent-prompt' and result.notice and result.notice ~= '' then
       buffers.append_activity_block(member_id, '/' .. (payload.name or 'command'), result.notice)
     elseif result.kind == 'select-subcommand' then
@@ -1268,6 +1336,7 @@ function M._on_event(message)
     state.configured_buffers = {}
     state.tasks = {}
     state.environment = {}
+    state.tool_calls = {}
     state.mode = 'fleet-loading'
     state.active_fleet = payload.fleetId
     state.member_order = {}
@@ -1299,6 +1368,7 @@ function M._on_event(message)
     state.configured_buffers = {}
     state.tasks = {}
     state.environment = {}
+    state.tool_calls = {}
     state.task_detail = nil
     state.task_progress = nil
     state.mode = 'standard-loading'
@@ -1363,8 +1433,26 @@ function M._on_event(message)
   elseif message.type == 'activity.event' then
     local event_type = payload.eventType or 'activity'
     local data = payload.data or {}
-    local detail = data.toolName or data.intent or data.message or vim.inspect(data)
-    buffers.append_activity_block(member_id, event_type, tostring(detail))
+    if event_type == 'tool.execution_start' then
+      local call_id = data.toolCallId or message.id
+      local tool_name = data.toolName or data.mcpToolName or 'tool'
+      update_tool_call(member_id, call_id, tool_name, 'running')
+      render_task_buffer()
+    elseif event_type == 'tool.execution_complete' then
+      local call_id = data.toolCallId or message.id
+      local activity = state.tool_calls[member_id]
+      local existing = activity and activity.items[call_id]
+      update_tool_call(
+        member_id,
+        call_id,
+        existing and existing.name or 'tool',
+        data.success == true and 'completed' or 'failed'
+      )
+      render_task_buffer()
+    else
+      local detail = data.intent or data.message or vim.inspect(data)
+      buffers.append_activity_block(member_id, event_type, tostring(detail))
+    end
   elseif message.type == 'permission.requested' then
     request_permission(payload, member_id)
   elseif message.type == 'member.error' then

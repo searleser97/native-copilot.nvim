@@ -87,7 +87,7 @@ local function create_buffer(name, member_id, view_id)
   vim.b[buf].native_copilot = true
   vim.b[buf].native_copilot_member = member_id
   vim.b[buf].native_copilot_view = view_id
-  local initial_lines = { '# ' .. name, '' }
+  local initial_lines = view_id == 'conversation' and { '' } or { '# ' .. name, '' }
   with_modifiable(buf, function()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
   end)
@@ -205,7 +205,8 @@ function M.append_block(member_id, view_id, heading, content)
     view.message_anchor = nil
     vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
   end
-  append(view, ('\n## %s\n\n%s\n'):format(heading, content), true)
+  local level = view_id == 'conversation' and '#' or '##'
+  append(view, ('\n%s %s\n\n%s\n'):format(level, heading, content), true)
 end
 
 local function insert_activity_before_message(view, heading, content)
@@ -344,7 +345,7 @@ function M.append_conversation_delta(member_id, message_id, content)
       0,
       { right_gravity = false }
     )
-    append(view, ('\n## %s\n\n'):format(entry.display_name), false)
+    append(view, '\n# Copilot\n\n', false)
   end
   append(view, content, false)
 end
@@ -355,7 +356,7 @@ function M.complete_conversation(member_id, message_id, content)
   if view.active_message == message_id then
     append(view, '\n', true)
   else
-    M.append_block(member_id, 'conversation', entry.display_name, content)
+    M.append_block(member_id, 'conversation', 'Copilot', content)
   end
   view.active_message = nil
 end

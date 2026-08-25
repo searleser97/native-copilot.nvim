@@ -325,12 +325,30 @@ export class CopilotRuntime {
     return (await this.ensureClient()).listModels();
   }
 
-  async listSessions(): Promise<SessionMetadata[]> {
+  async listSessions(): Promise<
+    Array<SessionMetadata & { inUse: boolean; modifiedAgoSeconds: number }>
+  > {
     const client = await this.ensureClient();
     const activeSessionIds = new Set([...this.live.values()].map((live) => live.session.sessionId));
-    return (await client.listSessions({ workingDirectory: this.workspace }))
+    const sessions = (await client.listSessions({ workingDirectory: this.workspace }))
       .filter((session) => !activeSessionIds.has(session.sessionId))
       .sort((left, right) => right.modifiedTime.getTime() - left.modifiedTime.getTime());
+    const { inUse } =
+      sessions.length === 0
+        ? { inUse: [] }
+        : await client.rpc.sessions.checkInUse({
+            sessionIds: sessions.map((session) => session.sessionId),
+          });
+    const inUseIds = new Set(inUse);
+    const now = Date.now();
+    return sessions.map((session) => ({
+      ...session,
+      inUse: inUseIds.has(session.sessionId),
+      modifiedAgoSeconds: Math.max(
+        0,
+        Math.floor((now - session.modifiedTime.getTime()) / 1_000),
+      ),
+    }));
   }
 
   private async activeSession(target: string): Promise<LiveSession> {

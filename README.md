@@ -129,6 +129,11 @@ remain outside the task action mappings, and contribute an `environment complete
 to the winbar. Successful loading does not add conversation messages; loading failures remain
 visible both as failed environment rows and concise inline conversation errors.
 
+Foreground tool calls also appear as non-actionable `[tool]` rows. A row moves to the bottom when
+its status changes from processing to completed or failed. Only the tool name and status are shown;
+arguments and result content remain out of both the task pane and conversation. The pane retains
+the 20 most recently updated tool calls.
+
 When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
 `Reject` prompt. Fleet permission profiles remain hard ceilings: requests outside a member's
 configured path, command, network, Git, or external-action policy are rejected before the prompt.
@@ -228,13 +233,19 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 
 ## Rendering and observability
 
-Conversation, mailbox, and status views are native `nofile` Markdown buffers. Inline activity and reasoning are part of each conversation buffer. The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
+Conversation, mailbox, and status views are native `nofile` Markdown buffers. Conversation turns
+use only `# You` and `# Copilot` headings, without a redundant document title. Inline reasoning
+and errors remain part of each conversation buffer. The buffers retain normal Neovim navigation,
+search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Rich Markdown rendering is disabled while a response is streaming, debounced at turn completion, scoped to windows where the buffer is visible, and deferred for hidden buffers until they become visible. Configure this with `stream_flush_ms` and `render_debounce_ms`.
 
 Conversation windows follow the final line when opened, switched, reopened, rendered, or updated by streaming output. Set `follow_bottom = false` to preserve the current viewport instead.
 
-SDK-provided reasoning summaries, intent, tool activity, and errors appear inline in the conversation using the muted `Comment` highlight, similar to Copilot CLI's timeline. Whether reasoning content is emitted depends on the selected model and GitHub Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
+SDK-provided reasoning summaries, intent, and errors appear inline in the conversation using the
+muted `Comment` highlight, similar to Copilot CLI's timeline. Tool execution status belongs to the
+task pane instead. Whether reasoning content is emitted depends on the selected model and GitHub
+Copilot runtime. The plugin does not manufacture or expose private hidden chain-of-thought.
 
 Environment initialization appears in the task strip rather than adding successful loading
 messages to the conversation. Each session reports runtime/configuration discovery and loaded
@@ -243,7 +254,7 @@ in place. The task-strip winbar shows the member as `loading` until initializati
 summarizes settled components. MCP connection-state changes update the same pane; loading failures
 also remain visible as muted inline conversation errors.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it focuses the task buffer. `/fleet` is deliberately overridden by the client-native configured-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
 
 `/mcp-reload` and `:NativeCopilotReloadMcp` call the SDK's session-scoped
 `session.rpc.mcp.reload()` API. They stop and reconnect the selected session's MCP servers,
