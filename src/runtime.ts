@@ -216,11 +216,11 @@ export function permissionDecision(
   switch (request.kind) {
       case "read":
         return isWithin(request.path, profile.paths.read, workspace)
-          ? { kind: "approved" }
+          ? { kind: "approve-once" }
           : reject(`Read access is outside the configured path ceiling: ${request.path}`);
       case "write":
         return isWithin(request.fileName, profile.paths.write, workspace)
-          ? { kind: "approved" }
+          ? { kind: "approve-once" }
           : reject(`Write access is outside the configured path ceiling: ${request.fileName}`);
       case "shell": {
         if (!profile.commands) {
@@ -244,19 +244,19 @@ export function permissionDecision(
         ) {
           return reject("Git write operations are disabled for this member.");
         }
-        return { kind: "approved" };
+        return { kind: "approve-once" };
       }
       case "url":
         return profile.network
-          ? { kind: "approved" }
+          ? { kind: "approve-once" }
           : reject("Network access is disabled for this member.");
       case "mcp":
         return profile.externalActions && toolAllowed(profile, request.toolName)
-          ? { kind: "approved" }
+          ? { kind: "approve-once" }
           : reject(`MCP tool "${request.toolName}" is not permitted for this member.`);
       case "custom-tool":
         return toolAllowed(profile, request.toolName)
-          ? { kind: "approved" }
+          ? { kind: "approve-once" }
           : reject(`Custom tool "${request.toolName}" is not permitted for this member.`);
       case "memory":
       case "hook":
@@ -264,7 +264,7 @@ export function permissionDecision(
       case "extension-permission-access":
       case "factory":
         return profile.externalActions
-          ? { kind: "approved" }
+          ? { kind: "approve-once" }
           : reject(`${request.kind} operations are disabled for this member.`);
   }
 }
@@ -516,7 +516,9 @@ export class CopilotRuntime {
     }
     this.pendingPermissions.delete(requestId);
     pending.resolve(
-      approved ? { kind: "approved" } : reject("Permission rejected by the user in Neovim."),
+      approved
+        ? { kind: "approve-once", approvedInteractively: true }
+        : reject("Permission rejected by the user in Neovim."),
     );
     return true;
   }
@@ -524,7 +526,7 @@ export class CopilotRuntime {
   private permissionHandler(profile: PermissionProfile, memberId: string): PermissionHandler {
     return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
       const decision = permissionDecision(profile, this.workspace, request);
-      if (decision.kind !== "approved" || !request.managedApprovalRequired) {
+      if (decision.kind !== "approve-once" || !request.managedApprovalRequired) {
         return decision;
       }
       const requestId = randomUUID();

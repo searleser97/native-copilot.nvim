@@ -48,6 +48,8 @@ require("native_copilot").setup({
   runtime_command = nil,
   stream_flush_ms = 80,
   follow_bottom = true,
+  timestamp_format = '%H:%M:%S',
+  prompt_queue_height = 5,
   task_detail_height = 12,
   frontend = {
     completion = "native", -- "blink" when the optional source is configured
@@ -103,28 +105,34 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
 | `<Enter>` on an inline `[task]`, `[tool]`, or `[schedule]` row | Open details in a floating pane |
+| `<Enter>` in the prompt queue | Pause the queue and edit the selected prompt in `AI Prompt` |
+| `dd` in the prompt queue | Cancel the selected queued prompt |
+| `p` in the prompt queue | Pause or resume FIFO dispatch |
 | `q` / `<BS>` in activity details | Close the floating detail pane |
 | `dd` in task details | Cancel the running or waiting task |
 
 The conversation is also the chronological activity timeline. Background tasks, environment
-initialization, foreground tools, submitted-prompt lifecycle, and schedules appear as compact
-quoted rows. `○` is queued, processing, or waiting, `✓` completed, `✗` failed, and `–` cancelled.
-Each row keeps a stable position and updates in place as its state changes, so completion does not
-reorder earlier work.
+initialization, foreground tools, and schedules appear as compact quoted rows. `○` is processing
+or waiting, `✓` completed, `✗` failed, and `–` cancelled. Each row keeps a stable position and
+updates in place as its state changes, so completion does not reorder earlier work.
 
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
-non-actionable `[environment]` rows. Foreground tools use `[tool]` rows and expose only the tool
+non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
+transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
 name and status in the timeline; `<Enter>` reveals their arguments and result or error in the
-floating detail pane. Submitted prompts use `[prompt]` rows that transition in place from queued to
-processing to completed or failed. Slash commands are rendered as normal `# You` turns rather than
-duplicated `[command]` rows; their text output remains under `# Copilot`, and any work they start is
-represented by the resulting task, tool, environment, prompt, or schedule rows. Use `/tasks` or
+floating detail pane. The active turn shows `○ processing…` beside `# Copilot`; it does not create
+a separate prompt-status row. Prompts submitted while Copilot is busy stay in a FIFO pane between
+the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
+Slash commands are rendered as normal `# You` turns rather than duplicated `[command]` rows; their
+text output remains under `# Copilot`, and any work they start is represented by the resulting
+task, tool, environment, or schedule rows. Use `/tasks` or
 `:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
 When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
 `Reject` prompt. Fleet permission profiles remain hard ceilings: requests outside a member's
 configured path, command, network, Git, or external-action policy are rejected before the prompt.
 Closing the prompt rejects the request, and pending requests are rejected when the host shuts down.
+Interactive approval is returned to the SDK as a one-request approval and is not persisted.
 
 Commands mirror the primary mappings:
 
@@ -231,6 +239,10 @@ interval with `stream_flush_ms`.
 Conversation windows follow the final line when opened, switched, reopened, or updated by streaming
 output. Set `follow_bottom = false` to preserve the current viewport instead.
 
+Conversation turns and activity rows show local timestamps. Timeline timestamps change whenever a
+row is updated, and a streamed Copilot response receives its final timestamp when the response
+completes. Customize the display with `timestamp_format`, using an `os.date` format string.
+
 SDK-provided reasoning summaries, intent, errors, tools, prompts, schedules, tasks, and environment status
 appear inline in the conversation, similar to Copilot CLI's timeline. Whether reasoning content is
 emitted depends on the selected model and GitHub
@@ -266,9 +278,9 @@ feature policy.
 
 `/every`, `/after`, and model-created `manage_schedule` entries appear as stable `[schedule]` rows.
 Creation, re-arming, and cancellation update the original row. When a schedule fires, its message
-appears as a `# You` turn with a normal `[prompt]` lifecycle row, including a queued state when the
-selected session is already busy. Press `<Enter>` on a schedule row to inspect its prompt and
-cadence without expanding that content in the main timeline.
+appears as a `# You` turn and its active response state appears beside `# Copilot`. Press `<Enter>`
+on a schedule row to inspect its prompt and cadence without expanding that content in the main
+timeline.
 
 Command behavior follows the result returned by the SDK:
 

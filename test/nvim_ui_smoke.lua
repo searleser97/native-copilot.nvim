@@ -227,12 +227,26 @@ assert(
   environment_text:find('✗ **[environment] MCP local** — failed', 1, true)
 )
 assert(
-  not environment_text:find('Copilot environment', 1, true),
-  'generic environment row was not replaced in place'
+  environment_text:find('Copilot environment', 1, true),
+  'initial Copilot environment row was removed'
 )
 local github_mcp_row = assert(line_with(coordinator_buf, '[environment] MCP github'))
 local local_mcp_row = assert(line_with(coordinator_buf, '[environment] MCP local'))
 assert(local_mcp_row - github_mcp_row == 1, 'MCP rows should be directly adjacent')
+fleet._on_event({
+  v = 1,
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+assert(
+  buffer_text(coordinator_buf):find(
+    '✓ **[environment] Copilot environment** — ready',
+    1,
+    true
+  ),
+  'initial Copilot environment row did not transition to ready'
+)
 vim.bo[coordinator_buf].modifiable = true
 vim.api.nvim_buf_set_lines(
   coordinator_buf,
@@ -314,7 +328,7 @@ prompt_submit.callback()
 protocol.send = original_send
 assert(invoked_command.type == 'command.invoke')
 assert(invoked_command.payload.name == 'context')
-assert(buffer_text(coordinator_buf):find('# You\n\n/context', 1, true))
+assert(buffer_text(coordinator_buf):match('# You · %d%d:%d%d:%d%d\n\n/context'))
 assert(not buffer_text(coordinator_buf):find('[command]', 1, true))
 fleet._on_event({
   v = 1,
@@ -329,7 +343,9 @@ fleet._on_event({
     result = { kind = 'text', text = 'Context usage output' },
   },
 })
-assert(buffer_text(coordinator_buf):find('# Copilot\n\nContext usage output', 1, true))
+assert(buffer_text(coordinator_buf):match(
+  '# Copilot · %d%d:%d%d:%d%d\n\nContext usage output'
+))
 protocol.send = function(message_type, payload)
   invoked_command = { type = message_type, payload = payload }
   return 'model-list-request'
@@ -439,69 +455,68 @@ fleet._on_event({
     content = '/delegate implementation',
   },
 })
-local command_prompt_row = assert(line_with(coordinator_buf, '[prompt] Prompt'))
-assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — queued', 1, true))
+assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
   v = 1,
   type = 'member.state',
   memberId = 'coordinator',
   payload = { state = 'busy' },
 })
-assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — processing…', 1, true))
-assert(line_with(coordinator_buf, '[prompt] Prompt') == command_prompt_row)
+local prompt_sends = {}
+protocol.send = function(message_type, payload)
+  table.insert(prompt_sends, { type = message_type, payload = payload })
+  return 'prompt-request-' .. #prompt_sends
+end
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { 'Implement the first feature' })
+prompt_submit.callback()
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { 'Implement the second feature' })
+prompt_submit.callback()
+assert(#prompt_sends == 0, 'busy Copilot received a prompt instead of queueing it')
+local prompt_queue_buf = vim.fn.bufnr('native-copilot://prompt-queue')
+assert(prompt_queue_buf > 0, 'prompt queue buffer was not created')
+assert(#vim.fn.win_findbuf(prompt_queue_buf) == 1, 'prompt queue pane was not opened')
+assert(buffer_text(prompt_queue_buf):find('1. Implement the first feature', 1, true))
+assert(buffer_text(prompt_queue_buf):find('2. Implement the second feature', 1, true))
+local queue_win = vim.fn.win_findbuf(prompt_queue_buf)[1]
+vim.api.nvim_set_current_win(queue_win)
+vim.api.nvim_win_set_cursor(queue_win, { 2, 0 })
+local queue_maps = vim.api.nvim_buf_call(prompt_queue_buf, function()
+  return {
+    edit = vim.fn.maparg('<CR>', 'n', false, true),
+    cancel = vim.fn.maparg('dd', 'n', false, true),
+    pause = vim.fn.maparg('p', 'n', false, true),
+  }
+end)
+queue_maps.edit.callback()
+assert(buffer_text(prompt_buf):find('Implement the first feature', 1, true))
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { 'Implement the edited first feature' })
+prompt_submit.callback()
+assert(buffer_text(prompt_queue_buf):find('1. Implement the edited first feature', 1, true))
+assert(buffer_text(prompt_queue_buf):find('Queued prompts — paused', 1, true))
+vim.api.nvim_set_current_win(queue_win)
+vim.api.nvim_win_set_cursor(queue_win, { 3, 0 })
+queue_maps.cancel.callback()
+assert(not buffer_text(prompt_queue_buf):find('second feature', 1, true))
+queue_maps.pause.callback()
+assert(buffer_text(prompt_queue_buf):find('Queued prompts — FIFO', 1, true))
+assert(#prompt_sends == 0, 'resuming a busy queue dispatched out of turn')
 fleet._on_event({
   v = 1,
   type = 'member.state',
   memberId = 'coordinator',
   payload = { state = 'idle' },
 })
-assert(buffer_text(coordinator_buf):find('✓ **[prompt] Prompt** — completed', 1, true))
-assert(line_with(coordinator_buf, '[prompt] Prompt') == command_prompt_row)
-require('native_copilot.buffers').remove_timeline(
-  'coordinator',
-  'prompt:command-prompt-1'
-)
-fleet._on_event({
-  v = 1,
-  id = 'failed-prompt-queued',
-  type = 'prompt.queued',
-  memberId = 'coordinator',
-  payload = { id = 'failed-prompt', source = 'command' },
-})
-fleet._on_event({
-  v = 1,
-  type = 'request.error',
-  requestId = 'failed-prompt',
-  payload = { message = 'Prompt submission failed' },
-})
-assert(buffer_text(coordinator_buf):find('✗ **[prompt] Prompt** — Prompt submission failed', 1, true))
-fleet._on_event({
-  v = 1,
-  type = 'member.state',
-  memberId = 'coordinator',
-  payload = { state = 'busy' },
-})
-assert(not buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — processing…', 1, true))
-require('native_copilot.buffers').remove_timeline('coordinator', 'prompt:failed-prompt')
-protocol.send = function(message_type, payload)
-  invoked_command = { type = message_type, payload = payload }
-  return 'prompt-request'
-end
-vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { 'Implement the feature' })
-prompt_submit.callback()
-protocol.send = original_send
-assert(invoked_command.type == 'prompt.send')
-assert(buffer_text(coordinator_buf):find('# You\n\nImplement the feature', 1, true))
-local prompt_row = assert(line_with(coordinator_buf, '[prompt] Prompt'))
-assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — queued', 1, true))
-fleet._on_event({
-  v = 1,
-  type = 'member.state',
-  memberId = 'coordinator',
-  payload = { state = 'busy' },
-})
-assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — processing…', 1, true))
-assert(line_with(coordinator_buf, '[prompt] Prompt') == prompt_row)
+assert(#prompt_sends == 1)
+assert(prompt_sends[1].type == 'prompt.send')
+assert(prompt_sends[1].payload.content == 'Implement the edited first feature')
+assert(#vim.fn.win_findbuf(prompt_queue_buf) == 0, 'empty prompt queue pane remained open')
+assert(buffer_text(coordinator_buf):match(
+  '# You · %d%d:%d%d:%d%d\n\nImplement the edited first feature'
+))
+assert(buffer_text(coordinator_buf):match(
+  '# Copilot · %d%d:%d%d:%d%d · ○ processing…'
+))
+assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
   v = 1,
   id = 'steering-scheduled-run',
@@ -514,16 +529,13 @@ fleet._on_event({
     delivery = 'steering',
   },
 })
-assert(line_count_with(coordinator_buf, '[prompt] Prompt') == 2)
-assert(line_count_with(coordinator_buf, '[prompt] Prompt** — processing…') == 2)
 fleet._on_event({
   v = 1,
   type = 'member.state',
   memberId = 'coordinator',
   payload = { state = 'idle' },
 })
-assert(line_count_with(coordinator_buf, '[prompt] Prompt** — completed') == 2)
-assert(line_with(coordinator_buf, '[prompt] Prompt') == prompt_row)
+protocol.send = original_send
 fleet._on_event({
   v = 1,
   type = 'schedule.created',
@@ -565,8 +577,10 @@ fleet._on_event({
     delivery = 'queued',
   },
 })
-assert(buffer_text(coordinator_buf):find('# You\n\nCheck deployment health', 1, true))
-assert(buffer_text(coordinator_buf):find('○ **[prompt] Prompt** — queued', 1, true))
+assert(buffer_text(coordinator_buf):match(
+  '# You · %d%d:%d%d:%d%d\n\nCheck deployment health'
+))
+assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
   v = 1,
   type = 'schedule.cancelled',
@@ -900,7 +914,7 @@ activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
 })
 local assistant_row
 for row, line in ipairs(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false)) do
-  if line == '# Copilot' then assistant_row = row - 1 end
+  if line:match('^# Copilot · %d%d:%d%d:%d%d$') then assistant_row = row - 1 end
 end
 assert(assistant_row, 'assistant response heading was not found')
 for _, mark in ipairs(activity_marks) do

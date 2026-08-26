@@ -99,7 +99,7 @@ describe("instanceSessionId", () => {
     };
 
     expect(permissionDecision(readOnlyProfile, "E:\\repo", request)).toEqual({
-      kind: "approved",
+      kind: "approve-once",
     });
   });
 });

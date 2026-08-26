@@ -94,6 +94,11 @@ buffers.append_activity_delta('reviewer', 'reasoning-1', 'Checking the ')
 buffers.append_activity_delta('reviewer', 'reasoning-1', 'implementation.')
 buffers.complete_activity('reviewer', 'reasoning-1', 'Checking the implementation.')
 buffers.append_conversation_delta('reviewer', 'message-1', 'The implementation ')
+local streaming_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(streaming_text:match('# Copilot · %d%d:%d%d:%d%d · ○ processing…'))
 buffers.append_conversation_delta('reviewer', 'message-1', 'looks correct.')
 buffers.complete_conversation('reviewer', 'message-1', 'The implementation looks correct.')
 buffers.append_activity_delta('reviewer', 'reasoning-late', 'Late but ')
@@ -105,10 +110,13 @@ local text = table.concat(
   '\n'
 )
 assert(text:find('# You', 1, true))
+assert(text:match('# You · %d%d:%d%d:%d%d'))
 assert(text:find('Please review this.', 1, true))
 assert(text:find('> **Reasoning summary**', 1, true))
 assert(text:find('> Checking the implementation.', 1, true))
 assert(text:find('# Copilot', 1, true))
+assert(text:match('# Copilot · %d%d:%d%d:%d%d'))
+assert(not text:find('○ processing…', 1, true))
 assert(not text:find('# Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
@@ -130,7 +138,7 @@ local activity_marks = vim.api.nvim_buf_get_extmarks(
 assert(#activity_marks == 2, 'reasoning summaries did not produce two inline highlights')
 local assistant_row
 for row, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
-  if line == '# Copilot' then assistant_row = row - 1 end
+  if line:match('^# Copilot · %d%d:%d%d:%d%d$') then assistant_row = row - 1 end
 end
 assert(assistant_row, 'assistant heading row was not found')
 for _, mark in ipairs(activity_marks) do
@@ -162,6 +170,13 @@ for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 
   if line:find('[environment] MCP myenghub', 1, true) then mcp_rows = mcp_rows + 1 end
 end
 assert(mcp_rows == 1, 'MCP status transition duplicated the underlying timeline row')
+local mcp_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(mcp_text:match(
+  '> ✓ %*%*%[environment%] MCP myenghub%*%* — connected · %d%d:%d%d:%d%d'
+))
 local mcp_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line:find('[environment] MCP myenghub', 1, true) then

@@ -68,10 +68,12 @@ local defaults = {
   database_path = default_database,
   workspace = nil,
   prompt_height = 8,
+  prompt_queue_height = 5,
   task_detail_height = 12,
   overview_max_agents = 4,
   stream_flush_ms = 80,
   follow_bottom = true,
+  timestamp_format = '%H:%M:%S',
   frontend = {
     completion = 'native',
     picker = 'native',
@@ -88,6 +90,8 @@ local state = {
   tab = nil,
   main_win = nil,
   prompt_win = nil,
+  prompt_queue_win = nil,
+  prompt_queue_buf = nil,
   prompt_buf = nil,
   task_detail = nil,
   task_progress = nil,
@@ -111,8 +115,11 @@ local state = {
   permission_prompt_open = false,
   tool_calls = {},
   prompt_calls = {},
-  prompt_queues = {},
   active_prompts = {},
+  queued_prompts = {},
+  prompt_queue_paused = {},
+  prompt_queue_edit = nil,
+  prompt_queue_sequence = 0,
   schedules = {},
 }
 
@@ -211,68 +218,19 @@ local function invoke_command(target, name, input)
   })
 end
 
-local function update_prompt_call(request_id, status, detail)
-  local call = state.prompt_calls[request_id]
-  if not call then return end
-  call.status = status
-  buffers.upsert_timeline(call.member_id, 'prompt:' .. request_id, {
-    kind = 'prompt',
-    label = 'Prompt',
-    status = status,
-    detail = detail or status,
-  })
-end
-
-local function track_prompt(member_id, request_id, status)
-  if not request_id then return end
-  state.prompt_calls[request_id] = {
-    member_id = member_id,
-    status = status,
-  }
-  if status == 'running' then
-    state.active_prompts[member_id] = state.active_prompts[member_id] or {}
-    table.insert(state.active_prompts[member_id], request_id)
-  else
-    state.prompt_queues[member_id] = state.prompt_queues[member_id] or {}
-    table.insert(state.prompt_queues[member_id], request_id)
-  end
-  update_prompt_call(request_id, status, status == 'running' and 'processing…' or 'queued')
-end
-
-local function start_next_prompt(member_id)
-  if #(state.active_prompts[member_id] or {}) > 0 then return end
-  local queue = state.prompt_queues[member_id] or {}
-  local request_id = table.remove(queue, 1)
-  if not request_id then return end
-  state.active_prompts[member_id] = { request_id }
-  update_prompt_call(request_id, 'running', 'processing…')
-end
-
-local function complete_active_prompt(member_id)
-  local request_ids = state.active_prompts[member_id] or {}
-  if #request_ids == 0 then return end
-  for _, request_id in ipairs(request_ids) do
-    update_prompt_call(request_id, 'completed', 'completed')
-  end
-  state.active_prompts[member_id] = nil
-  start_next_prompt(member_id)
-end
+local refresh_prompt_queue
+local dispatch_next_prompt
 
 local function fail_prompt(request_id, detail)
   local call = state.prompt_calls[request_id]
   if not call then return end
   local member_id = call.member_id
-  for index = #(state.prompt_queues[member_id] or {}), 1, -1 do
-    if state.prompt_queues[member_id][index] == request_id then
-      table.remove(state.prompt_queues[member_id], index)
-    end
+  state.prompt_calls[request_id] = nil
+  if state.active_prompts[member_id] == request_id then
+    state.active_prompts[member_id] = nil
   end
-  for index = #(state.active_prompts[member_id] or {}), 1, -1 do
-    if state.active_prompts[member_id][index] == request_id then
-      table.remove(state.active_prompts[member_id], index)
-    end
-  end
-  update_prompt_call(request_id, 'failed', detail or 'failed')
+  buffers.fail_response(member_id, detail or 'Prompt submission failed')
+  dispatch_next_prompt(member_id)
 end
 
 local function schedule_description(schedule)
@@ -304,6 +262,51 @@ local function update_schedule(member_id, schedule_id, updates)
   })
 end
 
+local function dispatch_prompt(member_id, content)
+  buffers.append_block(member_id, 'conversation', 'You', content)
+  local request_id = send('prompt.send', { target = member_id, content = content })
+  if not request_id then return false end
+  state.prompt_calls[request_id] = { member_id = member_id }
+  state.active_prompts[member_id] = request_id
+  buffers.begin_response(member_id, request_id)
+  return true
+end
+
+local function enqueue_prompt(member_id, content)
+  state.prompt_queue_sequence = state.prompt_queue_sequence + 1
+  local queue = state.queued_prompts[member_id] or {}
+  state.queued_prompts[member_id] = queue
+  table.insert(queue, {
+    id = state.prompt_queue_sequence,
+    content = content,
+    updated_at = os.date(options.timestamp_format),
+  })
+  refresh_prompt_queue()
+end
+
+local function can_dispatch_prompt(member_id)
+  local entry = buffers.get_member(member_id)
+  return entry
+    and (entry.state == 'idle' or entry.state == 'standby')
+    and not state.active_prompts[member_id]
+    and not state.prompt_queue_paused[member_id]
+end
+
+dispatch_next_prompt = function(member_id)
+  local queue = state.queued_prompts[member_id] or {}
+  if #queue == 0 or not can_dispatch_prompt(member_id) then
+    refresh_prompt_queue()
+    return false
+  end
+  local item = table.remove(queue, 1)
+  refresh_prompt_queue()
+  if dispatch_prompt(member_id, item.content) then return true end
+  table.insert(queue, 1, item)
+  state.prompt_queue_paused[member_id] = true
+  refresh_prompt_queue()
+  return false
+end
+
 local function submit_prompt()
   local content = vim.trim(table.concat(prompt_lines(), '\n'))
   if content == '' then
@@ -315,6 +318,20 @@ local function submit_prompt()
     return
   end
   set_prompt_lines({ '' })
+  if state.prompt_queue_edit then
+    local edit = state.prompt_queue_edit
+    local queue = state.queued_prompts[edit.member_id] or {}
+    for _, item in ipairs(queue) do
+      if item.id == edit.id then
+        item.content = content
+        item.updated_at = os.date(options.timestamp_format)
+        break
+      end
+    end
+    state.prompt_queue_edit = nil
+    refresh_prompt_queue()
+    return
+  end
   local command = commands.parse(content)
   if command then
     buffers.append_block(state.selected, 'conversation', 'You', content)
@@ -372,9 +389,11 @@ local function submit_prompt()
     end
     invoke_command(state.selected, command.name, command.input)
   else
-    buffers.append_block(state.selected, 'conversation', 'You', content)
-    local request_id = send('prompt.send', { target = state.selected, content = content })
-    track_prompt(state.selected, request_id, 'idle')
+    if can_dispatch_prompt(state.selected) and #(state.queued_prompts[state.selected] or {}) == 0 then
+      dispatch_prompt(state.selected, content)
+    else
+      enqueue_prompt(state.selected, content)
+    end
   end
 end
 
@@ -428,6 +447,102 @@ local function ensure_prompt_buffer()
   end
   state.prompt_buf = buf
   return buf
+end
+
+local function queue_item_at_cursor()
+  local queue = state.queued_prompts[state.selected] or {}
+  local index = vim.api.nvim_win_get_cursor(0)[1] - 1
+  return queue[index], index
+end
+
+local function ensure_prompt_queue_buffer()
+  if state.prompt_queue_buf and vim.api.nvim_buf_is_valid(state.prompt_queue_buf) then
+    return state.prompt_queue_buf
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(buf, 'native-copilot://prompt-queue')
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'native-copilot'
+  vim.bo[buf].modifiable = false
+  vim.b[buf].native_copilot_prompt_queue = true
+  vim.keymap.set('n', '<CR>', function()
+    local item = queue_item_at_cursor()
+    if not item then return end
+    state.prompt_queue_paused[state.selected] = true
+    state.prompt_queue_edit = { member_id = state.selected, id = item.id }
+    set_prompt_lines(vim.split(item.content, '\n', { plain = true }))
+    refresh_prompt_queue()
+    focus_prompt()
+  end, {
+    buffer = buf,
+    desc = 'Edit queued Copilot prompt',
+  })
+  vim.keymap.set('n', 'dd', function()
+    local _, index = queue_item_at_cursor()
+    if index < 1 then return end
+    table.remove(state.queued_prompts[state.selected], index)
+    state.prompt_queue_edit = nil
+    refresh_prompt_queue()
+  end, {
+    buffer = buf,
+    desc = 'Cancel queued Copilot prompt',
+  })
+  vim.keymap.set('n', 'p', function()
+    local member_id = state.selected
+    state.prompt_queue_paused[member_id] = not state.prompt_queue_paused[member_id]
+    refresh_prompt_queue()
+    if not state.prompt_queue_paused[member_id] then
+      vim.schedule(function() dispatch_next_prompt(member_id) end)
+    end
+  end, {
+    buffer = buf,
+    desc = 'Pause or resume queued Copilot prompts',
+  })
+  state.prompt_queue_buf = buf
+  return buf
+end
+
+refresh_prompt_queue = function()
+  local member_id = state.selected
+  local queue = state.queued_prompts[member_id] or {}
+  local buf = ensure_prompt_queue_buffer()
+  local paused = state.prompt_queue_paused[member_id] == true
+  local lines = {
+    ('Queued prompts — %s'):format(paused and 'paused' or 'FIFO'),
+  }
+  for index, item in ipairs(queue) do
+    local preview = item.content:gsub('[\r\n]+', ' ')
+    table.insert(lines, ('%d. %s · %s'):format(index, preview, item.updated_at))
+  end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+
+  if not is_ui_open() then return end
+  if #queue == 0 then
+    if state.prompt_queue_win and vim.api.nvim_win_is_valid(state.prompt_queue_win) then
+      pcall(vim.api.nvim_win_close, state.prompt_queue_win, true)
+    end
+    state.prompt_queue_win = nil
+    return
+  end
+  if not state.prompt_queue_win or not vim.api.nvim_win_is_valid(state.prompt_queue_win) then
+    local current = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_win(state.prompt_win)
+    vim.cmd('aboveleft split')
+    state.prompt_queue_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(state.prompt_queue_win, buf)
+    if vim.api.nvim_win_is_valid(current) then vim.api.nvim_set_current_win(current) end
+  end
+  vim.api.nvim_win_set_height(
+    state.prompt_queue_win,
+    math.min(options.prompt_queue_height, #lines)
+  )
+  vim.wo[state.prompt_queue_win].winfixheight = true
+  vim.wo[state.prompt_queue_win].winbar =
+    ' Prompt queue  |  <Enter> edit  |  dd cancel  |  p pause/resume '
 end
 
 local task_symbols = {
@@ -510,10 +625,6 @@ local function update_environment(member_id, component, status, detail)
   if not environment then
     environment = { components = {}, order = {} }
     state.environment[member_id] = environment
-  end
-
-  if component ~= 'Copilot environment' and environment.components['Copilot environment'] then
-    remove_environment(member_id, 'Copilot environment')
   end
 
   if not environment.components[component] then table.insert(environment.order, component) end
@@ -802,10 +913,13 @@ end
 local function close_non_prompt_windows()
   if not is_ui_open() then return nil end
   local prompt_win
+  local prompt_queue_win
   local keep
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(state.tab)) do
     if vim.api.nvim_win_get_buf(win) == state.prompt_buf then
       prompt_win = win
+    elseif vim.api.nvim_win_get_buf(win) == state.prompt_queue_buf then
+      prompt_queue_win = win
     elseif not keep then
       keep = win
     end
@@ -819,6 +933,7 @@ local function close_non_prompt_windows()
     if
       win ~= keep
       and win ~= prompt_win
+      and win ~= prompt_queue_win
       and vim.api.nvim_win_is_valid(win)
     then
       pcall(vim.api.nvim_win_close, win, true)
@@ -826,6 +941,7 @@ local function close_non_prompt_windows()
   end
   state.main_win = keep
   state.prompt_win = prompt_win
+  state.prompt_queue_win = prompt_queue_win
   return keep
 end
 
@@ -845,6 +961,7 @@ local function ensure_ui()
   vim.api.nvim_win_set_height(state.prompt_win, options.prompt_height)
   vim.wo[state.prompt_win].winfixheight = true
   update_prompt_label()
+  refresh_prompt_queue()
   vim.api.nvim_set_current_win(state.prompt_win)
 end
 
@@ -875,6 +992,7 @@ function M.close()
   state.tab = nil
   state.main_win = nil
   state.prompt_win = nil
+  state.prompt_queue_win = nil
   state.overview = false
 end
 
@@ -896,6 +1014,7 @@ function M.show_member(member_id, view_id)
   vim.api.nvim_win_set_buf(win, entry.views[view_id or 'conversation'].buf)
   buffers.mark_read(member_id)
   update_prompt_label()
+  refresh_prompt_queue()
   vim.api.nvim_set_current_win(win)
 end
 
@@ -1691,8 +1810,10 @@ function M._on_event(message)
     state.environment = {}
     state.tool_calls = {}
     state.prompt_calls = {}
-    state.prompt_queues = {}
     state.active_prompts = {}
+    state.queued_prompts = {}
+    state.prompt_queue_paused = {}
+    state.prompt_queue_edit = nil
     state.schedules = {}
     state.mode = 'fleet-loading'
     state.active_fleet = payload.fleetId
@@ -1727,8 +1848,10 @@ function M._on_event(message)
     state.environment = {}
     state.tool_calls = {}
     state.prompt_calls = {}
-    state.prompt_queues = {}
     state.active_prompts = {}
+    state.queued_prompts = {}
+    state.prompt_queue_paused = {}
+    state.prompt_queue_edit = nil
     state.schedules = {}
     state.task_detail = nil
     state.task_progress = nil
@@ -1773,10 +1896,9 @@ function M._on_event(message)
   elseif message.type == 'scheduled.prompt' then
     local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
     buffers.append_block(member_id, 'conversation', 'You', content)
-    local prompt_id = 'scheduled:' .. tostring(payload.eventId or message.id)
-    track_prompt(member_id, prompt_id, payload.delivery == 'queued' and 'idle' or 'running')
+    buffers.begin_response(member_id, 'scheduled:' .. tostring(payload.eventId or message.id))
   elseif message.type == 'prompt.queued' then
-    track_prompt(member_id, tostring(payload.id or message.id), 'idle')
+    -- Runtime acknowledgement; locally queued prompts are not sent until they reach the FIFO head.
   elseif message.type == 'prompt.failed' then
     fail_prompt(tostring(payload.id or message.id), payload.message)
   elseif message.type == 'schedule.created' then
@@ -1849,10 +1971,16 @@ function M._on_event(message)
   elseif message.type == 'member.state' then
     local member_state = payload.state or 'unknown'
     buffers.set_state(member_id, member_state)
-    if member_state == 'busy' then
-      start_next_prompt(member_id)
-    elseif member_state == 'idle' then
-      complete_active_prompt(member_id)
+    if member_state == 'idle' then
+      local request_id = state.active_prompts[member_id]
+      if request_id then state.prompt_calls[request_id] = nil end
+      state.active_prompts[member_id] = nil
+      local environment = state.environment[member_id]
+      local startup = environment and environment.components['Copilot environment']
+      if startup and startup.status == 'running' then
+        update_environment(member_id, 'Copilot environment', 'completed', 'ready')
+      end
+      dispatch_next_prompt(member_id)
     end
   elseif message.type == 'mailbox.queued' or message.type == 'mailbox.delivered' then
     buffers.append_block(
@@ -1878,6 +2006,7 @@ function M.setup(user_options)
   buffers.setup({
     stream_flush_ms = options.stream_flush_ms,
     follow_bottom = options.follow_bottom,
+    timestamp_format = options.timestamp_format,
   })
   vim.keymap.set('n', options.mappings.toggle, M.toggle, {
     desc = 'Toggle native Copilot',

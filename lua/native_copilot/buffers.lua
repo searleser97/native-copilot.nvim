@@ -3,11 +3,17 @@ local M = {}
 local registry = {}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local message_anchor_namespace = vim.api.nvim_create_namespace('native_copilot_message_anchor')
+local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local options = {
   stream_flush_ms = 80,
   follow_bottom = true,
+  timestamp_format = '%H:%M:%S',
 }
+
+local function timestamp()
+  return os.date(options.timestamp_format)
+end
 
 local function with_modifiable(buf, operation)
   if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -63,7 +69,9 @@ local function create_buffer(name, member_id, view_id)
     streaming = false,
     activity_streaming = false,
     active_message = nil,
+    awaiting_response = nil,
     message_anchor = nil,
+    message_heading = nil,
     deferred_activity = nil,
     timeline = {},
   }
@@ -167,7 +175,7 @@ function M.append_block(member_id, view_id, heading, content)
     vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
   end
   local level = view_id == 'conversation' and '#' or '##'
-  append(view, ('\n%s %s\n\n%s\n'):format(level, heading, content), true)
+  append(view, ('\n%s %s · %s\n\n%s\n'):format(level, heading, timestamp(), content), true)
 end
 
 local function insert_activity_before_message(view, heading, content)
@@ -183,7 +191,7 @@ local function insert_activity_before_message(view, heading, content)
     view.message_anchor = nil
     return false
   end
-  local lines = { '', ('> **%s**'):format(heading), '>' }
+  local lines = { '', ('> **%s** · %s'):format(heading, timestamp()), '>' }
   for _, line in ipairs(vim.split(content, '\n', { plain = true })) do
     table.insert(lines, '> ' .. line)
   end
@@ -221,8 +229,21 @@ local function begin_inline_activity(view, activity_id, heading)
     id = activity_id,
     start_row = start_row,
   }
-  view.pending = view.pending .. ('\n> **%s**\n>\n> '):format(heading)
+  view.pending = view.pending .. ('\n> **%s** · %s\n>\n> '):format(heading, timestamp())
   flush(view)
+end
+
+local function touch_activity_heading(view, heading)
+  if not view.active_activity then return end
+  with_modifiable(view.buf, function()
+    vim.api.nvim_buf_set_lines(
+      view.buf,
+      view.active_activity.start_row,
+      view.active_activity.start_row + 1,
+      false,
+      { ('> **%s** · %s'):format(heading, timestamp()) }
+    )
+  end)
 end
 
 function M.append_activity_delta(member_id, activity_id, content)
@@ -256,6 +277,7 @@ function M.complete_activity(member_id, activity_id, content)
   if view.active_activity and view.active_activity.id == activity_id then
     view.pending = view.pending .. '\n'
     flush(view)
+    touch_activity_heading(view, 'Reasoning summary')
     view.active_activity = nil
     view.activity_streaming = false
     if not view.streaming then finalize_render(view) end
@@ -272,6 +294,7 @@ function M.append_activity_block(member_id, heading, content)
   begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
   view.pending = view.pending .. content:gsub('\n', '\n> ') .. '\n'
   flush(view)
+  touch_activity_heading(view, heading)
   view.active_activity = nil
   view.activity_streaming = false
   if not view.streaming then finalize_render(view) end
@@ -287,7 +310,13 @@ local function timeline_lines(kind, label, status, detail)
   }
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   return {
-    ('> %s **[%s] %s**%s'):format(symbols[status] or '?', kind, label, suffix),
+    ('> %s **[%s] %s**%s · %s'):format(
+      symbols[status] or '?',
+      kind,
+      label,
+      suffix,
+      timestamp()
+    ),
   }
 end
 
@@ -408,6 +437,56 @@ function M.timeline_item_at_cursor(buf, row)
   end
 end
 
+local function touch_message_heading(view, status)
+  if not view.message_heading then return end
+  local position = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    message_heading_namespace,
+    view.message_heading,
+    {}
+  )
+  if #position == 0 then return end
+  with_modifiable(view.buf, function()
+    vim.api.nvim_buf_set_lines(
+      view.buf,
+      position[1],
+      position[1] + 1,
+      false,
+      { ('# Copilot · %s%s'):format(timestamp(), status and (' · ' .. status) or '') }
+    )
+  end)
+end
+
+local function begin_response(view, response_id)
+  flush(view)
+  vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
+  vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
+  local heading_row = vim.api.nvim_buf_line_count(view.buf)
+  view.message_anchor = vim.api.nvim_buf_set_extmark(
+    view.buf,
+    message_anchor_namespace,
+    heading_row - 1,
+    0,
+    { right_gravity = false }
+  )
+  append(view, ('\n# Copilot · %s · ○ processing…\n\n'):format(timestamp()), false)
+  flush(view)
+  view.message_heading = vim.api.nvim_buf_set_extmark(
+    view.buf,
+    message_heading_namespace,
+    heading_row,
+    0,
+    { right_gravity = false }
+  )
+  view.awaiting_response = response_id or true
+end
+
+function M.begin_response(member_id, response_id)
+  local view = M.ensure_member(member_id).views.conversation
+  if view.awaiting_response or view.active_message then return end
+  begin_response(view, response_id)
+end
+
 function M.append_conversation_delta(member_id, message_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
@@ -420,24 +499,37 @@ function M.append_conversation_delta(member_id, message_id, content)
   if view.active_message ~= message_id then
     flush(view)
     view.active_message = message_id
-    vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
-    view.message_anchor = vim.api.nvim_buf_set_extmark(
-      view.buf,
-      message_anchor_namespace,
-      vim.api.nvim_buf_line_count(view.buf) - 1,
-      0,
-      { right_gravity = false }
-    )
-    append(view, '\n# Copilot\n\n', false)
+    if view.awaiting_response then
+      view.awaiting_response = nil
+    else
+      begin_response(view, message_id)
+      view.awaiting_response = nil
+    end
   end
   append(view, content, false)
+end
+
+function M.fail_response(member_id, detail)
+  local view = M.ensure_member(member_id).views.conversation
+  if not view.awaiting_response and not view.active_message then return end
+  flush(view)
+  touch_message_heading(view, '✗ ' .. (detail or 'failed'))
+  view.awaiting_response = nil
+  view.active_message = nil
+  view.streaming = false
+  finalize_render(view)
 end
 
 function M.complete_conversation(member_id, message_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  if view.active_message == message_id then
+  if view.awaiting_response then
+    append(view, content .. '\n', true)
+    view.awaiting_response = nil
+    touch_message_heading(view)
+  elseif view.active_message == message_id then
     append(view, '\n', true)
+    touch_message_heading(view)
   else
     M.append_block(member_id, 'conversation', 'Copilot', content)
   end
