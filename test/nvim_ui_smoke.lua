@@ -136,9 +136,9 @@ local function line_count_with(buf, text)
   return count
 end
 local timeline_text = buffer_text(coordinator_buf)
-assert(timeline_text:find('○ **[task] [agent] Review implementation**', 1, true))
-assert(timeline_text:find('✓ **[task] [shell] npm test**', 1, true))
-assert(timeline_text:find('✗ **[task] [agent] Validate deployment**', 1, true))
+assert(timeline_text:find('🟡 **[task] [agent] Review implementation**', 1, true))
+assert(timeline_text:find('🟢 **[task] [shell] npm test**', 1, true))
+assert(timeline_text:find('🔴 **[task] [agent] Validate deployment**', 1, true))
 local coordinator_win = vim.fn.win_findbuf(coordinator_buf)[1]
 vim.api.nvim_set_current_win(coordinator_win)
 vim.api.nvim_win_set_cursor(coordinator_win, {
@@ -198,7 +198,7 @@ assert(
   'failed task moved instead of updating its existing row'
 )
 assert(
-  buffer_text(coordinator_buf):find('✗ **[task] [agent] Review implementation**', 1, true),
+  buffer_text(coordinator_buf):find('🔴 **[task] [agent] Review implementation**', 1, true),
   'failed task kept its running indicator'
 )
 assert(buffer_text(task_detail_buf):find('Status: failed', 1, true))
@@ -243,7 +243,7 @@ fleet._on_event({
 timeline_text = buffer_text(coordinator_buf)
 assert(
   timeline_text:find(
-    '○ **[environment] Copilot environment** — Starting runtime and discovering configuration',
+    '🟡 **[environment] Copilot environment** — Starting runtime and discovering configuration',
     1,
     true
   ),
@@ -268,10 +268,10 @@ local environment_text = table.concat(
   '\n'
 )
 assert(
-  environment_text:find('✓ **[environment] MCP github** — connected', 1, true)
+  environment_text:find('🟢 **[environment] MCP github** — connected', 1, true)
 )
 assert(
-  environment_text:find('✗ **[environment] MCP local** — failed', 1, true)
+  environment_text:find('🔴 **[environment] MCP local** — failed', 1, true)
 )
 assert(
   environment_text:find('Copilot environment', 1, true),
@@ -288,7 +288,7 @@ fleet._on_event({
 })
 assert(
   buffer_text(coordinator_buf):find(
-    '✓ **[environment] Copilot environment** — ready',
+    '🟢 **[environment] Copilot environment** — ready',
     1,
     true
   ),
@@ -300,7 +300,7 @@ vim.api.nvim_buf_set_lines(
   github_mcp_row,
   github_mcp_row,
   false,
-  { '> ○ **[environment] MCP github** — orphaned pending' }
+  { '> 🟡 **[environment] MCP github** — orphaned pending' }
 )
 vim.bo[coordinator_buf].modifiable = false
 assert(line_count_with(coordinator_buf, '[environment] MCP github') == 2)
@@ -313,7 +313,7 @@ fleet._on_event({
     status = 'pending',
   },
 })
-assert(buffer_text(coordinator_buf):find('○ **[environment] MCP github** — pending', 1, true))
+assert(buffer_text(coordinator_buf):find('🟡 **[environment] MCP github** — pending', 1, true))
 assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
 assert(line_count_with(coordinator_buf, '[environment] MCP github') == 1)
 fleet._on_event({
@@ -325,7 +325,7 @@ fleet._on_event({
     status = 'connected',
   },
 })
-assert(buffer_text(coordinator_buf):find('✓ **[environment] MCP github** — connected', 1, true))
+assert(buffer_text(coordinator_buf):find('🟢 **[environment] MCP github** — connected', 1, true))
 assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
 assert(line_count_with(coordinator_buf, '[environment] MCP github') == 1)
 local task_action_sent = false
@@ -357,7 +357,7 @@ environment_text = table.concat(
   '\n'
 )
 assert(
-  environment_text:find('✗ **[environment] Skills** — Invalid skill metadata', 1, true),
+  environment_text:find('🔴 **[environment] Skills** — Invalid skill metadata', 1, true),
   'environment failure is absent from conversation'
 )
 local prompt_buf = vim.fn.bufnr('AI Prompt')
@@ -570,7 +570,7 @@ assert(buffer_text(coordinator_buf):match(
   '👨 You · %d%d:%d%d:%d%d\n\nImplement the edited first feature'
 ))
 assert(buffer_text(coordinator_buf):match(
-  '🤖 Copilot · %d%d:%d%d:%d%d · ○ processing…'
+  '🟡 🤖 Copilot · %d%d:%d%d:%d%d · processing…'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
@@ -604,14 +604,14 @@ fleet._on_event({
   },
 })
 local schedule_row = assert(line_with(coordinator_buf, '[schedule] Schedule #7'))
-assert(buffer_text(coordinator_buf):find('○ **[schedule] Schedule #7** — every 300s', 1, true))
+assert(buffer_text(coordinator_buf):find('🟡 **[schedule] Schedule #7** — every 300s', 1, true))
 fleet._on_event({
   v = 1,
   type = 'schedule.rearmed',
   memberId = 'coordinator',
   payload = { id = 7, nextRunAt = 1787701200000 },
 })
-assert(buffer_text(coordinator_buf):find('○ **[schedule] Schedule #7** — rearmed', 1, true))
+assert(buffer_text(coordinator_buf):find('🟡 **[schedule] Schedule #7** — rearmed', 1, true))
 assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
 vim.api.nvim_set_current_win(coordinator_win)
 vim.api.nvim_win_set_cursor(coordinator_win, { schedule_row, 0 })
@@ -643,7 +643,7 @@ fleet._on_event({
   memberId = 'coordinator',
   payload = { id = 7 },
 })
-assert(buffer_text(coordinator_buf):find('– **[schedule] Schedule #7** — cancelled', 1, true))
+assert(buffer_text(coordinator_buf):find('⚪ **[schedule] Schedule #7** — cancelled', 1, true))
 assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
 local native_picker
 original_select = vim.ui.select
@@ -676,8 +676,7 @@ assert(native_picker.opts.prompt == 'Tasks')
 assert(native_picker.items[1].option.name == 'list')
 local resumed_session
 vim.ui.select = function(items, opts, on_choice)
-  native_picker = { items = items, opts = opts }
-  on_choice(items[1])
+  native_picker = { items = items, opts = opts, on_choice = on_choice }
 end
 protocol.send = function(message_type, payload)
   if message_type == 'session.resume' then resumed_session = payload.sessionId end
@@ -740,11 +739,62 @@ fleet._on_event({
     },
   },
 })
+local permission_row = assert(line_with(coordinator_buf, '[permission] shell'))
+assert(
+  vim.api.nvim_buf_get_lines(coordinator_buf, permission_row - 1, permission_row, false)[1]
+    :find('> 🟡 **[permission] shell** — approval required: npm test', 1, true) == 1
+)
+assert(not buffer_text(coordinator_buf):find('**Permission**', 1, true))
+native_picker.on_choice(native_picker.items[1])
 vim.ui.select = original_select
 protocol.send = original_send
 assert(native_picker.opts.prompt:find('managed approval required', 1, true))
 assert(permission_response.requestId == 'managed-permission')
 assert(permission_response.approved == true)
+assert(line_with(coordinator_buf, '[permission] shell') == permission_row)
+assert(
+  buffer_text(coordinator_buf):find(
+    '> 🟢 **[permission] shell** — approved once: npm test',
+    1,
+    true
+  )
+)
+permission_response = nil
+vim.ui.select = function(items, opts, on_choice)
+  native_picker = { items = items, opts = opts }
+  on_choice(nil)
+end
+protocol.send = function(message_type, payload)
+  if message_type == 'permission.respond' then permission_response = payload end
+  return 'permission-response'
+end
+fleet._on_event({
+  v = 1,
+  id = 'permission-denied',
+  type = 'permission.requested',
+  memberId = 'coordinator',
+  target = 'status',
+  done = false,
+  payload = {
+    requestId = 'denied-permission',
+    request = {
+      kind = 'shell',
+      fullCommandText = 'Remove-Item output.tmp',
+    },
+  },
+})
+vim.ui.select = original_select
+protocol.send = original_send
+assert(permission_response.requestId == 'denied-permission')
+assert(permission_response.approved == false)
+assert(
+  buffer_text(coordinator_buf):find(
+    '> 🚫 **[permission] shell** — denied: Remove-Item output.tmp',
+    1,
+    true
+  )
+)
+assert(not buffer_text(coordinator_buf):find('**Permission**', 1, true))
 native_picker = nil
 vim.ui.select = function(items, opts, on_choice)
   native_picker = { items = items, opts = opts }
@@ -862,7 +912,7 @@ fleet._on_event({
   },
 })
 conversation_text = buffer_text(observer_buf)
-assert(conversation_text:find('○ **[tool] view** — processing…', 1, true))
+assert(conversation_text:find('🟡 **[tool] view** — processing…', 1, true))
 assert(not conversation_text:find('secret', 1, true))
 local tool_row = assert(line_with(observer_buf, '[tool] view'))
 fleet._on_event({
@@ -949,12 +999,12 @@ fleet._on_event({
   },
 })
 assert(
-  buffer_text(observer_buf):find('✗ **[tool] powershell** — failed', 1, true),
+  buffer_text(observer_buf):find('🔴 **[tool] powershell** — failed', 1, true),
   'failed tool kept its running indicator'
 )
 assert(
   buffer_text(observer_buf):find(
-    '✗ **[task] [shell] Parse PR JSON details using python**',
+    '🔴 **[task] [shell] Parse PR JSON details using python**',
     1,
     true
   ),
@@ -1011,7 +1061,7 @@ conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1,
 assert(not conversation_text:find('tool output must stay hidden', 1, true))
 assert(not conversation_text:find('secret', 1, true))
 assert(
-  conversation_text:find('✓ **[tool] view** — completed', 1, true),
+  conversation_text:find('🟢 **[tool] view** — completed', 1, true),
   'tool status did not update in place'
 )
 assert(

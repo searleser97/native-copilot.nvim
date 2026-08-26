@@ -1,6 +1,15 @@
 local M = {}
 
 local registry = {}
+local status_symbols = {
+  running = '🟡',
+  idle = '🟡',
+  completed = '🟢',
+  failed = '🔴',
+  cancelled = '⚪',
+  denied = '🚫',
+  unknown = '❓',
+}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
@@ -216,7 +225,7 @@ function M.append_block(member_id, view_id, heading, content)
   if view_id == 'conversation' and heading == 'You' then
     display_heading = options.conversation.user_label
   elseif view_id == 'conversation' and heading == 'Copilot' then
-    display_heading = options.conversation.copilot_label
+    display_heading = status_symbols.completed .. ' ' .. options.conversation.copilot_label
   else
     local level = view_id == 'conversation' and '#' or '##'
     display_heading = ('%s %s'):format(level, heading)
@@ -337,26 +346,23 @@ function M.append_activity_block(member_id, heading, content)
 end
 
 local function timeline_lines(kind, label, status, detail, now)
-  local symbols = {
-    running = '○',
-    idle = '○',
-    completed = '✓',
-    failed = '✗',
-    cancelled = '–',
-  }
   kind = tostring(kind or 'activity'):gsub('[\r\n]+', ' ')
   label = tostring(label or ''):gsub('[\r\n]+', ' ')
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   return {
     ('> %s **[%s] %s**%s · %s'):format(
-      symbols[status] or '?',
+      status_symbols[status] or status_symbols.unknown,
       kind,
       label,
       suffix,
       timestamp(now)
     ),
   }
+end
+
+function M.status_symbol(status)
+  return status_symbols[status] or status_symbols.unknown
 end
 
 local function reconcile_environment_rows(view, item)
@@ -486,7 +492,7 @@ function M.timeline_item_at_cursor(buf, row)
   end
 end
 
-local function touch_message_heading(view, status)
+local function touch_message_heading(view, status, detail)
   if not view.message_heading then return end
   local position = vim.api.nvim_buf_get_extmark_by_id(
     view.buf,
@@ -504,9 +510,9 @@ local function touch_message_heading(view, status)
       false,
       {
         ('%s · %s%s'):format(
-          options.conversation.copilot_label,
+          M.status_symbol(status) .. ' ' .. options.conversation.copilot_label,
           completed_at,
-          status and (' · ' .. status) or ''
+          detail and (' · ' .. detail) or ''
         ),
       }
     )
@@ -521,7 +527,8 @@ local function begin_response(view, response_id)
   local started_at = timestamp(now)
   append(
     view,
-    ('\n%s · %s · ○ processing…\n\n'):format(
+    ('\n%s %s · %s · processing…\n\n'):format(
+      M.status_symbol('running'),
       options.conversation.copilot_label,
       started_at
     ),
@@ -578,7 +585,7 @@ function M.fail_response(member_id, detail)
   local view = M.ensure_member(member_id).views.conversation
   if not view.awaiting_response and not view.active_message then return end
   flush(view)
-  touch_message_heading(view, '✗ ' .. (detail or 'failed'))
+  touch_message_heading(view, 'failed', detail or 'failed')
   view.awaiting_response = nil
   view.active_message = nil
   view.streaming = false
@@ -593,10 +600,10 @@ function M.complete_conversation(member_id, message_id, content)
   elseif view.awaiting_response then
     append(view, content .. '\n', true)
     view.awaiting_response = nil
-    touch_message_heading(view)
+    touch_message_heading(view, 'completed')
   elseif view.active_message == message_id then
     append(view, '\n', true)
-    touch_message_heading(view)
+    touch_message_heading(view, 'completed')
   else
     M.append_block(member_id, 'conversation', 'Copilot', content)
   end
@@ -608,7 +615,7 @@ function M.finish_response(member_id)
   local view = entry and entry.views.conversation
   if not view or (not view.awaiting_response and not view.active_message) then return end
   flush(view)
-  touch_message_heading(view)
+  touch_message_heading(view, 'completed')
   view.awaiting_response = nil
   view.active_message = nil
   view.streaming = false

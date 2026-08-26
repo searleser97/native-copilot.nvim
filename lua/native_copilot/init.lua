@@ -568,14 +568,6 @@ refresh_prompt_queue = function()
     ' Prompt queue  |  <Enter> edit  |  dd cancel  |  p pause/resume '
 end
 
-local task_symbols = {
-  running = '○',
-  idle = '○',
-  completed = '✓',
-  failed = '✗',
-  cancelled = '–',
-}
-
 local function json_value(value)
   return value ~= vim.NIL and value or nil
 end
@@ -784,7 +776,7 @@ local function render_task_detail()
     local status = json_value(task.status) or 'unknown'
     lines = {
       ('%s [%s] %s'):format(
-        task_symbols[status] or '?',
+        buffers.status_symbol(status),
         json_value(task.type) or 'task',
         task_description(task)
       ),
@@ -822,7 +814,7 @@ local function render_task_detail()
   else
     lines = {
       ('%s [%s] %s'):format(
-        task_symbols[item.status] or '?',
+        buffers.status_symbol(item.status),
         item.kind or 'activity',
         item.label or 'Activity'
       ),
@@ -1230,13 +1222,16 @@ end
 
 local function permission_detail(request)
   if request.kind == 'shell' then
-    return request.fullCommandText or table.concat(request.commands or {}, ' ')
+    local commands = json_value(request.commands)
+    return json_value(request.fullCommandText)
+      or (type(commands) == 'table' and table.concat(commands, ' ') or nil)
+      or request.kind
   end
-  return request.path
-    or request.url
-    or request.toolName
-    or request.fileName
-    or request.factoryId
+  return json_value(request.path)
+    or json_value(request.url)
+    or json_value(request.toolName)
+    or json_value(request.fileName)
+    or json_value(request.factoryId)
     or request.kind
 end
 
@@ -1257,9 +1252,19 @@ local function show_next_permission()
     ),
     format_item = function(item) return item.display end,
   }, function(item)
+    local approved = item ~= nil and item.approved == true
     send('permission.respond', {
       requestId = pending.requestId,
-      approved = item ~= nil and item.approved == true,
+      approved = approved,
+    })
+    buffers.upsert_timeline(pending.member_id, pending.timeline_id, {
+      kind = 'permission',
+      label = pending.kind,
+      status = approved and 'completed' or 'denied',
+      detail = ('%s: %s'):format(
+        approved and 'approved once' or 'denied',
+        pending.detail
+      ),
     })
     state.permission_prompt_open = false
     vim.schedule(show_next_permission)
@@ -1267,15 +1272,20 @@ local function show_next_permission()
 end
 
 local function request_permission(payload, member_id)
-  table.insert(state.permission_queue, payload)
-  buffers.append_activity_block(
-    member_id,
-    'Permission',
-    ('Approval required for `%s`: %s'):format(
-      payload.request and payload.request.kind or 'tool',
-      tostring(permission_detail(payload.request or {}))
-    )
-  )
+  local request = payload.request or {}
+  local pending = vim.tbl_extend('force', payload, {
+    member_id = member_id,
+    timeline_id = 'permission:' .. tostring(payload.requestId),
+    kind = request.kind or 'tool',
+    detail = tostring(permission_detail(request)),
+  })
+  table.insert(state.permission_queue, pending)
+  buffers.upsert_timeline(member_id, pending.timeline_id, {
+    kind = 'permission',
+    label = pending.kind,
+    status = 'running',
+    detail = 'approval required: ' .. pending.detail,
+  })
   show_next_permission()
 end
 
@@ -1598,7 +1608,7 @@ function M._on_event(message)
       local id = model_id(model)
       table.insert(entries, {
         display = ('%s%s — %s'):format(
-          id == current_id and '✓ ' or '',
+          id == current_id and '🟢 ' or '',
           model_name(model),
           id or 'unknown'
         ),
@@ -1733,7 +1743,7 @@ function M._on_event(message)
       for _, task in ipairs(state.tasks[target] or {}) do
         table.insert(entries, {
           display = ('%s [%s] %s'):format(
-            task_symbols[task.status] or '?',
+            buffers.status_symbol(task.status),
             task.type or 'task',
             task_description(task)
           ),

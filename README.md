@@ -117,16 +117,19 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `dd` in task details | Cancel the running or waiting task |
 
 The conversation is also the chronological activity timeline. Background tasks, environment
-initialization, foreground tools, and schedules appear as compact quoted rows. `○` is processing
-or waiting, `✓` completed, `✗` failed, and `–` cancelled. Each row keeps a stable position and
-updates in place as its state changes, so completion does not reorder earlier work.
+initialization, foreground tools, schedules, and permission decisions appear as compact quoted
+rows. `🟡` is processing or waiting, `🟢` completed or approved, `🔴` failed, `⚪` cancelled,
+`🚫` denied, and `❓` unknown. Each row keeps a stable position and updates in place as its state
+changes, so completion does not reorder earlier work.
 
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
 transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
 name and status in the timeline; `<Enter>` reveals their arguments and result or error in the
-floating detail pane. The active turn shows `○ processing…` beside `🤖 Copilot`; it does not create
-a separate prompt-status row. Prompts submitted while Copilot is busy stay in a FIFO pane between
+floating detail pane. The active turn starts with `🟡` and changes to `🟢` or `🔴`; it does not
+create a separate prompt-status row. Permission requests use a leading `🟡` row that updates to
+`🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted
+while Copilot is busy stay in a FIFO pane between
 the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
 Slash commands are rendered as normal `👨 You` turns rather than duplicated `[command]` rows; their
 text output remains under `🤖 Copilot`, and any work they start is represented by the resulting
