@@ -61,7 +61,18 @@ local function create_buffer(name, member_id, view_id)
   vim.b[buf].native_copilot = true
   vim.b[buf].native_copilot_member = member_id
   vim.b[buf].native_copilot_view = view_id
-  local initial_lines = view_id == 'conversation' and { '' } or { '# ' .. name, '' }
+  local initial_day
+  local initial_lines
+  if view_id == 'conversation' then
+    local now = options.now()
+    initial_day = os.date('%Y-%m-%d', now)
+    initial_lines = {
+      ('──────── %s ────────'):format(os.date(options.conversation.day_header_format, now)),
+      '',
+    }
+  else
+    initial_lines = { '# ' .. name, '' }
+  end
   with_modifiable(buf, function()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
   end)
@@ -76,7 +87,7 @@ local function create_buffer(name, member_id, view_id)
     active_message = nil,
     awaiting_response = nil,
     message_heading = nil,
-    current_day = nil,
+    current_day = initial_day,
     last_block_kind = nil,
     last_activity = nil,
     timeline = {},
@@ -170,7 +181,7 @@ local function ensure_day_header(view, now)
   flush(view)
   local line_count = vim.api.nvim_buf_line_count(view.buf)
   local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
-  local prefix = last == '' and '' or '\n'
+  local prefix = last == '' and '\n' or '\n\n'
   view.pending = view.pending
     .. prefix
     .. ('──────── %s ────────\n'):format(os.date(options.conversation.day_header_format, now))
@@ -197,6 +208,10 @@ function M.append_block(member_id, view_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
   local now = ensure_day_header(view, options.now())
+  flush(view)
+  local line_count = vim.api.nvim_buf_line_count(view.buf)
+  local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
+  local prefix = last == '' and '\n' or '\n\n'
   local display_heading
   if view_id == 'conversation' and heading == 'You' then
     display_heading = options.conversation.user_label
@@ -206,7 +221,7 @@ function M.append_block(member_id, view_id, heading, content)
     local level = view_id == 'conversation' and '#' or '##'
     display_heading = ('%s %s'):format(level, heading)
   end
-  append(view, ('\n%s · %s\n\n%s\n'):format(display_heading, timestamp(now), content), true)
+  append(view, ('%s%s · %s\n\n%s\n'):format(prefix, display_heading, timestamp(now), content), true)
 end
 
 local function begin_inline_activity(view, activity_id, heading)

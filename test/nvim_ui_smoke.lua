@@ -158,6 +158,53 @@ local task_detail_buf = vim.api.nvim_get_current_buf()
 assert(vim.api.nvim_win_get_config(0).relative == 'editor', 'task details did not open in a float')
 fleet._on_event({
   v = 1,
+  id = 'task-progress-missing',
+  type = 'tasks.progress',
+  memberId = 'coordinator',
+  target = 'status',
+  done = true,
+  payload = {
+    target = 'coordinator',
+    taskId = 'agent-running',
+    progress = vim.NIL,
+  },
+})
+assert(
+  buffer_text(task_detail_buf):find('No progress details are available.', 1, true),
+  'null task progress was not rendered safely'
+)
+local running_task_row = assert(line_with(coordinator_buf, '[agent] Review implementation'))
+fleet._on_event({
+  v = 1,
+  id = 'task-failed',
+  type = 'tasks.changed',
+  memberId = 'coordinator',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'agent-running',
+        type = 'agent',
+        status = 'failed',
+        description = 'Review implementation',
+        error = 'Reviewer process exited with code 1',
+      },
+    },
+  },
+})
+assert(
+  line_with(coordinator_buf, '[agent] Review implementation') == running_task_row,
+  'failed task moved instead of updating its existing row'
+)
+assert(
+  buffer_text(coordinator_buf):find('✗ **[task] [agent] Review implementation**', 1, true),
+  'failed task kept its running indicator'
+)
+assert(buffer_text(task_detail_buf):find('Status: failed', 1, true))
+assert(buffer_text(task_detail_buf):find('Reviewer process exited with code 1', 1, true))
+fleet._on_event({
+  v = 1,
   id = 'task-progress',
   type = 'tasks.progress',
   memberId = 'coordinator',
@@ -847,6 +894,80 @@ assert(tool_detail_text:find('Arguments:', 1, true))
 assert(tool_detail_text:find('secret', 1, true))
 assert(tool_detail_text:find('Result:', 1, true))
 assert(tool_detail_text:find('tool output must stay hidden', 1, true))
+vim.api.nvim_buf_call(tool_detail_buf, function()
+  vim.fn.maparg('q', 'n', false, true).callback()
+end)
+fleet._on_event({
+  v = 1,
+  id = 'shell-task-running',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'shell-42',
+        type = 'shell',
+        status = 'running',
+        description = 'Parse PR JSON details using python',
+      },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'tool-failed-start',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = false,
+  payload = {
+    eventType = 'tool.execution_start',
+    data = {
+      toolCallId = 'tool-call-2',
+      toolName = 'powershell',
+      arguments = { shellId = 'shell-42' },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'tool-failed-complete',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'tool-call-2',
+      success = false,
+      result = vim.NIL,
+      error = { message = 'Command exited with code 1' },
+    },
+  },
+})
+assert(
+  buffer_text(observer_buf):find('✗ **[tool] powershell** — failed', 1, true),
+  'failed tool kept its running indicator'
+)
+assert(
+  buffer_text(observer_buf):find(
+    '✗ **[task] [shell] Parse PR JSON details using python**',
+    1,
+    true
+  ),
+  'task linked to a failed tool kept its running indicator'
+)
+vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
+vim.api.nvim_win_set_cursor(0, { assert(line_with(observer_buf, '[tool] powershell')), 0 })
+observer_enter.callback()
+tool_detail_buf = vim.api.nvim_get_current_buf()
+tool_detail_text = buffer_text(tool_detail_buf)
+assert(tool_detail_text:find('Status: failed', 1, true))
+assert(tool_detail_text:find('Command exited with code 1', 1, true))
+assert(not tool_detail_text:find('vim.NIL', 1, true))
 vim.api.nvim_buf_call(tool_detail_buf, function()
   vim.fn.maparg('q', 'n', false, true).callback()
 end)

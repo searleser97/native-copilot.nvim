@@ -107,6 +107,8 @@ local streaming_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
+assert(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, 1, false)[1]
+  == '──────── 08-26 ────────')
 assert(streaming_text:find('──────── 08-26 ────────', 1, true))
 assert(streaming_text:match('BOT · %d%d:%d%d:%d%d · ○ processing…'))
 buffers.append_conversation_delta('reviewer', 'message-1', 'looks correct.')
@@ -178,6 +180,23 @@ assert(adjacent_reasoning < tool_answer, 'final answer was not kept after tool r
 local tool_turn = tool_turn_text:sub(tool_row)
 local _, reasoning_heading_count = tool_turn:gsub('%*%*Reasoning summary%*%*', '')
 assert(reasoning_heading_count == 1, 'consecutive reasoning duplicated its heading')
+
+local spacing = buffers.ensure_member('spacing', 'Spacing')
+buffers.upsert_timeline('spacing', 'environment:last', {
+  kind = 'environment',
+  label = 'Last service',
+  status = 'completed',
+  detail = 'connected',
+})
+buffers.append_block('spacing', 'conversation', 'You', 'Prompt after startup.')
+local spacing_text = table.concat(
+  vim.api.nvim_buf_get_lines(spacing.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(
+  spacing_text:match('%[environment%] Last service.-\n\nUSER ·'),
+  'first prompt was not separated from the final environment row'
+)
 
 local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
 local activity_marks = vim.api.nvim_buf_get_extmarks(

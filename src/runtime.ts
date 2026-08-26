@@ -1020,6 +1020,14 @@ export class CopilotRuntime {
           target: "activity",
           done: event.type === "tool.execution_complete",
         });
+        if (event.type === "tool.execution_complete") {
+          this.refreshTasks(live);
+          setTimeout(() => {
+            if (this.live.get(live.memberId) === live) {
+              this.refreshTasks(live);
+            }
+          }, 500);
+        }
         break;
       case "session.background_tasks_changed":
       case "subagent.started":

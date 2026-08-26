@@ -100,6 +100,7 @@ local state = {
   prompt_buf = nil,
   task_detail = nil,
   task_progress = nil,
+  task_progress_loaded = false,
   task_detail_buf = nil,
   task_detail_win = nil,
   task_detail_member = nil,
@@ -575,8 +576,17 @@ local task_symbols = {
   cancelled = '–',
 }
 
+local function json_value(value)
+  return value ~= vim.NIL and value or nil
+end
+
 local function task_description(task)
-  local detail = task.description or task.command or task.prompt or task.id
+  if type(task) ~= 'table' then return 'Unknown task' end
+  local detail = json_value(task.description)
+    or json_value(task.command)
+    or json_value(task.prompt)
+    or json_value(task.id)
+    or 'Unknown task'
   return tostring(detail):gsub('[\r\n]+', ' ')
 end
 
@@ -664,45 +674,86 @@ local function update_environment(member_id, component, status, detail)
 end
 
 local function merge_tasks(member_id, incoming)
+  incoming = type(incoming) == 'table' and incoming or {}
   local current = state.tasks[member_id] or {}
   local by_id = {}
   for _, task in ipairs(current) do by_id[task.id] = task end
   for _, task in ipairs(incoming or {}) do
-    if by_id[task.id] then
-      local updated = vim.tbl_deep_extend('force', by_id[task.id], task)
-      for index, candidate in ipairs(current) do
-        if candidate.id == task.id then
-          current[index] = updated
-          break
-        end
-      end
-      by_id[task.id] = updated
+    if type(task) ~= 'table' or type(json_value(task.id)) ~= 'string' then
+      notify('Ignored a malformed task update.', vim.log.levels.WARN)
     else
-      table.insert(current, task)
-      by_id[task.id] = task
+      if by_id[task.id] then
+        local updated = vim.tbl_deep_extend('force', by_id[task.id], task)
+        for index, candidate in ipairs(current) do
+          if candidate.id == task.id then
+            current[index] = updated
+            break
+          end
+        end
+        by_id[task.id] = updated
+      else
+        table.insert(current, task)
+        by_id[task.id] = task
+      end
+      local current_task = by_id[task.id]
+      buffers.upsert_timeline(member_id, 'task:' .. task.id, {
+        kind = 'task',
+        label = ('[%s] %s'):format(
+          json_value(current_task.type) or 'task',
+          task_description(current_task)
+        ),
+        status = json_value(current_task.status) or 'idle',
+        task = current_task,
+      })
     end
-    local current_task = by_id[task.id]
-    buffers.upsert_timeline(member_id, 'task:' .. task.id, {
-      kind = 'task',
-      label = ('[%s] %s'):format(current_task.type or 'task', task_description(current_task)),
-      status = current_task.status or 'idle',
-      task = current_task,
-    })
   end
   state.tasks[member_id] = current
-  if state.task_detail and state.task_detail.id and by_id[state.task_detail.id] then
+  if type(state.task_detail) == 'table'
+    and json_value(state.task_detail.id)
+    and by_id[state.task_detail.id]
+  then
     state.task_detail = by_id[state.task_detail.id]
   end
+end
+
+local function fail_linked_task(member_id, data, tool)
+  local arguments = tool
+      and type(tool.details) == 'table'
+      and type(tool.details.arguments) == 'table'
+      and tool.details.arguments
+    or {}
+  local task_id = json_value(data.taskId) or json_value(arguments.taskId) or json_value(arguments.shellId)
+  if not task_id then return end
+
+  for _, task in ipairs(state.tasks[member_id] or {}) do
+    if tostring(json_value(task.id)) == tostring(task_id)
+      and (task.status == 'running' or task.status == 'idle')
+    then
+      local error_detail = json_value(data.error)
+      local error_message = type(error_detail) == 'table'
+          and json_value(error_detail.message)
+        or error_detail
+      merge_tasks(member_id, {
+        {
+          id = task.id,
+          status = 'failed',
+          error = error_message or 'The associated tool execution failed.',
+        },
+      })
+      return true
+    end
+  end
+  return false
 end
 
 local function cancel_cursor_task()
   local item, member_id = task_at_cursor()
   local task = item and item.kind == 'task' and item.task or nil
-  if not task and state.task_detail then
+  if type(task) ~= 'table' and type(state.task_detail) == 'table' then
     task = state.task_detail
     member_id = state.task_detail_member
   end
-  if not task then return end
+  if type(task) ~= 'table' then return end
   if task.status ~= 'running' and task.status ~= 'idle' then
     notify(('Task %s is already %s.'):format(task.id or '', task.status or 'finished'))
     return
@@ -717,6 +768,7 @@ local function close_task_detail()
   state.task_detail_win = nil
   state.task_detail = nil
   state.task_progress = nil
+  state.task_progress_loaded = false
   state.task_detail_member = nil
   state.detail_item = nil
 end
@@ -724,23 +776,33 @@ end
 local function render_task_detail()
   local buf = state.task_detail_buf
   local item = state.detail_item
-  local task = state.task_detail
-  if not buf or not vim.api.nvim_buf_is_valid(buf) or not item then return end
-  local progress = state.task_progress
+  local task = type(state.task_detail) == 'table' and state.task_detail or nil
+  if not buf or not vim.api.nvim_buf_is_valid(buf) or type(item) ~= 'table' then return end
+  local progress = type(state.task_progress) == 'table' and state.task_progress or nil
   local lines
   if item.kind == 'task' and task then
+    local status = json_value(task.status) or 'unknown'
     lines = {
       ('%s [%s] %s'):format(
-        task_symbols[task.status] or '?',
-        task.type or 'task',
+        task_symbols[status] or '?',
+        json_value(task.type) or 'task',
         task_description(task)
       ),
-      ('Status: %s'):format(task.status or 'unknown'),
-      ('ID: %s'):format(task.id or 'unknown'),
+      ('Status: %s'):format(status),
+      ('ID: %s'):format(json_value(task.id) or 'unknown'),
       '',
     }
-    if not progress then
+    local task_error = json_value(task.error)
+    if task_error then
+      table.insert(lines, 'Error:')
+      local rendered_error = type(task_error) == 'string' and task_error or vim.inspect(task_error)
+      vim.list_extend(lines, vim.split(rendered_error, '\n', { plain = true }))
+      table.insert(lines, '')
+    end
+    if not state.task_progress_loaded then
       table.insert(lines, 'Loading task progress...')
+    elseif not progress then
+      table.insert(lines, 'No progress details are available.')
     elseif progress.type == 'agent' then
       if progress.latestIntent then
         table.insert(lines, 'Intent: ' .. progress.latestIntent)
@@ -767,7 +829,7 @@ local function render_task_detail()
       ('Status: %s'):format(item.status or 'unknown'),
       '',
     }
-    local details = item.details or {}
+    local details = type(item.details) == 'table' and item.details or {}
     local fields = item.kind == 'tool'
         and {
           { 'Arguments', details.arguments },
@@ -781,10 +843,11 @@ local function render_task_detail()
       }
     local populated = false
     for _, field in ipairs(fields) do
-      if field[2] ~= nil and field[2] ~= '' then
+      local value = json_value(field[2])
+      if value ~= nil and value ~= '' then
         populated = true
         table.insert(lines, field[1] .. ':')
-        vim.list_extend(lines, vim.split(vim.inspect(field[2]), '\n', { plain = true }))
+        vim.list_extend(lines, vim.split(vim.inspect(value), '\n', { plain = true }))
         table.insert(lines, '')
       end
     end
@@ -841,9 +904,13 @@ local function open_detail_window()
 end
 
 local function show_task(task, member_id)
-  if not task then return end
+  if type(task) ~= 'table' then
+    notify('Task details are unavailable.', vim.log.levels.WARN)
+    return
+  end
   state.task_detail = task
   state.task_progress = nil
+  state.task_progress_loaded = false
   state.task_detail_member = member_id or state.selected
   state.detail_item = {
     kind = 'task',
@@ -1738,8 +1805,9 @@ function M._on_event(message)
     end
     return
   elseif message.type == 'tasks.progress' then
-    if state.task_detail and state.task_detail.id == payload.taskId then
-      state.task_progress = payload.progress
+    if type(state.task_detail) == 'table' and state.task_detail.id == payload.taskId then
+      state.task_progress = type(payload.progress) == 'table' and payload.progress or nil
+      state.task_progress_loaded = true
       render_task_detail()
     end
     return
@@ -1977,7 +2045,7 @@ function M._on_event(message)
     )
   elseif message.type == 'activity.event' then
     local event_type = payload.eventType or 'activity'
-    local data = payload.data or {}
+    local data = type(payload.data) == 'table' and payload.data or {}
     if event_type == 'tool.execution_start' then
       local call_id = data.toolCallId or message.id
       local tool_name = data.toolName or data.mcpToolName or 'tool'
@@ -1994,10 +2062,16 @@ function M._on_event(message)
         existing and existing.name or 'tool',
         data.success == true and 'completed' or 'failed',
         {
-          result = data.result,
-          error = data.error,
+          result = json_value(data.result),
+          error = json_value(data.error),
         }
       )
+      if data.success ~= true
+        and fail_linked_task(member_id, data, existing)
+        and type(state.task_detail) == 'table'
+      then
+        render_task_detail()
+      end
     else
       local detail = data.intent or data.message or vim.inspect(data)
       buffers.append_activity_block(member_id, event_type, tostring(detail))
