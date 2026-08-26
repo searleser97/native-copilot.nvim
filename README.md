@@ -251,7 +251,8 @@ reasoning and errors remain part of each conversation buffer.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
-interval with `stream_flush_ms`.
+interval with `stream_flush_ms`. Every non-empty Copilot response body line is indented by one
+space, including fenced code blocks; headings, reasoning, tools, and user messages remain unindented.
 
 Conversation windows follow the final line when opened, switched, reopened, or updated by streaming
 output. Set `follow_bottom = false` to preserve the current viewport instead.

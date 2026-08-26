@@ -131,7 +131,7 @@ assert(text:find('BOT', 1, true))
 assert(text:match('BOT · %d%d:%d%d:%d%d'))
 assert(not text:find('BOT · writing', 1, true))
 assert(not text:find('# Reviewer', 1, true))
-assert(text:find('The implementation looks correct.', 1, true))
+assert(text:find('\n The implementation looks correct.', 1, true))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
 local assistant_heading = text:find('BOT ·', 1, true)
 assert(late_reasoning and assistant_heading and late_reasoning > assistant_heading)
@@ -181,6 +181,22 @@ assert(adjacent_reasoning < tool_answer, 'final answer was not kept after tool r
 local tool_turn = tool_turn_text:sub(tool_row)
 local _, reasoning_heading_count = tool_turn:gsub('%*%*Reasoning summary%*%*', '')
 assert(reasoning_heading_count == 1, 'consecutive reasoning duplicated its heading')
+
+buffers.append_block('reviewer', 'conversation', 'You', 'Show code.')
+buffers.begin_response('reviewer', 'code-turn')
+buffers.append_conversation_delta('reviewer', 'code-answer', 'Example:\n``')
+buffers.append_conversation_delta('reviewer', 'code-answer', '`lua\nprint("hello")\n')
+buffers.append_conversation_delta('reviewer', 'code-answer', '```\nDone.')
+buffers.complete_conversation(
+  'reviewer',
+  'code-answer',
+  'Example:\n```lua\nprint("hello")\n```\nDone.'
+)
+local indented_code = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(indented_code:find('\n Example:\n ```lua\n print("hello")\n ```\n Done.', 1, true))
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Explain this briefly.')
 buffers.begin_response('reviewer', 'late-reasoning-turn')

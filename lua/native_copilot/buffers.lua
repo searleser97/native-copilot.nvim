@@ -95,6 +95,7 @@ local function create_buffer(name, member_id, view_id)
     streaming = false,
     activity_streaming = false,
     active_message = nil,
+    response_line_start = true,
     awaiting_response = nil,
     message_heading = nil,
     writing_generation = 0,
@@ -243,6 +244,7 @@ function M.append_block(member_id, view_id, heading, content)
     display_heading = options.conversation.user_label
   elseif view_id == 'conversation' and heading == 'Copilot' then
     display_heading = options.conversation.copilot_label
+    content = ' ' .. content:gsub('\n', '\n ')
   else
     local level = view_id == 'conversation' and '#' or '##'
     display_heading = ('%s %s'):format(level, heading)
@@ -641,6 +643,7 @@ local function begin_response(view, response_id)
   local heading_row = vim.api.nvim_buf_line_count(view.buf)
   stop_writing_animation(view)
   view.writing_step = 1
+  view.response_line_start = true
   append(
     view,
     ('\n%s · writing.\n\n'):format(
@@ -658,6 +661,27 @@ local function begin_response(view, response_id)
   )
   view.awaiting_response = response_id or true
   animate_writing(view, view.writing_generation)
+end
+
+local function indent_response_delta(view, content)
+  content = content:gsub('\r\n', '\n'):gsub('\r', '\n')
+  local result = {}
+  local offset = 1
+  while offset <= #content do
+    local newline = content:find('\n', offset, true)
+    local line_end = newline and newline - 1 or #content
+    local segment = content:sub(offset, line_end)
+    if segment ~= '' then
+      if view.response_line_start then table.insert(result, ' ') end
+      table.insert(result, segment)
+      view.response_line_start = false
+    end
+    if not newline then break end
+    table.insert(result, '\n')
+    view.response_line_start = true
+    offset = newline + 1
+  end
+  return table.concat(result)
 end
 
 function M.begin_response(member_id, response_id)
@@ -693,7 +717,7 @@ function M.append_conversation_delta(member_id, message_id, content)
     local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
     if last ~= '' then append(view, '\n', false) end
   end
-  append(view, content, false)
+  append(view, indent_response_delta(view, content), false)
 end
 
 function M.fail_response(member_id, detail)
@@ -703,6 +727,7 @@ function M.fail_response(member_id, detail)
   touch_message_heading(view, 'failed', detail or 'failed')
   view.awaiting_response = nil
   view.active_message = nil
+  view.response_line_start = true
   view.streaming = false
   finalize_render(view)
 end
@@ -713,7 +738,7 @@ function M.complete_conversation(member_id, message_id, content)
   if view.awaiting_response and content == '' then
     return
   elseif view.awaiting_response then
-    append(view, content .. '\n', true)
+    append(view, indent_response_delta(view, content) .. '\n', true)
     view.awaiting_response = nil
     touch_message_heading(view, 'completed')
   elseif view.active_message == message_id then
@@ -723,6 +748,7 @@ function M.complete_conversation(member_id, message_id, content)
     M.append_block(member_id, 'conversation', 'Copilot', content)
   end
   view.active_message = nil
+  view.response_line_start = true
 end
 
 function M.finish_response(member_id)
@@ -737,6 +763,7 @@ function M.finish_response(member_id)
   end
   view.awaiting_response = nil
   view.active_message = nil
+  view.response_line_start = true
   view.streaming = false
   finalize_render(view)
 end
