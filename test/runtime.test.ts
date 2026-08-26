@@ -106,6 +106,21 @@ describe("instanceSessionId", () => {
     });
   });
 
+  it("leaves managed requests pending for interactive approval", () => {
+    const request = {
+      kind: "mcp" as const,
+      serverName: "example",
+      toolName: "example-write",
+      arguments: {},
+      toolCallId: "tool-call",
+      managedApprovalRequired: true,
+    };
+
+    expect(permissionDecision(undefined, "E:\\repo", request)).toEqual({
+      kind: "no-result",
+    });
+  });
+
   it("allows managed requests inside the Fleet permission ceiling to reach the UI", () => {
     const request = {
       kind: "read" as const,
@@ -114,7 +129,7 @@ describe("instanceSessionId", () => {
     };
 
     expect(permissionDecision(readOnlyProfile, "E:\\repo", request)).toEqual({
-      kind: "approve-once",
+      kind: "no-result",
     });
   });
 });

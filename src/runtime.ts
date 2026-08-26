@@ -209,22 +209,28 @@ function reject(feedback: string): PermissionRequestResult {
   return { kind: "reject", feedback };
 }
 
+function approve(request: PermissionRequest): PermissionRequestResult {
+  return "managedApprovalRequired" in request && request.managedApprovalRequired === true
+    ? { kind: "no-result" }
+    : { kind: "approve-once" };
+}
+
 export function permissionDecision(
   profile: PermissionProfile | undefined,
   workspace: string,
   request: PermissionRequest,
 ): PermissionRequestResult {
   if (!profile) {
-    return { kind: "approve-once" };
+    return approve(request);
   }
   switch (request.kind) {
       case "read":
         return isWithin(request.path, profile.paths.read, workspace)
-          ? { kind: "approve-once" }
+          ? approve(request)
           : reject(`Read access is outside the configured path ceiling: ${request.path}`);
       case "write":
         return isWithin(request.fileName, profile.paths.write, workspace)
-          ? { kind: "approve-once" }
+          ? approve(request)
           : reject(`Write access is outside the configured path ceiling: ${request.fileName}`);
       case "shell": {
         if (!profile.commands) {
@@ -248,19 +254,19 @@ export function permissionDecision(
         ) {
           return reject("Git write operations are disabled for this member.");
         }
-        return { kind: "approve-once" };
+        return approve(request);
       }
       case "url":
         return profile.network
-          ? { kind: "approve-once" }
+          ? approve(request)
           : reject("Network access is disabled for this member.");
       case "mcp":
         return profile.externalActions && toolAllowed(profile, request.toolName)
-          ? { kind: "approve-once" }
+          ? approve(request)
           : reject(`MCP tool "${request.toolName}" is not permitted for this member.`);
       case "custom-tool":
         return toolAllowed(profile, request.toolName)
-          ? { kind: "approve-once" }
+          ? approve(request)
           : reject(`Custom tool "${request.toolName}" is not permitted for this member.`);
       case "memory":
       case "hook":
@@ -268,7 +274,7 @@ export function permissionDecision(
       case "extension-permission-access":
       case "factory":
         return profile.externalActions
-          ? { kind: "approve-once" }
+          ? approve(request)
           : reject(`${request.kind} operations are disabled for this member.`);
   }
 }
@@ -534,7 +540,7 @@ export class CopilotRuntime {
   ): PermissionHandler {
     return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
       const decision = permissionDecision(profile, this.workspace, request);
-      if (decision.kind !== "approve-once") {
+      if (decision.kind !== "no-result") {
         return decision;
       }
       const requestId = randomUUID();
