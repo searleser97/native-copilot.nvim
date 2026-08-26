@@ -430,6 +430,7 @@ function M.upsert_timeline(member_id, item_id, item)
   local view = entry.views.conversation
   flush(view)
   local record = view.timeline[item_id]
+  local start_row = reconcile_environment_rows(view, item)
   if record
     and record.item
     and record.item.kind == item.kind
@@ -451,7 +452,6 @@ function M.upsert_timeline(member_id, item_id, item)
   end
   local now = options.now()
   local lines = timeline_lines(item.kind, item.label, item.status, item.detail, now)
-  local start_row = reconcile_environment_rows(view, item)
   if start_row then
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, start_row, start_row + 1, false, lines)
