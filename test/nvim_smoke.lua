@@ -238,7 +238,7 @@ local activity_marks = vim.api.nvim_buf_get_extmarks(
   -1,
   { details = true }
 )
-assert(#activity_marks == 3, 'reasoning summaries did not produce three inline highlights')
+assert(#activity_marks == 4, 'reasoning summaries did not produce four inline highlights')
 for _, mark in ipairs(activity_marks) do
   assert(mark[4].hl_group == 'Comment')
   local highlighted = table.concat(
