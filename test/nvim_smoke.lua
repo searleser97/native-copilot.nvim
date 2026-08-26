@@ -123,21 +123,21 @@ local text = table.concat(
 )
 assert(text:find('USER', 1, true))
 assert(text:match('USER · %d%d:%d%d:%d%d'))
-assert(text:find('\n Please review this.', 1, true))
-assert(text:find(' > **Reasoning summary**', 1, true))
-assert(not text:find(' > **Reasoning summary** ·', 1, true))
-assert(text:find(' > Checking the implementation.', 1, true))
+assert(text:find('\n  Please review this.', 1, true))
+assert(text:find('  > **Reasoning summary**', 1, true))
+assert(not text:find('  > **Reasoning summary** ·', 1, true))
+assert(text:find('  > Checking the implementation.', 1, true))
 assert(
-  text:match('BOT · %d%d:%d%d:%d%d\n\n > %*%*Reasoning summary%*%*'),
+  text:match('BOT · %d%d:%d%d:%d%d\n\n  > %*%*Reasoning summary%*%*'),
   'reasoning summary was not separated from the Copilot heading by exactly one blank line'
 )
 assert(text:find('BOT', 1, true))
 assert(text:match('BOT · %d%d:%d%d:%d%d'))
 assert(not text:find('BOT · writing', 1, true))
 assert(not text:find('# Reviewer', 1, true))
-assert(text:find('\n The implementation looks correct.', 1, true))
+assert(text:find('\n  The implementation looks correct.', 1, true))
 assert(
-  text:find(' > Checking the implementation.\n\n The implementation looks correct.', 1, true),
+  text:find('  > Checking the implementation.\n\n  The implementation looks correct.', 1, true),
   'assistant response was not separated from reasoning by exactly one blank line'
 )
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
@@ -204,7 +204,7 @@ local indented_code = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
-assert(indented_code:find('\n Example:\n ```lua\n print("hello")\n ```\n Done.', 1, true))
+assert(indented_code:find('\n  Example:\n  ```lua\n  print("hello")\n  ```\n  Done.', 1, true))
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Explain this briefly.')
 buffers.begin_response('reviewer', 'late-reasoning-turn')

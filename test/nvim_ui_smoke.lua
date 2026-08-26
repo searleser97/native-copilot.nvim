@@ -745,7 +745,7 @@ fleet._on_event({
 local permission_row = assert(line_with(coordinator_buf, '[permission] shell'))
 assert(
   vim.api.nvim_buf_get_lines(coordinator_buf, permission_row - 1, permission_row, false)[1]
-    :find(' > 🟡 **[permission] shell** — approval required: npm test', 1, true) == 1
+    :find('  > 🟡 **[permission] shell** — approval required: npm test', 1, true) == 1
 )
 assert(not buffer_text(coordinator_buf):find('**Permission**', 1, true))
 native_picker.on_choice(native_picker.items[1])
@@ -757,7 +757,7 @@ assert(permission_response.approved == true)
 assert(line_with(coordinator_buf, '[permission] shell') == permission_row)
 assert(
   buffer_text(coordinator_buf):find(
-    ' > 🟢 **[permission] shell** — approved once: npm test',
+    '  > 🟢 **[permission] shell** — approved once: npm test',
     1,
     true
   )
@@ -792,7 +792,7 @@ assert(permission_response.requestId == 'denied-permission')
 assert(permission_response.approved == false)
 assert(
   buffer_text(coordinator_buf):find(
-    ' > 🚫 **[permission] shell** — denied: Remove-Item output.tmp',
+    '  > 🚫 **[permission] shell** — denied: Remove-Item output.tmp',
     1,
     true
   )

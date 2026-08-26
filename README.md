@@ -251,7 +251,7 @@ reasoning and errors remain part of each conversation buffer.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
-interval with `stream_flush_ms`. Conversation content uses a one-space margin, including user and
+interval with `stream_flush_ms`. Conversation content uses a two-space margin, including user and
 Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permissions. Participant
 headers, day dividers, and environment loading/status rows remain unindented.
 

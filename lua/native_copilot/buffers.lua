@@ -242,14 +242,14 @@ function M.append_block(member_id, view_id, heading, content)
   local display_heading
   if view_id == 'conversation' and heading == 'You' then
     display_heading = options.conversation.user_label
-    content = ' ' .. content:gsub('\n', '\n ')
+    content = '  ' .. content:gsub('\n', '\n  ')
   elseif view_id == 'conversation' and heading == 'Copilot' then
     display_heading = options.conversation.copilot_label
-    content = ' ' .. content:gsub('\n', '\n ')
+    content = '  ' .. content:gsub('\n', '\n  ')
   else
     local level = view_id == 'conversation' and '#' or '##'
     display_heading = (' %s %s'):format(level, heading)
-    content = ' ' .. content:gsub('\n', '\n ')
+    content = '  ' .. content:gsub('\n', '\n  ')
   end
   append(view, ('%s%s · %s\n\n%s\n'):format(prefix, display_heading, timestamp(now), content), true)
 end
@@ -270,11 +270,11 @@ local function begin_inline_activity(view, activity_id, heading)
   view.active_activity = activity
   view.activity_records[activity_id] = activity
   if continuation then
-    view.pending = view.pending .. ' >\n > '
+    view.pending = view.pending .. '  >\n  > '
   else
     local last = vim.api.nvim_buf_get_lines(view.buf, -2, -1, false)[1] or ''
     local prefix = last == '' and '' or '\n\n'
-    view.pending = view.pending .. prefix .. (' > **%s**\n >\n > '):format(heading)
+    view.pending = view.pending .. prefix .. ('  > **%s**\n  >\n  > '):format(heading)
   end
   flush(view)
   view.last_activity = {
@@ -292,7 +292,7 @@ local function touch_activity_heading(view, activity, heading)
       activity.start_row,
       activity.start_row + 1,
       false,
-      { (' > **%s**'):format(heading) }
+      { ('  > **%s**'):format(heading) }
     )
   end)
 end
@@ -305,7 +305,7 @@ function M.append_activity_delta(member_id, activity_id, content)
   end
   view.activity_streaming = true
   view.active_activity.content = view.active_activity.content .. content
-  view.pending = view.pending .. content:gsub('\n', '\n > ')
+  view.pending = view.pending .. content:gsub('\n', '\n  > ')
   schedule_flush(view)
 end
 
@@ -320,7 +320,7 @@ local function replace_activity_content(view, activity, content)
   if #position == 0 then return false end
   local lines = {}
   for _, line in ipairs(vim.split(content:gsub('\r\n', '\n'):gsub('\r', '\n'), '\n', { plain = true })) do
-    table.insert(lines, ' > ' .. line)
+    table.insert(lines, '  > ' .. line)
   end
   table.insert(lines, '')
   with_modifiable(view.buf, function()
@@ -385,7 +385,7 @@ function M.append_activity_block(member_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
-  view.pending = view.pending .. content:gsub('\n', '\n > ') .. '\n'
+  view.pending = view.pending .. content:gsub('\n', '\n  > ') .. '\n'
   flush(view)
   touch_activity_heading(view, view.active_activity, heading)
   view.active_activity = nil
@@ -398,7 +398,7 @@ local function timeline_lines(kind, label, status, detail, now)
   label = tostring(label or ''):gsub('[\r\n]+', ' ')
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
-  local prefix = kind == 'environment' and '>' or ' >'
+  local prefix = kind == 'environment' and '>' or '  >'
   return {
     ('%s %s **[%s] %s**%s · %s'):format(
       prefix,
@@ -678,7 +678,7 @@ local function indent_response_delta(view, content)
     local line_end = newline and newline - 1 or #content
     local segment = content:sub(offset, line_end)
     if segment ~= '' then
-      if view.response_line_start then table.insert(result, ' ') end
+      if view.response_line_start then table.insert(result, '  ') end
       table.insert(result, segment)
       view.response_line_start = false
     end
