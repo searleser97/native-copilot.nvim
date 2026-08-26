@@ -149,6 +149,7 @@ assert(
   'tool-only assistant message created a duplicate Copilot heading'
 )
 assert(not tool_turn_text:find('○ processing…', 1, true))
+assert(tool_turn_text:match('%[tool%] search%*%* — completed · %d%d:%d%d:%d%d\nTool%-backed answer%.'))
 
 local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
 local activity_marks = vim.api.nvim_buf_get_extmarks(
@@ -182,6 +183,12 @@ buffers.upsert_timeline('reviewer', 'environment:Instructions', {
   status = 'running',
   detail = 'Loading instructions',
 })
+buffers.upsert_timeline('reviewer', 'environment:Multiline', {
+  kind = 'environment',
+  label = 'Multiline',
+  status = 'failed',
+  detail = 'first line\nsecond line',
+})
 buffers.upsert_timeline('reviewer', 'environment:Instructions', {
   kind = 'environment',
   label = 'Instructions',
@@ -210,6 +217,13 @@ for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 
 end
 assert(mcp_rows == 1, 'MCP status transition duplicated the underlying timeline row')
 assert(instruction_rows == 1, 'environment status transition duplicated the underlying timeline row')
+assert(
+  table.concat(
+    vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+    '\n'
+  ):find('first line second line', 1, true),
+  'multiline timeline detail was not collapsed to one source line'
+)
 local mcp_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'

@@ -308,6 +308,9 @@ local function timeline_lines(kind, label, status, detail)
     failed = '✗',
     cancelled = '–',
   }
+  kind = tostring(kind or 'activity'):gsub('[\r\n]+', ' ')
+  label = tostring(label or ''):gsub('[\r\n]+', ' ')
+  detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   return {
     ('> %s **[%s] %s**%s · %s'):format(
@@ -503,15 +506,23 @@ function M.append_conversation_delta(member_id, message_id, content)
     view.active_activity = nil
     view.activity_streaming = false
   end
+  local first_visible_delta = false
   if view.active_message ~= message_id then
     flush(view)
     view.active_message = message_id
     if view.awaiting_response then
       view.awaiting_response = nil
+      first_visible_delta = true
     else
       begin_response(view, message_id)
       view.awaiting_response = nil
+      first_visible_delta = true
     end
+  end
+  if first_visible_delta then
+    local line_count = vim.api.nvim_buf_line_count(view.buf)
+    local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
+    if last ~= '' then append(view, '\n', false) end
   end
   append(view, content, false)
 end
