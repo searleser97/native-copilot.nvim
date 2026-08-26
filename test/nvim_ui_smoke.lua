@@ -394,7 +394,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '🤖 Copilot · %d%d:%d%d:%d%d\n\nContext usage output'
+  '🤖 Copilot · %d%d:%d%d:%d%d\n\n Context usage output'
 ))
 protocol.send = function(message_type, payload)
   invoked_command = { type = message_type, payload = payload }
