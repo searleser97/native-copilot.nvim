@@ -253,6 +253,11 @@ fold commands such as `zc`, `zo`, and `za`. Errors remain visible in their relat
 and detail panes.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
+Participant headers use colorscheme-aware highlight groups: `NativeCopilotUserHeader` links to
+`DiagnosticInfo`, `NativeCopilotAssistantHeader` links to `Special`, and timestamps or writing
+state use `NativeCopilotHeaderMeta`, linked to `Comment`. Override any group after setup with
+`vim.api.nvim_set_hl()` to choose explicit colors.
+
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
 interval with `stream_flush_ms`. Conversation content uses a two-space margin, including user and
 Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permissions. Participant

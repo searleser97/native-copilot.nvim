@@ -14,6 +14,8 @@ local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_
 local activity_body_namespace = vim.api.nvim_create_namespace('native_copilot_activity_body')
 local activity_fold_namespace = vim.api.nvim_create_namespace('native_copilot_activity_fold')
 local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
+local header_highlight_namespace =
+  vim.api.nvim_create_namespace('native_copilot_header_highlight')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local options = {
   stream_flush_ms = 80,
@@ -30,6 +32,27 @@ local options = {
 local function timestamp(now)
   return os.date(options.timestamp_format, now or options.now())
 end
+
+local function setup_highlights()
+  vim.api.nvim_set_hl(0, 'NativeCopilotUserHeader', {
+    default = true,
+    link = 'DiagnosticInfo',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotAssistantHeader', {
+    default = true,
+    link = 'Special',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotHeaderMeta', {
+    default = true,
+    link = 'Comment',
+  })
+end
+
+setup_highlights()
+vim.api.nvim_create_autocmd('ColorScheme', {
+  group = vim.api.nvim_create_augroup('NativeCopilotHighlights', { clear = true }),
+  callback = setup_highlights,
+})
 
 local function with_modifiable(buf, operation)
   if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -229,6 +252,7 @@ end
 
 function M.setup(user_options)
   options = vim.tbl_deep_extend('force', options, user_options or {})
+  setup_highlights()
 end
 
 local function ensure_day_header(view, now)
@@ -263,6 +287,24 @@ local function append(view, text, final)
   end
 end
 
+local function highlight_header(buf, row, line, group)
+  local separator = line:find(' · ', 1, true)
+  if not separator then return end
+  vim.api.nvim_buf_clear_namespace(buf, header_highlight_namespace, row, row + 1)
+  vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, 0, {
+    end_row = row,
+    end_col = separator - 1,
+    hl_group = group,
+    priority = 210,
+  })
+  vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, separator - 1, {
+    end_row = row,
+    end_col = #line,
+    hl_group = 'NativeCopilotHeaderMeta',
+    priority = 210,
+  })
+end
+
 function M.append_block(member_id, view_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
@@ -284,6 +326,21 @@ function M.append_block(member_id, view_id, heading, content)
     content = '  ' .. content:gsub('\n', '\n  ')
   end
   append(view, ('%s%s · %s\n\n%s\n'):format(prefix, display_heading, timestamp(now), content), true)
+  if view_id == 'conversation' and (heading == 'You' or heading == 'Copilot') then
+    local lines = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, -1, false)
+    for index, line in ipairs(lines) do
+      if line:find(display_heading .. ' · ', 1, true) == 1 then
+        highlight_header(
+          view.buf,
+          line_count + index - 2,
+          line,
+          heading == 'You' and 'NativeCopilotUserHeader'
+            or 'NativeCopilotAssistantHeader'
+        )
+        break
+      end
+    end
+  end
 end
 
 local function begin_inline_activity(view, activity_id, heading)
@@ -675,6 +732,12 @@ local function set_message_heading(view, content)
       { content }
     )
   end)
+  highlight_header(
+    view.buf,
+    position[1],
+    content,
+    'NativeCopilotAssistantHeader'
+  )
 end
 
 local function stop_writing_animation(view)
@@ -760,6 +823,12 @@ local function begin_response(view, response_id)
     heading_row,
     0,
     { right_gravity = false }
+  )
+  highlight_header(
+    view.buf,
+    heading_row,
+    ('%s · writing.'):format(options.conversation.copilot_label),
+    'NativeCopilotAssistantHeader'
   )
   view.awaiting_response = response_id or true
   animate_writing(view, view.writing_generation)

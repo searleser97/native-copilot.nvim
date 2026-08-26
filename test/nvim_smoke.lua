@@ -92,6 +92,18 @@ buffers.setup({
     day_header_format = '%m-%d',
   },
 })
+assert(vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotUserHeader',
+  link = true,
+}).link == 'DiagnosticInfo')
+assert(vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotAssistantHeader',
+  link = true,
+}).link == 'Special')
+assert(vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotHeaderMeta',
+  link = true,
+}).link == 'Comment')
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
 assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')
@@ -135,6 +147,20 @@ assert(text:find('BOT', 1, true))
 assert(text:match('BOT · %d%d:%d%d:%d%d'))
 assert(not text:find('BOT · writing', 1, true))
 assert(not text:find('# Reviewer', 1, true))
+local header_marks = vim.api.nvim_buf_get_extmarks(
+  member.views.conversation.buf,
+  vim.api.nvim_get_namespaces().native_copilot_header_highlight,
+  0,
+  -1,
+  { details = true }
+)
+local header_groups = {}
+for _, mark in ipairs(header_marks) do
+  header_groups[mark[4].hl_group] = true
+end
+assert(header_groups.NativeCopilotUserHeader)
+assert(header_groups.NativeCopilotAssistantHeader)
+assert(header_groups.NativeCopilotHeaderMeta)
 assert(text:find('\n  The implementation looks correct.', 1, true))
 assert(
   text:find('  Checking the implementation.\n\n  The implementation looks correct.', 1, true),
