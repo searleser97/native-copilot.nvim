@@ -951,6 +951,8 @@ function M.append_conversation_delta(member_id, message_id, content)
     if view.awaiting_response then
       view.awaiting_response = nil
       first_visible_delta = true
+    elseif view.message_heading then
+      first_visible_delta = true
     else
       begin_response(view, message_id)
       view.awaiting_response = nil
