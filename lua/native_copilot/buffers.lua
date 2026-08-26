@@ -11,6 +11,7 @@ local status_symbols = {
   unknown = '❓',
 }
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
+local activity_body_namespace = vim.api.nvim_create_namespace('native_copilot_activity_body')
 local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local options = {
@@ -101,6 +102,7 @@ local function create_buffer(name, member_id, view_id)
     current_day = initial_day,
     last_block_kind = nil,
     last_activity = nil,
+    activity_records = {},
     timeline = {},
   }
 end
@@ -165,6 +167,19 @@ local function flush(view)
         hl_group = 'Comment',
         hl_eol = true,
         priority = 200,
+      }
+    )
+    view.active_activity.body_extmark = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      activity_body_namespace,
+      view.active_activity.body_start_row,
+      0,
+      {
+        id = view.active_activity.body_extmark,
+        end_row = vim.api.nvim_buf_line_count(view.buf),
+        end_col = 0,
+        right_gravity = false,
+        end_right_gravity = false,
       }
     )
   end
@@ -236,22 +251,24 @@ function M.append_block(member_id, view_id, heading, content)
 end
 
 local function begin_inline_activity(view, activity_id, heading)
-  local now = ensure_day_header(view, options.now())
+  ensure_day_header(view, options.now())
   flush(view)
   local continuation = view.last_block_kind == 'activity' and view.last_activity ~= nil
   local line_count = vim.api.nvim_buf_line_count(view.buf)
   local start_row = continuation and view.last_activity.start_row or line_count
-  view.active_activity = {
+  local activity = {
     id = activity_id,
     start_row = start_row,
     body_start_row = continuation and line_count or start_row + 2,
     content = '',
     extmark = continuation and view.last_activity.extmark or nil,
   }
+  view.active_activity = activity
+  view.activity_records[activity_id] = activity
   if continuation then
     view.pending = view.pending .. '>\n> '
   else
-    view.pending = view.pending .. ('\n> **%s** · %s\n>\n> '):format(heading, timestamp(now))
+    view.pending = view.pending .. ('\n> **%s**\n>\n> '):format(heading)
   end
   flush(view)
   view.last_activity = {
@@ -261,15 +278,15 @@ local function begin_inline_activity(view, activity_id, heading)
   view.last_block_kind = 'activity'
 end
 
-local function touch_activity_heading(view, heading)
-  if not view.active_activity then return end
+local function touch_activity_heading(view, activity, heading)
+  if not activity then return end
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(
       view.buf,
-      view.active_activity.start_row,
-      view.active_activity.start_row + 1,
+      activity.start_row,
+      activity.start_row + 1,
       false,
-      { ('> **%s** · %s'):format(heading, timestamp()) }
+      { ('> **%s**'):format(heading) }
     )
   end)
 end
@@ -286,7 +303,15 @@ function M.append_activity_delta(member_id, activity_id, content)
   schedule_flush(view)
 end
 
-local function replace_activity_content(view, content)
+local function replace_activity_content(view, activity, content)
+  if not activity.body_extmark then return false end
+  local position = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    activity_body_namespace,
+    activity.body_extmark,
+    { details = true }
+  )
+  if #position == 0 then return false end
   local lines = {}
   for _, line in ipairs(vim.split(content:gsub('\r\n', '\n'):gsub('\r', '\n'), '\n', { plain = true })) do
     table.insert(lines, '> ' .. line)
@@ -295,43 +320,58 @@ local function replace_activity_content(view, content)
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(
       view.buf,
-      view.active_activity.body_start_row,
-      vim.api.nvim_buf_line_count(view.buf),
+      position[1],
+      position[3].end_row,
       false,
       lines
     )
   end)
-  view.active_activity.extmark = vim.api.nvim_buf_set_extmark(
+  activity.body_extmark = vim.api.nvim_buf_set_extmark(
     view.buf,
-    activity_namespace,
-    view.active_activity.start_row,
+    activity_body_namespace,
+    position[1],
     0,
     {
-      id = view.active_activity.extmark,
-      end_row = vim.api.nvim_buf_line_count(view.buf),
+      id = activity.body_extmark,
+      end_row = position[1] + #lines,
       end_col = 0,
-      hl_group = 'Comment',
-      hl_eol = true,
-      priority = 200,
+      right_gravity = false,
+      end_right_gravity = false,
     }
   )
+  return true
 end
 
 function M.complete_activity(member_id, activity_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  if view.active_activity and view.active_activity.id == activity_id then
-    view.pending = view.pending .. '\n'
-    flush(view)
-    if content ~= '' and content ~= view.active_activity.content then
-      replace_activity_content(view, content)
+  local activity = view.active_activity and view.active_activity.id == activity_id
+      and view.active_activity
+    or view.activity_records[activity_id]
+  if activity then
+    local was_active = view.active_activity == activity
+    if was_active then
+      view.pending = view.pending .. '\n'
+      flush(view)
     end
-    touch_activity_heading(view, 'Reasoning summary')
-    view.active_activity = nil
-    view.activity_streaming = false
-    if not view.streaming then finalize_render(view) end
+    if content ~= '' and content ~= activity.content then
+      replace_activity_content(view, activity, content)
+    end
+    activity.content = content ~= '' and content or activity.content
+    activity.completed = true
+    if was_active then
+      touch_activity_heading(view, activity, 'Reasoning summary')
+      view.active_activity = nil
+      view.activity_streaming = false
+      if not view.streaming then finalize_render(view) end
+    end
   else
     M.append_activity_block(member_id, 'Reasoning summary', content)
+    view.activity_records[activity_id] = {
+      id = activity_id,
+      content = content,
+      completed = true,
+    }
   end
 end
 
@@ -341,7 +381,7 @@ function M.append_activity_block(member_id, heading, content)
   begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
   view.pending = view.pending .. content:gsub('\n', '\n> ') .. '\n'
   flush(view)
-  touch_activity_heading(view, heading)
+  touch_activity_heading(view, view.active_activity, heading)
   view.active_activity = nil
   view.activity_streaming = false
   if not view.streaming then finalize_render(view) end
@@ -389,8 +429,27 @@ function M.upsert_timeline(member_id, item_id, item)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   flush(view)
-  local now = options.now()
   local record = view.timeline[item_id]
+  if record
+    and record.item
+    and record.item.kind == item.kind
+    and record.item.label == item.label
+    and record.item.status == item.status
+    and record.item.detail == item.detail
+  then
+    local position = vim.api.nvim_buf_get_extmark_by_id(
+      view.buf,
+      timeline_namespace,
+      record.extmark,
+      {}
+    )
+    if #position > 0 then
+      record.item = vim.deepcopy(item)
+      record.item.id = item_id
+      return
+    end
+  end
+  local now = options.now()
   local lines = timeline_lines(item.kind, item.label, item.status, item.detail, now)
   local start_row = reconcile_environment_rows(view, item)
   if start_row then
@@ -551,6 +610,30 @@ local function touch_message_heading(view, status, detail)
   )
 end
 
+local function remove_message_heading(view)
+  stop_writing_animation(view)
+  if not view.message_heading then return end
+  local position = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    message_heading_namespace,
+    view.message_heading,
+    {}
+  )
+  if #position > 0 then
+    local line_count = vim.api.nvim_buf_line_count(view.buf)
+    with_modifiable(view.buf, function()
+      vim.api.nvim_buf_set_lines(
+        view.buf,
+        position[1],
+        math.min(position[1] + 2, line_count),
+        false,
+        {}
+      )
+    end)
+  end
+  view.message_heading = nil
+end
+
 local function begin_response(view, response_id)
   ensure_day_header(view, options.now())
   flush(view)
@@ -647,7 +730,11 @@ function M.finish_response(member_id)
   local view = entry and entry.views.conversation
   if not view or (not view.awaiting_response and not view.active_message) then return end
   flush(view)
-  touch_message_heading(view, 'completed')
+  if view.awaiting_response and not view.active_message then
+    remove_message_heading(view)
+  else
+    touch_message_heading(view, 'completed')
+  end
   view.awaiting_response = nil
   view.active_message = nil
   view.streaming = false

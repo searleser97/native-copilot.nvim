@@ -137,7 +137,10 @@ local function line_count_with(buf, text)
 end
 local timeline_text = buffer_text(coordinator_buf)
 assert(timeline_text:find('🟡 **[task] [agent] Review implementation**', 1, true))
-assert(timeline_text:find('🟢 **[task] [shell] npm test**', 1, true))
+assert(
+  not timeline_text:find('🟢 **[task] [shell] npm test**', 1, true),
+  'an already-completed task was appended during a later task refresh'
+)
 assert(timeline_text:find('🔴 **[task] [agent] Validate deployment**', 1, true))
 local coordinator_win = vim.fn.win_findbuf(coordinator_buf)[1]
 vim.api.nvim_set_current_win(coordinator_win)
@@ -999,12 +1002,16 @@ fleet._on_event({
   },
 })
 assert(
-  buffer_text(observer_buf):find('🔴 **[tool] powershell** — failed', 1, true),
+  buffer_text(observer_buf):find(
+    '🔴 **[tool] powershell** — failed: Command exited with code 1',
+    1,
+    true
+  ),
   'failed tool kept its running indicator'
 )
 assert(
   buffer_text(observer_buf):find(
-    '🔴 **[task] [shell] Parse PR JSON details using python**',
+    '🔴 **[task] [shell] Parse PR JSON details using python** — failed: Command exited with code 1',
     1,
     true
   ),

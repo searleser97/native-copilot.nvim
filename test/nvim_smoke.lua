@@ -125,6 +125,7 @@ assert(text:find('USER', 1, true))
 assert(text:match('USER · %d%d:%d%d:%d%d'))
 assert(text:find('Please review this.', 1, true))
 assert(text:find('> **Reasoning summary**', 1, true))
+assert(not text:find('> **Reasoning summary** ·', 1, true))
 assert(text:find('> Checking the implementation.', 1, true))
 assert(text:find('BOT', 1, true))
 assert(text:match('BOT · %d%d:%d%d:%d%d'))
@@ -180,6 +181,37 @@ assert(adjacent_reasoning < tool_answer, 'final answer was not kept after tool r
 local tool_turn = tool_turn_text:sub(tool_row)
 local _, reasoning_heading_count = tool_turn:gsub('%*%*Reasoning summary%*%*', '')
 assert(reasoning_heading_count == 1, 'consecutive reasoning duplicated its heading')
+
+buffers.append_block('reviewer', 'conversation', 'You', 'Explain this briefly.')
+buffers.begin_response('reviewer', 'late-reasoning-turn')
+buffers.append_activity_delta('reviewer', 'late-reasoning-id', 'A concise')
+buffers.append_conversation_delta('reviewer', 'late-reasoning-answer', 'Here is the answer.')
+buffers.complete_conversation('reviewer', 'late-reasoning-answer', 'Here is the answer.')
+buffers.complete_activity('reviewer', 'late-reasoning-id', 'A concise explanation.')
+local reconciled_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+local _, late_reasoning_count = reconciled_text:gsub('A concise explanation%.', '')
+assert(late_reasoning_count == 1, 'late final reasoning duplicated the streamed summary')
+assert(
+  assert(reconciled_text:find('A concise explanation.', 1, true))
+    < assert(reconciled_text:find('Here is the answer.', 1, true)),
+  'late final reasoning moved below the assistant response'
+)
+
+local headings_before_empty = select(2, reconciled_text:gsub('BOT ·', ''))
+buffers.begin_response('reviewer', 'empty-tool-turn')
+buffers.complete_conversation('reviewer', 'empty-tool-message', '')
+buffers.finish_response('reviewer')
+local no_empty_heading_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(
+  select(2, no_empty_heading_text:gsub('BOT ·', '')) == headings_before_empty,
+  'tool-only turn left an empty Copilot heading'
+)
 
 local spacing = buffers.ensure_member('spacing', 'Spacing')
 buffers.upsert_timeline('spacing', 'environment:last', {
@@ -280,6 +312,34 @@ local mcp_text = table.concat(
 assert(mcp_text:match(
   '> 🟢 %*%*%[environment%] MCP myenghub%*%* — connected · %d%d:%d%d:%d%d'
 ))
+buffers.upsert_timeline('reviewer', 'task:stable', {
+  kind = 'task',
+  label = '[shell] Wait 2 minutes',
+  status = 'completed',
+  detail = nil,
+  task = { id = 'stable', output = 'first snapshot' },
+})
+local stable_row
+for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line:find('[task] [shell] Wait 2 minutes', 1, true) then stable_row = line break end
+end
+assert(stable_row)
+fake_now = fake_now + 120
+buffers.upsert_timeline('reviewer', 'task:stable', {
+  kind = 'task',
+  label = '[shell] Wait 2 minutes',
+  status = 'completed',
+  detail = nil,
+  task = { id = 'stable', output = 'refreshed snapshot' },
+})
+local stable_row_after_refresh
+for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line:find('[task] [shell] Wait 2 minutes', 1, true) then
+    stable_row_after_refresh = line
+    break
+  end
+end
+assert(stable_row_after_refresh == stable_row, 'unchanged task refresh changed its timestamp')
 local mcp_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line:find('[environment] MCP myenghub', 1, true) then

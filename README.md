@@ -125,8 +125,9 @@ changes, so completion does not reorder earlier work.
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
 transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
-name and status in the timeline; `<Enter>` reveals their arguments and result or error in the
-floating detail pane. The active Copilot heading cycles through `writing.`, `writing..`, and
+name and status in the timeline; failed tool and task rows also include a concise error summary.
+`<Enter>` reveals complete arguments, results, and errors in the floating detail pane. The active
+Copilot heading cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
 responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
 `🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted
@@ -255,12 +256,12 @@ interval with `stream_flush_ms`.
 Conversation windows follow the final line when opened, switched, reopened, or updated by streaming
 output. Set `follow_bottom = false` to preserve the current viewport instead.
 
-Conversation turns and activity rows show local timestamps. Timeline timestamps change whenever a
-row is updated, and a streamed Copilot response receives its final timestamp when the response
-completes. Customize the display with `timestamp_format`, using an `os.date` format string. The
-conversation starts with a local-date divider and adds another before the first newly rendered item
-after midnight. `conversation.day_header_format` controls that divider without repeating the date
-on every row.
+Conversation turns and timeline rows show local timestamps. A timeline row receives a new timestamp
+only when its visible state changes, and a streamed Copilot response receives its final timestamp
+when the response completes. Reasoning summaries omit timestamps. Customize the remaining display
+with `timestamp_format`, using an `os.date` format string. The conversation starts with a local-date
+divider and adds another before the first newly rendered item after midnight.
+`conversation.day_header_format` controls that divider without repeating the date on every row.
 The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
 session. Both values refresh from SDK usage events after every model call.
 
