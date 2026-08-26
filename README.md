@@ -128,11 +128,12 @@ text output remains under `# Copilot`, and any work they start is represented by
 task, tool, environment, or schedule rows. Use `/tasks` or
 `:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
-When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
-`Reject` prompt. Standard mode and Fleet agents without an explicit `permissions` object otherwise
-allow all operations, preserving the configured Copilot CLI launcher's permission behavior.
-Optional permissions are declared directly on an agent and remain hard ceilings: requests outside
-its configured path, command, network, Git, or external-action policy are rejected before the prompt.
+When Copilot CLI leaves a permission request unresolved, the plugin shows an `Approve once` /
+`Reject` prompt. A launcher using `--allow-all` resolves ordinary requests before they reach this
+handler, while enterprise-managed requests can still require confirmation. Standard mode and Fleet
+agents without an explicit `permissions` object add no further restrictions. Optional permissions
+are declared directly on an agent and remain hard ceilings: requests outside its configured path,
+command, network, Git, or external-action policy are rejected before the prompt.
 Closing the prompt rejects the request, and pending requests are rejected when the host shuts down.
 Interactive approval is returned to the SDK as a one-request approval and is not persisted.
 

@@ -534,7 +534,7 @@ export class CopilotRuntime {
   ): PermissionHandler {
     return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
       const decision = permissionDecision(profile, this.workspace, request);
-      if (decision.kind !== "approve-once" || !request.managedApprovalRequired) {
+      if (decision.kind !== "approve-once") {
         return decision;
       }
       const requestId = randomUUID();
