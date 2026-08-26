@@ -96,6 +96,8 @@ local function create_buffer(name, member_id, view_id)
     active_message = nil,
     awaiting_response = nil,
     message_heading = nil,
+    writing_generation = 0,
+    writing_step = 1,
     current_day = initial_day,
     last_block_kind = nil,
     last_activity = nil,
@@ -225,7 +227,7 @@ function M.append_block(member_id, view_id, heading, content)
   if view_id == 'conversation' and heading == 'You' then
     display_heading = options.conversation.user_label
   elseif view_id == 'conversation' and heading == 'Copilot' then
-    display_heading = status_symbols.completed .. ' ' .. options.conversation.copilot_label
+    display_heading = options.conversation.copilot_label
   else
     local level = view_id == 'conversation' and '#' or '##'
     display_heading = ('%s %s'):format(level, heading)
@@ -492,7 +494,7 @@ function M.timeline_item_at_cursor(buf, row)
   end
 end
 
-local function touch_message_heading(view, status, detail)
+local function set_message_heading(view, content)
   if not view.message_heading then return end
   local position = vim.api.nvim_buf_get_extmark_by_id(
     view.buf,
@@ -501,36 +503,65 @@ local function touch_message_heading(view, status, detail)
     {}
   )
   if #position == 0 then return end
-  local completed_at = timestamp()
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(
       view.buf,
       position[1],
       position[1] + 1,
       false,
-      {
-        ('%s · %s%s'):format(
-          M.status_symbol(status) .. ' ' .. options.conversation.copilot_label,
-          completed_at,
-          detail and (' · ' .. detail) or ''
-        ),
-      }
+      { content }
     )
   end)
 end
 
+local function stop_writing_animation(view)
+  view.writing_generation = view.writing_generation + 1
+end
+
+local function animate_writing(view, generation)
+  vim.defer_fn(function()
+    if generation ~= view.writing_generation then return end
+    if not view.awaiting_response and not view.active_message then return end
+    if not vim.api.nvim_buf_is_valid(view.buf) then return end
+    view.writing_step = (view.writing_step % 3) + 1
+    set_message_heading(
+      view,
+      ('%s · writing%s'):format(
+        options.conversation.copilot_label,
+        string.rep('.', view.writing_step)
+      )
+    )
+    animate_writing(view, generation)
+  end, 400)
+end
+
+local function touch_message_heading(view, status, detail)
+  stop_writing_animation(view)
+  local label = options.conversation.copilot_label
+  if status == 'failed' then
+    label = M.status_symbol('failed') .. ' ' .. label
+  end
+  set_message_heading(
+    view,
+    ('%s · %s%s'):format(
+      label,
+      timestamp(),
+      detail and (' · ' .. detail) or ''
+    )
+  )
+end
+
 local function begin_response(view, response_id)
-  local now = ensure_day_header(view, options.now())
+  ensure_day_header(view, options.now())
   flush(view)
   vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
   local heading_row = vim.api.nvim_buf_line_count(view.buf)
-  local started_at = timestamp(now)
+  stop_writing_animation(view)
+  view.writing_step = 1
   append(
     view,
-    ('\n%s %s · %s · processing…\n\n'):format(
-      M.status_symbol('running'),
-      options.conversation.copilot_label,
-      started_at
+    ('\n%s · writing.\n\n'):format(
+      options.conversation.copilot_label
     ),
     false
   )
@@ -543,6 +574,7 @@ local function begin_response(view, response_id)
     { right_gravity = false }
   )
   view.awaiting_response = response_id or true
+  animate_writing(view, view.writing_generation)
 end
 
 function M.begin_response(member_id, response_id)

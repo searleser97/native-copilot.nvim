@@ -570,7 +570,7 @@ assert(buffer_text(coordinator_buf):match(
   '👨 You · %d%d:%d%d:%d%d\n\nImplement the edited first feature'
 ))
 assert(buffer_text(coordinator_buf):match(
-  '🟡 🤖 Copilot · %d%d:%d%d:%d%d · processing…'
+  '🤖 Copilot · writing%.'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({

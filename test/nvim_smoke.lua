@@ -110,7 +110,7 @@ local streaming_text = table.concat(
 assert(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, 1, false)[1]
   == '──────── 08-26 ────────')
 assert(streaming_text:find('──────── 08-26 ────────', 1, true))
-assert(streaming_text:match('🟡 BOT · %d%d:%d%d:%d%d · processing…'))
+assert(streaming_text:find('BOT · writing.', 1, true))
 buffers.append_conversation_delta('reviewer', 'message-1', 'looks correct.')
 buffers.complete_conversation('reviewer', 'message-1', 'The implementation looks correct.')
 buffers.append_activity_delta('reviewer', 'reasoning-late', 'Late but ')
@@ -127,8 +127,8 @@ assert(text:find('Please review this.', 1, true))
 assert(text:find('> **Reasoning summary**', 1, true))
 assert(text:find('> Checking the implementation.', 1, true))
 assert(text:find('BOT', 1, true))
-assert(text:match('🟢 BOT · %d%d:%d%d:%d%d'))
-assert(not text:find('🟡 BOT', 1, true))
+assert(text:match('BOT · %d%d:%d%d:%d%d'))
+assert(not text:find('BOT · writing', 1, true))
 assert(not text:find('# Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
@@ -164,7 +164,7 @@ assert(
   headings_after_tool_turn == headings_before_tool_turn + 1,
   'tool-only assistant message created a duplicate Copilot heading'
 )
-assert(not tool_turn_text:find('🟡 BOT', 1, true))
+assert(not tool_turn_text:find('BOT · writing', 1, true))
 local second_day = assert(tool_turn_text:find('──────── 08-27 ────────', 1, true))
 local second_prompt = assert(tool_turn_text:find('Use a tool, then answer.', 1, true))
 assert(second_day < second_prompt, 'new-day divider was not rendered before the next message')

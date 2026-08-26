@@ -126,8 +126,9 @@ Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
 transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
 name and status in the timeline; `<Enter>` reveals their arguments and result or error in the
-floating detail pane. The active turn starts with `🟡` and changes to `🟢` or `🔴`; it does not
-create a separate prompt-status row. Permission requests use a leading `🟡` row that updates to
+floating detail pane. The active Copilot heading cycles through `writing.`, `writing..`, and
+`writing...`; when the response completes, that text is replaced by its completion time. Failed
+responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
 `🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted
 while Copilot is busy stay in a FIFO pane between
 the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
