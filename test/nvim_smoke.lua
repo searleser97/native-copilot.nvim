@@ -127,6 +127,29 @@ assert(count == 1, 'stream final message was duplicated')
 local _, reasoning_count = text:gsub('Checking the implementation%.', '')
 assert(reasoning_count == 1, 'stream final reasoning was duplicated')
 
+local _, headings_before_tool_turn = text:gsub('# Copilot ·', '')
+buffers.append_block('reviewer', 'conversation', 'You', 'Use a tool, then answer.')
+buffers.begin_response('reviewer', 'tool-turn')
+buffers.complete_conversation('reviewer', 'tool-call-message', '')
+buffers.upsert_timeline('reviewer', 'tool:search', {
+  kind = 'tool',
+  label = 'search',
+  status = 'completed',
+  detail = 'completed',
+})
+buffers.append_conversation_delta('reviewer', 'tool-final-message', 'Tool-backed answer.')
+buffers.complete_conversation('reviewer', 'tool-final-message', 'Tool-backed answer.')
+local tool_turn_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+local _, headings_after_tool_turn = tool_turn_text:gsub('# Copilot ·', '')
+assert(
+  headings_after_tool_turn == headings_before_tool_turn + 1,
+  'tool-only assistant message created a duplicate Copilot heading'
+)
+assert(not tool_turn_text:find('○ processing…', 1, true))
+
 local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
 local activity_marks = vim.api.nvim_buf_get_extmarks(
   member.views.conversation.buf,
@@ -153,6 +176,18 @@ buffers.append_activity_delta('reviewer', 'reasoning-2', 'Still reasoning...')
 buffers.complete_activity('reviewer', 'reasoning-2', 'Still reasoning...')
 
 buffers.set_state('reviewer', 'busy')
+buffers.upsert_timeline('reviewer', 'environment:Instructions', {
+  kind = 'environment',
+  label = 'Instructions',
+  status = 'running',
+  detail = 'Loading instructions',
+})
+buffers.upsert_timeline('reviewer', 'environment:Instructions', {
+  kind = 'environment',
+  label = 'Instructions',
+  status = 'completed',
+  detail = '3 loaded',
+})
 buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
   kind = 'environment',
   label = 'MCP myenghub',
@@ -166,10 +201,15 @@ buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
   detail = 'connected',
 })
 local mcp_rows = 0
+local instruction_rows = 0
 for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line:find('[environment] MCP myenghub', 1, true) then mcp_rows = mcp_rows + 1 end
+  if line:find('[environment] Instructions', 1, true) then
+    instruction_rows = instruction_rows + 1
+  end
 end
 assert(mcp_rows == 1, 'MCP status transition duplicated the underlying timeline row')
+assert(instruction_rows == 1, 'environment status transition duplicated the underlying timeline row')
 local mcp_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'

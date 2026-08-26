@@ -320,8 +320,8 @@ local function timeline_lines(kind, label, status, detail)
   }
 end
 
-local function reconcile_mcp_rows(view, item)
-  if item.kind ~= 'environment' or not vim.startswith(item.label or '', 'MCP ') then return nil end
+local function reconcile_environment_rows(view, item)
+  if item.kind ~= 'environment' then return nil end
   local marker = ('**[environment] %s**'):format(item.label)
   local rows = {}
   for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
@@ -331,10 +331,8 @@ local function reconcile_mcp_rows(view, item)
 
   for index = #rows, 2, -1 do
     local row = rows[index]
-    local following = vim.api.nvim_buf_get_lines(view.buf, row + 1, row + 2, false)[1]
-    local end_row = following == '' and row + 2 or row + 1
     with_modifiable(view.buf, function()
-      vim.api.nvim_buf_set_lines(view.buf, row, end_row, false, {})
+      vim.api.nvim_buf_set_lines(view.buf, row, row + 1, false, {})
     end)
   end
   return rows[1]
@@ -346,12 +344,10 @@ function M.upsert_timeline(member_id, item_id, item)
   flush(view)
   local record = view.timeline[item_id]
   local lines = timeline_lines(item.kind, item.label, item.status, item.detail)
-  local start_row = reconcile_mcp_rows(view, item)
+  local start_row = reconcile_environment_rows(view, item)
   if start_row then
-    local following = vim.api.nvim_buf_get_lines(view.buf, start_row + 1, start_row + 2, false)[1]
-    local end_row = following == '' and start_row + 2 or start_row + 1
     with_modifiable(view.buf, function()
-      vim.api.nvim_buf_set_lines(view.buf, start_row, end_row, false, lines)
+      vim.api.nvim_buf_set_lines(view.buf, start_row, start_row + 1, false, lines)
     end)
   elseif record then
     local position = vim.api.nvim_buf_get_extmark_by_id(
@@ -403,7 +399,18 @@ function M.remove_timeline(member_id, item_id)
     record.extmark,
     { details = true }
   )
-  if #position > 0 then
+  if record.item and record.item.kind == 'environment' then
+    local marker = ('**[environment] %s**'):format(record.item.label)
+    local rows = {}
+    for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
+      if line:find(marker, 1, true) then table.insert(rows, index - 1) end
+    end
+    for index = #rows, 1, -1 do
+      with_modifiable(view.buf, function()
+        vim.api.nvim_buf_set_lines(view.buf, rows[index], rows[index] + 1, false, {})
+      end)
+    end
+  elseif #position > 0 then
     local end_row = position[1] + record.line_count
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, position[1], end_row, false, {})
@@ -523,7 +530,9 @@ end
 function M.complete_conversation(member_id, message_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  if view.awaiting_response then
+  if view.awaiting_response and content == '' then
+    return
+  elseif view.awaiting_response then
     append(view, content .. '\n', true)
     view.awaiting_response = nil
     touch_message_heading(view)
@@ -534,6 +543,18 @@ function M.complete_conversation(member_id, message_id, content)
     M.append_block(member_id, 'conversation', 'Copilot', content)
   end
   view.active_message = nil
+end
+
+function M.finish_response(member_id)
+  local entry = registry[member_id]
+  local view = entry and entry.views.conversation
+  if not view or (not view.awaiting_response and not view.active_message) then return end
+  flush(view)
+  touch_message_heading(view)
+  view.awaiting_response = nil
+  view.active_message = nil
+  view.streaming = false
+  finalize_render(view)
 end
 
 function M.set_state(member_id, new_state)

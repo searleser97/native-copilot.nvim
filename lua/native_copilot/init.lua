@@ -2006,6 +2006,7 @@ function M._on_event(message)
     local member_state = payload.state or 'unknown'
     buffers.set_state(member_id, member_state)
     if member_state == 'idle' then
+      buffers.finish_response(member_id)
       local request_id = state.active_prompts[member_id]
       if request_id then state.prompt_calls[request_id] = nil end
       state.active_prompts[member_id] = nil
