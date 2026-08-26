@@ -964,20 +964,9 @@ vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
 local failed_tool_row = assert(line_with(observer_buf, '[tool] powershell'))
 vim.api.nvim_win_set_cursor(0, { failed_tool_row, 0 })
 local failed_tool_item = buffers.timeline_item_at_cursor(observer_buf, failed_tool_row)
-local timeline_marks = vim.api.nvim_buf_get_extmarks(
-  observer_buf,
-  vim.api.nvim_get_namespaces().native_copilot_timeline,
-  0,
-  -1,
-  { details = true }
-)
 assert(
   failed_tool_item and failed_tool_item.status == 'failed',
-  ('failed tool details were not retained at row %d: item=%s marks=%s'):format(
-    failed_tool_row,
-    vim.inspect(failed_tool_item),
-    vim.inspect(timeline_marks)
-  )
+  ('failed tool details were not retained at row %d'):format(failed_tool_row)
 )
 local failed_tool_enter = vim.api.nvim_buf_call(observer_buf, function()
   return vim.fn.maparg('<CR>', 'n', false, true)

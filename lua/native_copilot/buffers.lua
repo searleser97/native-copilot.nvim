@@ -420,7 +420,7 @@ function M.upsert_timeline(member_id, item_id, item)
     id = record.extmark,
     end_row = start_row + #lines,
     end_col = 0,
-    right_gravity = false,
+    right_gravity = true,
     end_right_gravity = false,
   })
   record.line_count = #lines
@@ -475,7 +475,7 @@ function M.timeline_item_at_cursor(buf, row)
           { details = true }
         )
         if #position > 0 then
-          local end_row = position[1] + record.line_count
+          local end_row = position[3].end_row or (position[1] + record.line_count)
           if zero_row >= position[1] and zero_row < end_row then
             return record.item, member_id
           end
