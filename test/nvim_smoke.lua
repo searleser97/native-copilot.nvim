@@ -90,6 +90,7 @@ assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')
 assert(vim.b[member.views.conversation.buf].native_copilot == true)
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Please review this.')
+buffers.begin_response('reviewer', 'request-1')
 buffers.append_activity_delta('reviewer', 'reasoning-1', 'Checking the ')
 buffers.append_activity_delta('reviewer', 'reasoning-1', 'implementation.')
 buffers.complete_activity('reviewer', 'reasoning-1', 'Checking the implementation.')
@@ -121,7 +122,7 @@ assert(not text:find('# Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
 local assistant_heading = text:find('# Copilot', 1, true)
-assert(late_reasoning and assistant_heading and late_reasoning < assistant_heading)
+assert(late_reasoning and assistant_heading and late_reasoning > assistant_heading)
 local _, count = text:gsub('The implementation looks correct%.', '')
 assert(count == 1, 'stream final message was duplicated')
 local _, reasoning_count = text:gsub('Checking the implementation%.', '')
@@ -137,6 +138,9 @@ buffers.upsert_timeline('reviewer', 'tool:search', {
   status = 'completed',
   detail = 'completed',
 })
+buffers.append_activity_delta('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
+buffers.complete_activity('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
+buffers.complete_activity('reviewer', 'reasoning-after-tool-2', 'Confirming the result is relevant.')
 buffers.append_conversation_delta('reviewer', 'tool-final-message', 'Tool-backed answer.')
 buffers.complete_conversation('reviewer', 'tool-final-message', 'Tool-backed answer.')
 local tool_turn_text = table.concat(
@@ -149,7 +153,16 @@ assert(
   'tool-only assistant message created a duplicate Copilot heading'
 )
 assert(not tool_turn_text:find('○ processing…', 1, true))
-assert(tool_turn_text:match('%[tool%] search%*%* — completed · %d%d:%d%d:%d%d\nTool%-backed answer%.'))
+local tool_row = assert(tool_turn_text:find('[tool] search', 1, true))
+local reasoning_after_tool = assert(tool_turn_text:find('Checking the tool result.', 1, true))
+local adjacent_reasoning = assert(tool_turn_text:find('Confirming the result is relevant.', 1, true))
+local tool_answer = assert(tool_turn_text:find('Tool-backed answer.', 1, true))
+assert(tool_row < reasoning_after_tool, 'later reasoning was moved above an earlier tool call')
+assert(reasoning_after_tool < adjacent_reasoning, 'consecutive reasoning changed order')
+assert(adjacent_reasoning < tool_answer, 'final answer was not kept after tool reasoning')
+local tool_turn = tool_turn_text:sub(tool_row)
+local _, reasoning_heading_count = tool_turn:gsub('%*%*Reasoning summary%*%*', '')
+assert(reasoning_heading_count == 1, 'consecutive reasoning duplicated its heading')
 
 local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
 local activity_marks = vim.api.nvim_buf_get_extmarks(
@@ -159,15 +172,17 @@ local activity_marks = vim.api.nvim_buf_get_extmarks(
   -1,
   { details = true }
 )
-assert(#activity_marks == 2, 'reasoning summaries did not produce two inline highlights')
-local assistant_row
-for row, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
-  if line:match('^# Copilot · %d%d:%d%d:%d%d$') then assistant_row = row - 1 end
-end
-assert(assistant_row, 'assistant heading row was not found')
+assert(#activity_marks == 3, 'reasoning summaries did not produce three inline highlights')
 for _, mark in ipairs(activity_marks) do
   assert(mark[4].hl_group == 'Comment')
-  assert(mark[4].end_row <= assistant_row, 'inline activity highlight leaked into the assistant response')
+  local highlighted = table.concat(
+    vim.api.nvim_buf_get_lines(member.views.conversation.buf, mark[2], mark[4].end_row, false),
+    '\n'
+  )
+  assert(
+    not highlighted:find('Tool-backed answer.', 1, true),
+    'inline activity highlight leaked into the assistant response'
+  )
 end
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
 buffers.on_shown(member.views.conversation.buf)

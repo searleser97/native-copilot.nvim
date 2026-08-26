@@ -2,7 +2,6 @@ local M = {}
 
 local registry = {}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
-local message_anchor_namespace = vim.api.nvim_create_namespace('native_copilot_message_anchor')
 local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local options = {
@@ -70,9 +69,9 @@ local function create_buffer(name, member_id, view_id)
     activity_streaming = false,
     active_message = nil,
     awaiting_response = nil,
-    message_anchor = nil,
     message_heading = nil,
-    deferred_activity = nil,
+    last_block_kind = nil,
+    last_activity = nil,
     timeline = {},
   }
 end
@@ -157,6 +156,7 @@ end
 
 local function append(view, text, final)
   if text == '' then return end
+  view.last_block_kind = nil
   view.streaming = not final
   view.pending = view.pending .. text
   schedule_flush(view)
@@ -170,67 +170,32 @@ end
 function M.append_block(member_id, view_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
-  if view_id == 'conversation' and heading == 'You' then
-    view.message_anchor = nil
-    vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
-  end
   local level = view_id == 'conversation' and '#' or '##'
   append(view, ('\n%s %s · %s\n\n%s\n'):format(level, heading, timestamp(), content), true)
 end
 
-local function insert_activity_before_message(view, heading, content)
-  if not view.message_anchor then return false end
-  flush(view)
-  local anchor = vim.api.nvim_buf_get_extmark_by_id(
-    view.buf,
-    message_anchor_namespace,
-    view.message_anchor,
-    {}
-  )
-  if #anchor == 0 then
-    view.message_anchor = nil
-    return false
-  end
-  local lines = { '', ('> **%s** · %s'):format(heading, timestamp()), '>' }
-  for _, line in ipairs(vim.split(content, '\n', { plain = true })) do
-    table.insert(lines, '> ' .. line)
-  end
-  table.insert(lines, '')
-  local start_row = anchor[1]
-  with_modifiable(view.buf, function()
-    vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
-  end)
-  view.message_anchor = vim.api.nvim_buf_set_extmark(
-    view.buf,
-    message_anchor_namespace,
-    start_row + #lines,
-    0,
-    {
-      id = view.message_anchor,
-      right_gravity = false,
-    }
-  )
-  vim.api.nvim_buf_set_extmark(view.buf, activity_namespace, start_row, 0, {
-    end_row = start_row + #lines,
-    end_col = 0,
-    hl_group = 'Comment',
-    hl_eol = true,
-    priority = 200,
-  })
-  follow_bottom(view)
-  if not view.streaming then finalize_render(view) end
-  return true
-end
-
 local function begin_inline_activity(view, activity_id, heading)
   flush(view)
-  local start_row = vim.api.nvim_buf_line_count(view.buf)
+  local continuation = view.last_block_kind == 'activity' and view.last_activity ~= nil
+  local start_row = continuation
+      and view.last_activity.start_row
+      or vim.api.nvim_buf_line_count(view.buf)
   view.active_activity = {
     id = activity_id,
     start_row = start_row,
+    extmark = continuation and view.last_activity.extmark or nil,
   }
-  view.pending = view.pending .. ('\n> **%s** · %s\n>\n> '):format(heading, timestamp())
+  if continuation then
+    view.pending = view.pending .. '>\n> '
+  else
+    view.pending = view.pending .. ('\n> **%s** · %s\n>\n> '):format(heading, timestamp())
+  end
   flush(view)
+  view.last_activity = {
+    start_row = view.active_activity.start_row,
+    extmark = view.active_activity.extmark,
+  }
+  view.last_block_kind = 'activity'
 end
 
 local function touch_activity_heading(view, heading)
@@ -249,14 +214,6 @@ end
 function M.append_activity_delta(member_id, activity_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  if view.message_anchor then
-    if not view.deferred_activity or view.deferred_activity.id ~= activity_id then
-      view.deferred_activity = { id = activity_id, content = '' }
-    end
-    view.deferred_activity.content = view.deferred_activity.content .. content
-    view.activity_streaming = true
-    return
-  end
   if not view.active_activity or view.active_activity.id ~= activity_id then
     begin_inline_activity(view, activity_id, 'Reasoning summary')
   end
@@ -268,12 +225,6 @@ end
 function M.complete_activity(member_id, activity_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  if view.deferred_activity and view.deferred_activity.id == activity_id then
-    local final_content = content ~= '' and content or view.deferred_activity.content
-    view.deferred_activity = nil
-    view.activity_streaming = false
-    if insert_activity_before_message(view, 'Reasoning summary', final_content) then return end
-  end
   if view.active_activity and view.active_activity.id == activity_id then
     view.pending = view.pending .. '\n'
     flush(view)
@@ -282,9 +233,7 @@ function M.complete_activity(member_id, activity_id, content)
     view.activity_streaming = false
     if not view.streaming then finalize_render(view) end
   else
-    if not insert_activity_before_message(view, 'Reasoning summary', content) then
-      M.append_activity_block(member_id, 'Reasoning summary', content)
-    end
+    M.append_activity_block(member_id, 'Reasoning summary', content)
   end
 end
 
@@ -373,6 +322,7 @@ function M.upsert_timeline(member_id, item_id, item)
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
     end)
+    view.last_block_kind = nil
     record = {}
     view.timeline[item_id] = record
   end
@@ -469,16 +419,8 @@ end
 
 local function begin_response(view, response_id)
   flush(view)
-  vim.api.nvim_buf_clear_namespace(view.buf, message_anchor_namespace, 0, -1)
   vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
   local heading_row = vim.api.nvim_buf_line_count(view.buf)
-  view.message_anchor = vim.api.nvim_buf_set_extmark(
-    view.buf,
-    message_anchor_namespace,
-    heading_row - 1,
-    0,
-    { right_gravity = false }
-  )
   append(view, ('\n# Copilot · %s · ○ processing…\n\n'):format(timestamp()), false)
   flush(view)
   view.message_heading = vim.api.nvim_buf_set_extmark(
