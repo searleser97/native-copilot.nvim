@@ -111,9 +111,9 @@ assert(vim.b[member.views.conversation.buf].native_copilot == true)
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Please review this.')
 buffers.begin_response('reviewer', 'request-1')
-buffers.append_activity_delta('reviewer', 'reasoning-1', 'Checking the ')
+buffers.append_activity_delta('reviewer', 'reasoning-1', '\n\nChecking the ')
 buffers.append_activity_delta('reviewer', 'reasoning-1', 'implementation.')
-buffers.complete_activity('reviewer', 'reasoning-1', 'Checking the implementation.')
+buffers.complete_activity('reviewer', 'reasoning-1', '\nChecking the implementation.\n\n')
 buffers.append_conversation_delta('reviewer', 'message-1', 'The implementation ')
 local streaming_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
@@ -135,12 +135,12 @@ local text = table.concat(
 )
 assert(text:find('USER', 1, true))
 assert(text:match('USER · %d%d:%d%d:%d%d'))
-assert(text:find('\n  Please review this.', 1, true))
+assert(text:find('\n   Please review this.', 1, true))
 assert(not text:find('Reasoning summary', 1, true))
-assert(text:find('  Checking the implementation.', 1, true))
-assert(not text:find('  > Checking the implementation.', 1, true))
+assert(text:find('   Checking the implementation.', 1, true))
+assert(not text:find('   > Checking the implementation.', 1, true))
 assert(
-  text:match('BOT · %d%d:%d%d:%d%d\n\n  Checking the implementation%.'),
+  text:match('BOT · %d%d:%d%d:%d%d\n\n   Checking the implementation%.'),
   'reasoning was not separated from the Copilot heading by exactly one blank line'
 )
 assert(text:find('BOT', 1, true))
@@ -161,11 +161,12 @@ end
 assert(header_groups.NativeCopilotUserHeader)
 assert(header_groups.NativeCopilotAssistantHeader)
 assert(header_groups.NativeCopilotHeaderMeta)
-assert(text:find('\n  The implementation looks correct.', 1, true))
+assert(text:find('\n   The implementation looks correct.', 1, true))
 assert(
-  text:find('  Checking the implementation.\n\n  The implementation looks correct.', 1, true),
+  text:find('   Checking the implementation.\n\n   The implementation looks correct.', 1, true),
   'assistant response was not separated from reasoning by exactly one blank line'
 )
+assert(not text:match('BOT · %d%d:%d%d:%d%d\n\n\n'))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
 local assistant_heading = text:find('BOT ·', 1, true)
 assert(late_reasoning and assistant_heading and late_reasoning > assistant_heading)
@@ -213,6 +214,31 @@ assert(tool_row < reasoning_after_tool, 'later reasoning was moved above an earl
 assert(reasoning_after_tool < adjacent_reasoning, 'consecutive reasoning changed order')
 assert(adjacent_reasoning < tool_answer, 'final answer was not kept after tool reasoning')
 assert(not tool_turn_text:find('Reasoning summary', 1, true))
+local joined_folds = vim.api.nvim_buf_get_extmarks(
+  member.views.conversation.buf,
+  vim.api.nvim_get_namespaces().native_copilot_activity_fold,
+  0,
+  -1,
+  { details = true }
+)
+local reasoning_after_tool_row = vim.fn.split(
+  tool_turn_text:sub(1, reasoning_after_tool),
+  '\n'
+)
+local adjacent_reasoning_row = vim.fn.split(
+  tool_turn_text:sub(1, adjacent_reasoning),
+  '\n'
+)
+local joined_fold_found = false
+for _, fold in ipairs(joined_folds) do
+  if fold[2] <= #reasoning_after_tool_row - 1
+    and fold[4].end_row > #adjacent_reasoning_row - 1
+  then
+    joined_fold_found = true
+    break
+  end
+end
+assert(joined_fold_found, 'joined reasoning messages did not share one complete fold')
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Show code.')
 buffers.begin_response('reviewer', 'code-turn')
@@ -228,7 +254,7 @@ local indented_code = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
-assert(indented_code:find('\n  Example:\n  ```lua\n  print("hello")\n  ```\n  Done.', 1, true))
+assert(indented_code:find('\n   Example:\n   ```lua\n   print("hello")\n   ```\n   Done.', 1, true))
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Explain this briefly.')
 buffers.begin_response('reviewer', 'late-reasoning-turn')

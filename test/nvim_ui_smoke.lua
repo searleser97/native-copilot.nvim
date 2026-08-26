@@ -378,7 +378,7 @@ prompt_submit.callback()
 protocol.send = original_send
 assert(invoked_command.type == 'command.invoke')
 assert(invoked_command.payload.name == 'context')
-assert(buffer_text(coordinator_buf):match('👨 You · %d%d:%d%d:%d%d\n\n  /context'))
+assert(buffer_text(coordinator_buf):match('👨 You · %d%d:%d%d:%d%d\n\n   /context'))
 assert(not buffer_text(coordinator_buf):find('[command]', 1, true))
 fleet._on_event({
   v = 1,
@@ -394,7 +394,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '🤖 Copilot · %d%d:%d%d:%d%d\n\n  Context usage output'
+  '🤖 Copilot · %d%d:%d%d:%d%d\n\n   Context usage output'
 ))
 protocol.send = function(message_type, payload)
   invoked_command = { type = message_type, payload = payload }
@@ -570,7 +570,7 @@ assert(prompt_sends[1].type == 'prompt.send')
 assert(prompt_sends[1].payload.content == 'Implement the edited first feature')
 assert(#vim.fn.win_findbuf(prompt_queue_buf) == 0, 'empty prompt queue pane remained open')
 assert(buffer_text(coordinator_buf):match(
-  '👨 You · %d%d:%d%d:%d%d\n\n  Implement the edited first feature'
+  '👨 You · %d%d:%d%d:%d%d\n\n   Implement the edited first feature'
 ))
 assert(buffer_text(coordinator_buf):match(
   '🤖 Copilot · writing%.'
@@ -637,7 +637,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '👨 You · %d%d:%d%d:%d%d\n\n  Check deployment health'
+  '👨 You · %d%d:%d%d:%d%d\n\n   Check deployment health'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
@@ -745,7 +745,7 @@ fleet._on_event({
 local permission_row = assert(line_with(coordinator_buf, '[permission] shell'))
 assert(
   vim.api.nvim_buf_get_lines(coordinator_buf, permission_row - 1, permission_row, false)[1]
-    :find('  > 🟡 **[permission] shell** — approval required: npm test', 1, true) == 1
+    :find('   > 🟡 **[permission] shell** — approval required: npm test', 1, true) == 1
 )
 assert(not buffer_text(coordinator_buf):find('**Permission**', 1, true))
 native_picker.on_choice(native_picker.items[1])
@@ -757,7 +757,7 @@ assert(permission_response.approved == true)
 assert(line_with(coordinator_buf, '[permission] shell') == permission_row)
 assert(
   buffer_text(coordinator_buf):find(
-    '  > 🟢 **[permission] shell** — approved once: npm test',
+    '   > 🟢 **[permission] shell** — approved once: npm test',
     1,
     true
   )
@@ -792,7 +792,7 @@ assert(permission_response.requestId == 'denied-permission')
 assert(permission_response.approved == false)
 assert(
   buffer_text(coordinator_buf):find(
-    '  > 🚫 **[permission] shell** — denied: Remove-Item output.tmp',
+    '   > 🚫 **[permission] shell** — denied: Remove-Item output.tmp',
     1,
     true
   )
@@ -1016,6 +1016,12 @@ assert(
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
 local failed_tool_row = assert(line_with(observer_buf, '[tool] powershell'))
 vim.api.nvim_win_set_cursor(0, { failed_tool_row, 0 })
+vim.api.nvim_buf_clear_namespace(
+  observer_buf,
+  vim.api.nvim_get_namespaces().native_copilot_timeline,
+  failed_tool_row - 1,
+  failed_tool_row
+)
 local failed_tool_item = buffers.timeline_item_at_cursor(observer_buf, failed_tool_row)
 assert(
   failed_tool_item and failed_tool_item.status == 'failed',

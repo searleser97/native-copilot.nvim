@@ -17,6 +17,8 @@ local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_
 local header_highlight_namespace =
   vim.api.nvim_create_namespace('native_copilot_header_highlight')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
+local content_indent = '   '
+local quote_indent = content_indent .. '>'
 local options = {
   stream_flush_ms = 80,
   follow_bottom = true,
@@ -250,6 +252,50 @@ local function schedule_flush(view)
   end, options.stream_flush_ms)
 end
 
+local function ensure_trailing_empty_rows(view, count)
+  flush(view)
+  local lines = vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)
+  local trailing = 0
+  for index = #lines, 1, -1 do
+    if lines[index]:match('^%s*$') then
+      trailing = trailing + 1
+    else
+      break
+    end
+  end
+  if trailing == count then return end
+  with_modifiable(view.buf, function()
+    if trailing > count then
+      vim.api.nvim_buf_set_lines(
+        view.buf,
+        #lines - (trailing - count),
+        #lines,
+        false,
+        {}
+      )
+    else
+      local additions = {}
+      for _ = 1, count - trailing do table.insert(additions, '') end
+      vim.api.nvim_buf_set_lines(view.buf, #lines, #lines, false, additions)
+    end
+  end)
+end
+
+local function prepare_pending_block(view, blank_lines)
+  ensure_trailing_empty_rows(view, blank_lines + 1)
+end
+
+local function trim_blank_boundary_lines(content)
+  local lines = vim.split(
+    content:gsub('\r\n', '\n'):gsub('\r', '\n'),
+    '\n',
+    { plain = true }
+  )
+  while #lines > 0 and lines[1]:match('^%s*$') do table.remove(lines, 1) end
+  while #lines > 0 and lines[#lines]:match('^%s*$') do table.remove(lines) end
+  return table.concat(lines, '\n')
+end
+
 function M.setup(user_options)
   options = vim.tbl_deep_extend('force', options, user_options or {})
   setup_highlights()
@@ -309,23 +355,22 @@ function M.append_block(member_id, view_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
   local now = ensure_day_header(view, options.now())
-  flush(view)
+  prepare_pending_block(view, 1)
   local line_count = vim.api.nvim_buf_line_count(view.buf)
-  local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
-  local prefix = last == '' and '\n' or '\n\n'
   local display_heading
   if view_id == 'conversation' and heading == 'You' then
     display_heading = options.conversation.user_label
-    content = '  ' .. content:gsub('\n', '\n  ')
+    content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   elseif view_id == 'conversation' and heading == 'Copilot' then
     display_heading = options.conversation.copilot_label
-    content = '  ' .. content:gsub('\n', '\n  ')
+    content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   else
     local level = view_id == 'conversation' and '#' or '##'
-    display_heading = (' %s %s'):format(level, heading)
-    content = '  ' .. content:gsub('\n', '\n  ')
+    display_heading = ('%s%s %s'):format(content_indent, level, heading)
+    content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   end
-  append(view, ('%s%s · %s\n\n%s\n'):format(prefix, display_heading, timestamp(now), content), true)
+  append(view, ('%s · %s\n\n%s\n'):format(display_heading, timestamp(now), content), true)
+  if view_id == 'conversation' then view.last_block_kind = 'message' end
   if view_id == 'conversation' and (heading == 'You' or heading == 'Copilot') then
     local lines = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, -1, false)
     for index, line in ipairs(lines) do
@@ -350,30 +395,18 @@ local function begin_inline_activity(view, activity_id, heading)
   local continuation = view.last_block_kind == 'activity'
     and view.last_activity ~= nil
     and view.last_activity.plain == plain
+  if not continuation then prepare_pending_block(view, 1) end
   local line_count = vim.api.nvim_buf_line_count(view.buf)
-  local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
-  local prefix
   local start_row
   local body_start_row
   if plain then
-    if last == '' then
-      prefix = ''
-      body_start_row = line_count - 1
-    elseif continuation then
-      prefix = '\n'
-      body_start_row = line_count
-    else
-      prefix = '\n\n'
-      body_start_row = line_count + 1
-    end
+    body_start_row = line_count - 1
     start_row = continuation and view.last_activity.start_row or body_start_row
   elseif continuation then
-    prefix = '  >\n  > '
     start_row = view.last_activity.start_row
-    body_start_row = line_count
+    body_start_row = line_count - 1
   else
-    prefix = last == '' and '' or '\n\n'
-    start_row = last == '' and line_count - 1 or line_count + 1
+    start_row = line_count - 1
     body_start_row = start_row + 2
   end
   local activity = {
@@ -382,19 +415,29 @@ local function begin_inline_activity(view, activity_id, heading)
     body_start_row = body_start_row,
     content = '',
     extmark = continuation and view.last_activity.extmark or nil,
+    fold_extmark = continuation and view.last_activity.fold_extmark or nil,
     plain = plain,
   }
   view.active_activity = activity
   view.activity_records[activity_id] = activity
-  if plain or continuation then
-    view.pending = view.pending .. prefix .. (plain and '  ' or '')
+  if plain then
+    view.pending = view.pending .. content_indent
+  elseif continuation then
+    view.pending = view.pending .. quote_indent .. '\n' .. quote_indent .. ' '
   else
-    view.pending = view.pending .. prefix .. ('  > **%s**\n  >\n  > '):format(heading)
+    view.pending = view.pending
+      .. ('%s **%s**\n%s\n%s '):format(
+        quote_indent,
+        heading,
+        quote_indent,
+        quote_indent
+      )
   end
   flush(view)
   view.last_activity = {
     start_row = view.active_activity.start_row,
     extmark = view.active_activity.extmark,
+    fold_extmark = view.active_activity.fold_extmark,
     plain = plain,
   }
   view.last_block_kind = 'activity'
@@ -408,7 +451,7 @@ local function touch_activity_heading(view, activity, heading)
       activity.start_row,
       activity.start_row + 1,
       false,
-      { ('  > **%s**'):format(heading) }
+      { ('%s **%s**'):format(quote_indent, heading) }
     )
   end)
 end
@@ -420,8 +463,11 @@ function M.append_activity_delta(member_id, activity_id, content)
     begin_inline_activity(view, activity_id, 'Reasoning summary')
   end
   view.activity_streaming = true
+  if view.active_activity.content == '' then content = content:gsub('^%s+', '') end
   view.active_activity.content = view.active_activity.content .. content
-  local line_prefix = view.active_activity.plain and '\n  ' or '\n  > '
+  local line_prefix = view.active_activity.plain
+      and ('\n' .. content_indent)
+    or ('\n' .. quote_indent .. ' ')
   view.pending = view.pending .. content:gsub('\n', line_prefix)
   schedule_flush(view)
 end
@@ -436,7 +482,7 @@ local function replace_activity_content(view, activity, content)
   )
   if #position == 0 then return false end
   local lines = {}
-  local line_prefix = activity.plain and '  ' or '  > '
+  local line_prefix = activity.plain and content_indent or (quote_indent .. ' ')
   for _, line in ipairs(vim.split(content:gsub('\r\n', '\n'):gsub('\r', '\n'), '\n', { plain = true })) do
     table.insert(lines, line_prefix .. line)
   end
@@ -488,6 +534,9 @@ function M.complete_activity(member_id, activity_id, content)
       and view.active_activity
     or view.activity_records[activity_id]
   if activity then
+    if activity.plain then
+      content = trim_blank_boundary_lines(content)
+    end
     local was_active = view.active_activity == activity
     if was_active then
       view.pending = view.pending .. '\n'
@@ -518,7 +567,9 @@ function M.append_activity_block(member_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
-  local line_prefix = view.active_activity.plain and '\n  ' or '\n  > '
+  local line_prefix = view.active_activity.plain
+      and ('\n' .. content_indent)
+    or ('\n' .. quote_indent .. ' ')
   view.pending = view.pending .. content:gsub('\n', line_prefix) .. '\n'
   flush(view)
   touch_activity_heading(view, view.active_activity, heading)
@@ -532,7 +583,7 @@ local function timeline_lines(kind, label, status, detail, now)
   label = tostring(label or ''):gsub('[\r\n]+', ' ')
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
-  local prefix = kind == 'environment' and '>' or '  >'
+  local prefix = kind == 'environment' and '>' or quote_indent
   return {
     ('%s %s **[%s] %s**%s · %s'):format(
       prefix,
@@ -635,6 +686,9 @@ function M.upsert_timeline(member_id, item_id, item)
 
   if not start_row then
     ensure_day_header(view, now)
+    if view.last_block_kind == 'activity' or view.last_block_kind == 'message' then
+      ensure_trailing_empty_rows(view, 1)
+    end
     start_row = vim.api.nvim_buf_line_count(view.buf)
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
@@ -642,6 +696,7 @@ function M.upsert_timeline(member_id, item_id, item)
     view.last_block_kind = nil
     record = {}
     view.timeline[item_id] = record
+    view.last_block_kind = 'timeline'
   end
 
   record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
@@ -652,6 +707,7 @@ function M.upsert_timeline(member_id, item_id, item)
     end_right_gravity = false,
   })
   record.line_count = #lines
+  record.start_row = start_row
   record.item = vim.deepcopy(item)
   record.item.id = item_id
   follow_bottom(view)
@@ -709,6 +765,23 @@ function M.timeline_item_at_cursor(buf, row)
           end
         end
       end
+      local line = vim.api.nvim_buf_get_lines(view.buf, zero_row, zero_row + 1, false)[1] or ''
+      local nearest
+      local nearest_distance
+      for _, record in pairs(view.timeline) do
+        local item = record.item
+        local marker = item
+            and ('**[%s] %s**'):format(item.kind or 'activity', item.label or '')
+          or nil
+        if marker and line:find(marker, 1, true) then
+          local distance = math.abs((record.start_row or zero_row) - zero_row)
+          if not nearest_distance or distance < nearest_distance then
+            nearest = item
+            nearest_distance = distance
+          end
+        end
+      end
+      if nearest then return nearest, member_id end
       return nil, member_id
     end
   end
@@ -803,15 +876,15 @@ end
 
 local function begin_response(view, response_id)
   ensure_day_header(view, options.now())
-  flush(view)
+  prepare_pending_block(view, 1)
   vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
-  local heading_row = vim.api.nvim_buf_line_count(view.buf)
+  local heading_row = vim.api.nvim_buf_line_count(view.buf) - 1
   stop_writing_animation(view)
   view.writing_step = 1
   view.response_line_start = true
   append(
     view,
-    ('\n%s · writing.\n\n'):format(
+    ('%s · writing.\n\n'):format(
       options.conversation.copilot_label
     ),
     false
@@ -831,6 +904,7 @@ local function begin_response(view, response_id)
     'NativeCopilotAssistantHeader'
   )
   view.awaiting_response = response_id or true
+  view.last_block_kind = 'header'
   animate_writing(view, view.writing_generation)
 end
 
@@ -843,7 +917,7 @@ local function indent_response_delta(view, content)
     local line_end = newline and newline - 1 or #content
     local segment = content:sub(offset, line_end)
     if segment ~= '' then
-      if view.response_line_start then table.insert(result, '  ') end
+      if view.response_line_start then table.insert(result, content_indent) end
       table.insert(result, segment)
       view.response_line_start = false
     end
@@ -883,13 +957,14 @@ function M.append_conversation_delta(member_id, message_id, content)
       first_visible_delta = true
     end
   end
-  if first_visible_delta then
-    local follows_activity = view.last_block_kind == 'activity'
-    local line_count = vim.api.nvim_buf_line_count(view.buf)
-    local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
-    if follows_activity or last ~= '' then append(view, '\n', false) end
+  if first_visible_delta
+    or view.last_block_kind == 'activity'
+    or view.last_block_kind == 'timeline'
+  then
+    prepare_pending_block(view, 1)
   end
   append(view, indent_response_delta(view, content), false)
+  view.last_block_kind = 'message'
 end
 
 function M.fail_response(member_id, detail)
@@ -921,6 +996,7 @@ function M.complete_conversation(member_id, message_id, content)
   end
   view.active_message = nil
   view.response_line_start = true
+  view.last_block_kind = 'message'
 end
 
 function M.finish_response(member_id)

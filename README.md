@@ -259,7 +259,7 @@ state use `NativeCopilotHeaderMeta`, linked to `Comment`. Override any group aft
 `vim.api.nvim_set_hl()` to choose explicit colors.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
-interval with `stream_flush_ms`. Conversation content uses a two-space margin, including user and
+interval with `stream_flush_ms`. Conversation content uses a three-space margin, including user and
 Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permissions. Participant
 headers, day dividers, and environment loading/status rows remain unindented.
 
