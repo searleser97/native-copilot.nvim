@@ -124,12 +124,12 @@ local text = table.concat(
 assert(text:find('USER', 1, true))
 assert(text:match('USER · %d%d:%d%d:%d%d'))
 assert(text:find('\n  Please review this.', 1, true))
-assert(text:find('  > **Reasoning summary**', 1, true))
-assert(not text:find('  > **Reasoning summary** ·', 1, true))
-assert(text:find('  > Checking the implementation.', 1, true))
+assert(not text:find('Reasoning summary', 1, true))
+assert(text:find('  Checking the implementation.', 1, true))
+assert(not text:find('  > Checking the implementation.', 1, true))
 assert(
-  text:match('BOT · %d%d:%d%d:%d%d\n\n  > %*%*Reasoning summary%*%*'),
-  'reasoning summary was not separated from the Copilot heading by exactly one blank line'
+  text:match('BOT · %d%d:%d%d:%d%d\n\n  Checking the implementation%.'),
+  'reasoning was not separated from the Copilot heading by exactly one blank line'
 )
 assert(text:find('BOT', 1, true))
 assert(text:match('BOT · %d%d:%d%d:%d%d'))
@@ -137,7 +137,7 @@ assert(not text:find('BOT · writing', 1, true))
 assert(not text:find('# Reviewer', 1, true))
 assert(text:find('\n  The implementation looks correct.', 1, true))
 assert(
-  text:find('  > Checking the implementation.\n\n  The implementation looks correct.', 1, true),
+  text:find('  Checking the implementation.\n\n  The implementation looks correct.', 1, true),
   'assistant response was not separated from reasoning by exactly one blank line'
 )
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
@@ -186,9 +186,7 @@ local tool_answer = assert(tool_turn_text:find('Tool-backed answer.', 1, true))
 assert(tool_row < reasoning_after_tool, 'later reasoning was moved above an earlier tool call')
 assert(reasoning_after_tool < adjacent_reasoning, 'consecutive reasoning changed order')
 assert(adjacent_reasoning < tool_answer, 'final answer was not kept after tool reasoning')
-local tool_turn = tool_turn_text:sub(tool_row)
-local _, reasoning_heading_count = tool_turn:gsub('%*%*Reasoning summary%*%*', '')
-assert(reasoning_heading_count == 1, 'consecutive reasoning duplicated its heading')
+assert(not tool_turn_text:find('Reasoning summary', 1, true))
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Show code.')
 buffers.begin_response('reviewer', 'code-turn')

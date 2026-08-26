@@ -254,28 +254,34 @@ function M.append_block(member_id, view_id, heading, content)
   append(view, ('%s%s · %s\n\n%s\n'):format(prefix, display_heading, timestamp(now), content), true)
 end
 
-local function begin_inline_activity(view, activity_id, heading)
+local function begin_inline_activity(view, activity_id)
   ensure_day_header(view, options.now())
   flush(view)
   local continuation = view.last_block_kind == 'activity' and view.last_activity ~= nil
   local line_count = vim.api.nvim_buf_line_count(view.buf)
-  local start_row = continuation and view.last_activity.start_row or line_count
+  local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
+  local prefix
+  local body_start_row
+  if last == '' then
+    prefix = ''
+    body_start_row = line_count - 1
+  elseif continuation then
+    prefix = '\n'
+    body_start_row = line_count
+  else
+    prefix = '\n\n'
+    body_start_row = line_count + 1
+  end
   local activity = {
     id = activity_id,
-    start_row = start_row,
-    body_start_row = continuation and line_count or start_row + 2,
+    start_row = continuation and view.last_activity.start_row or body_start_row,
+    body_start_row = body_start_row,
     content = '',
     extmark = continuation and view.last_activity.extmark or nil,
   }
   view.active_activity = activity
   view.activity_records[activity_id] = activity
-  if continuation then
-    view.pending = view.pending .. '  >\n  > '
-  else
-    local last = vim.api.nvim_buf_get_lines(view.buf, -2, -1, false)[1] or ''
-    local prefix = last == '' and '' or '\n\n'
-    view.pending = view.pending .. prefix .. ('  > **%s**\n  >\n  > '):format(heading)
-  end
+  view.pending = view.pending .. prefix .. '  '
   flush(view)
   view.last_activity = {
     start_row = view.active_activity.start_row,
@@ -284,28 +290,15 @@ local function begin_inline_activity(view, activity_id, heading)
   view.last_block_kind = 'activity'
 end
 
-local function touch_activity_heading(view, activity, heading)
-  if not activity then return end
-  with_modifiable(view.buf, function()
-    vim.api.nvim_buf_set_lines(
-      view.buf,
-      activity.start_row,
-      activity.start_row + 1,
-      false,
-      { ('  > **%s**'):format(heading) }
-    )
-  end)
-end
-
 function M.append_activity_delta(member_id, activity_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   if not view.active_activity or view.active_activity.id ~= activity_id then
-    begin_inline_activity(view, activity_id, 'Reasoning summary')
+    begin_inline_activity(view, activity_id)
   end
   view.activity_streaming = true
   view.active_activity.content = view.active_activity.content .. content
-  view.pending = view.pending .. content:gsub('\n', '\n  > ')
+  view.pending = view.pending .. content:gsub('\n', '\n  ')
   schedule_flush(view)
 end
 
@@ -320,7 +313,7 @@ local function replace_activity_content(view, activity, content)
   if #position == 0 then return false end
   local lines = {}
   for _, line in ipairs(vim.split(content:gsub('\r\n', '\n'):gsub('\r', '\n'), '\n', { plain = true })) do
-    table.insert(lines, '  > ' .. line)
+    table.insert(lines, '  ' .. line)
   end
   table.insert(lines, '')
   with_modifiable(view.buf, function()
@@ -366,7 +359,6 @@ function M.complete_activity(member_id, activity_id, content)
     activity.content = content ~= '' and content or activity.content
     activity.completed = true
     if was_active then
-      touch_activity_heading(view, activity, 'Reasoning summary')
       view.active_activity = nil
       view.activity_streaming = false
       if not view.streaming then finalize_render(view) end
@@ -384,10 +376,9 @@ end
 function M.append_activity_block(member_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
-  view.pending = view.pending .. content:gsub('\n', '\n  > ') .. '\n'
+  begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()))
+  view.pending = view.pending .. content:gsub('\n', '\n  ') .. '\n'
   flush(view)
-  touch_activity_heading(view, view.active_activity, heading)
   view.active_activity = nil
   view.activity_streaming = false
   if not view.streaming then finalize_render(view) end

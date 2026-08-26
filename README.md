@@ -247,7 +247,8 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
 renderer dependency. Conversation turns default to `👨 You` and `🤖 Copilot`, without a redundant
 document title. Both labels are configurable through `conversation` setup options. Inline
-reasoning and errors remain part of each conversation buffer.
+reasoning remains part of each conversation buffer as unlabeled text using Neovim's `Comment`
+highlight group, while errors remain visible in their related activity rows and detail panes.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
