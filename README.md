@@ -248,7 +248,9 @@ Conversation, mailbox, and status views are native plain-text `nofile` buffers w
 renderer dependency. Conversation turns default to `👨 You` and `🤖 Copilot`, without a redundant
 document title. Both labels are configurable through `conversation` setup options. Inline
 reasoning remains part of each conversation buffer as unlabeled text using Neovim's `Comment`
-highlight group, while errors remain visible in their related activity rows and detail panes.
+highlight group. Each reasoning section is a native fold that starts open and supports normal
+fold commands such as `zc`, `zo`, and `za`. Errors remain visible in their related activity rows
+and detail panes.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching

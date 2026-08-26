@@ -12,6 +12,7 @@ local status_symbols = {
 }
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local activity_body_namespace = vim.api.nvim_create_namespace('native_copilot_activity_body')
+local activity_fold_namespace = vim.api.nvim_create_namespace('native_copilot_activity_fold')
 local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local options = {
@@ -57,6 +58,21 @@ end
 
 local function finalize_render(view)
   follow_bottom(view)
+end
+
+local function configure_folds(view)
+  if view.id ~= 'conversation' then return end
+  local foldexpr = 'v:lua.require("native_copilot.buffers").foldexpr(v:lnum)'
+  for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
+    if vim.api.nvim_win_is_valid(win) then
+      local first_setup = vim.wo[win].foldmethod ~= 'expr'
+        or vim.wo[win].foldexpr ~= foldexpr
+      vim.wo[win].foldmethod = 'expr'
+      vim.wo[win].foldexpr = foldexpr
+      if first_setup then vim.wo[win].foldlevel = 99 end
+      vim.wo[win].foldenable = true
+    end
+  end
 end
 
 local function create_buffer(name, member_id, view_id)
@@ -183,6 +199,21 @@ local function flush(view)
         end_right_gravity = false,
       }
     )
+    if view.active_activity.plain then
+      view.active_activity.fold_extmark = vim.api.nvim_buf_set_extmark(
+        view.buf,
+        activity_fold_namespace,
+        view.active_activity.body_start_row,
+        0,
+        {
+          id = view.active_activity.fold_extmark,
+          end_row = vim.api.nvim_buf_line_count(view.buf),
+          end_col = 0,
+          right_gravity = false,
+          end_right_gravity = false,
+        }
+      )
+    end
   end
   follow_bottom(view)
 end
@@ -374,6 +405,21 @@ local function replace_activity_content(view, activity, content)
       end_right_gravity = false,
     }
   )
+  if activity.plain then
+    activity.fold_extmark = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      activity_fold_namespace,
+      position[1],
+      0,
+      {
+        id = activity.fold_extmark,
+        end_row = position[1] + #lines,
+        end_col = 0,
+        right_gravity = false,
+        end_right_gravity = false,
+      }
+    )
+  end
   return true
 end
 
@@ -443,6 +489,25 @@ end
 
 function M.status_symbol(status)
   return status_symbols[status] or status_symbols.unknown
+end
+
+function M.foldexpr(lnum)
+  local buf = vim.api.nvim_get_current_buf()
+  local row = lnum - 1
+  local folds = vim.api.nvim_buf_get_extmarks(
+    buf,
+    activity_fold_namespace,
+    0,
+    -1,
+    { details = true }
+  )
+  for _, fold in ipairs(folds) do
+    local start_row = fold[2]
+    local end_row = fold[4].end_row or start_row
+    if row == start_row then return '>1' end
+    if row > start_row and row < end_row then return '1' end
+  end
+  return '0'
 end
 
 local function reconcile_environment_rows(view, item)
@@ -827,6 +892,7 @@ function M.on_shown(buf)
     for _, view in pairs(entry.views) do
       if view.buf == buf then
         if view.id == 'conversation' then entry.unread = 0 end
+        configure_folds(view)
         follow_bottom(view)
         return
       end

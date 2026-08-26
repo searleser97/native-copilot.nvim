@@ -274,6 +274,20 @@ for _, mark in ipairs(activity_marks) do
 end
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
 buffers.on_shown(member.views.conversation.buf)
+assert(vim.wo.foldmethod == 'expr')
+local reasoning_row
+for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line:find('Checking the implementation.', 1, true) then
+    reasoning_row = index
+    break
+  end
+end
+assert(reasoning_row, 'reasoning row was not found')
+assert(buffers.foldexpr(reasoning_row) == '>1', 'reasoning did not start a native fold')
+vim.api.nvim_win_set_cursor(0, { reasoning_row, 0 })
+vim.cmd('normal! zc')
+assert(vim.fn.foldclosed(reasoning_row) == reasoning_row, 'reasoning fold did not close')
+vim.cmd('normal! zo')
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Inspect the plain text lifecycle.')
 buffers.append_activity_delta('reviewer', 'reasoning-2', 'Still reasoning...')
