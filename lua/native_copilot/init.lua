@@ -61,22 +61,6 @@ local function client_commands(fleets)
   }
 end
 
-local function update_conversation_label(member_id)
-  local entry = buffers.get_member(member_id)
-  if not entry then return end
-  local metrics = state.session_metrics[member_id] or {}
-  local model = metrics.model_id or 'detecting…'
-  local aic = tonumber(metrics.aic_used) or 0
-  local label = (' %s  |  Model: %s  |  AIC used: %.3f '):format(
-    entry.display_name,
-    model,
-    aic
-  )
-  for _, win in ipairs(vim.fn.win_findbuf(entry.views.conversation.buf)) do
-    if vim.api.nvim_win_is_valid(win) then vim.wo[win].winbar = label end
-  end
-end
-
 local defaults = {
   node_command = 'node',
   runtime_command = vim.env.NVIM_COPILOT_CMD or vim.env.COPILOT_CLI_CMD,
@@ -139,6 +123,22 @@ local state = {
   session_metrics = {},
   schedules = {},
 }
+
+local function update_conversation_label(member_id)
+  local entry = buffers.get_member(member_id)
+  if not entry then return end
+  local metrics = state.session_metrics[member_id] or {}
+  local model = metrics.model_id or 'detecting…'
+  local aic = tonumber(metrics.aic_used) or 0
+  local label = (' %s  |  Model: %s  |  AIC used: %.3f '):format(
+    entry.display_name,
+    model,
+    aic
+  )
+  for _, win in ipairs(vim.fn.win_findbuf(entry.views.conversation.buf)) do
+    if vim.api.nvim_win_is_valid(win) then vim.wo[win].winbar = label end
+  end
+end
 
 local function notify(message, level)
   vim.notify(message, level or vim.log.levels.INFO, { title = 'Native Copilot' })
