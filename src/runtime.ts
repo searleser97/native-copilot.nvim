@@ -625,6 +625,7 @@ export class CopilotRuntime {
   }
 
   private memberConfig(member: ResolvedMember, tools: Tool<any>[]): SessionConfig {
+    const permissionHandler = this.permissionHandler(member.permission, member.id);
     const config: SessionConfig = {
       clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,
@@ -635,7 +636,7 @@ export class CopilotRuntime {
       enableSessionStore: true,
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: member.initialPrompt },
-      onPermissionRequest: this.permissionHandler(member.permission, member.id),
+      ...(permissionHandler ? { onPermissionRequest: permissionHandler } : {}),
       onMcpAuthRequest: this.mcpAuthHandler(member.id),
       tools,
     };
@@ -654,6 +655,7 @@ export class CopilotRuntime {
 
   private standardSessionConfig(standard: StandardConfig): SessionConfig {
     const permission = standard.permissions;
+    const permissionHandler = this.permissionHandler(permission, "standard");
     const config: SessionConfig = {
       clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,
@@ -663,7 +665,7 @@ export class CopilotRuntime {
       enableSessionStore: true,
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: standard.initialPrompt },
-      onPermissionRequest: this.permissionHandler(permission, "standard"),
+      ...(permissionHandler ? { onPermissionRequest: permissionHandler } : {}),
       onMcpAuthRequest: this.mcpAuthHandler("standard"),
       tools: [this.createStartFleetTool()],
     };
