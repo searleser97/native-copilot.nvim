@@ -900,12 +900,12 @@ fleet._on_event({
   done = true,
   payload = {
     reasoningId = 'late-reasoning',
-    content = 'Late reasoning remains above the assistant response.',
+    content = 'Late reasoning remains after the assistant response.',
   },
 })
 conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
 local late_reasoning_position = conversation_text:find(
-  'Late reasoning remains above the assistant response.',
+  'Late reasoning remains after the assistant response.',
   1,
   true
 )
@@ -915,19 +915,21 @@ local response_position = conversation_text:find(
   true
 )
 assert(
-  late_reasoning_position and response_position and late_reasoning_position < response_position,
-  'late reasoning was rendered below the assistant response'
+  late_reasoning_position and response_position and late_reasoning_position > response_position,
+  'late reasoning was moved ahead of an earlier assistant response'
 )
 activity_marks = vim.api.nvim_buf_get_extmarks(observer_buf, namespace, 0, -1, {
   details = true,
 })
-local assistant_row
-for row, line in ipairs(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false)) do
-  if line:match('^# Copilot · %d%d:%d%d:%d%d$') then assistant_row = row - 1 end
-end
-assert(assistant_row, 'assistant response heading was not found')
 for _, mark in ipairs(activity_marks) do
-  assert(mark[4].end_row <= assistant_row, 'activity highlight leaked into assistant output')
+  local highlighted = table.concat(
+    vim.api.nvim_buf_get_lines(observer_buf, mark[2], mark[4].end_row, false),
+    '\n'
+  )
+  assert(
+    not highlighted:find('Assistant output remains normally highlighted.', 1, true),
+    'activity highlight leaked into assistant output'
+  )
 end
 
 fleet._on_event({
