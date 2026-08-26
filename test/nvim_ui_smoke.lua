@@ -965,7 +965,10 @@ vim.api.nvim_win_set_cursor(0, { assert(line_with(observer_buf, '[tool] powershe
 observer_enter.callback()
 tool_detail_buf = vim.api.nvim_get_current_buf()
 tool_detail_text = buffer_text(tool_detail_buf)
-assert(tool_detail_text:find('Status: failed', 1, true))
+assert(
+  tool_detail_text:find('Status: failed', 1, true),
+  'failed tool detail pane:\n' .. tool_detail_text
+)
 assert(tool_detail_text:find('Command exited with code 1', 1, true))
 assert(not tool_detail_text:find('vim.NIL', 1, true))
 vim.api.nvim_buf_call(tool_detail_buf, function()
