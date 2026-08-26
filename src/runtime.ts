@@ -617,23 +617,6 @@ export class CopilotRuntime {
       });
   }
 
-  private standardPermission(): PermissionProfile | undefined {
-    if (this.config.standard.permissions) {
-      return this.config.standard.permissions;
-    }
-    const profileId = this.config.standard.permissionProfile;
-    if (!profileId) {
-      return undefined;
-    }
-    const profile = this.config.permissionProfiles?.[profileId];
-    if (!profile) {
-      throw new Error(
-        `Unknown standard permission profile "${profileId}"`,
-      );
-    }
-    return profile;
-  }
-
   private memberConfig(member: ResolvedMember, tools: Tool<any>[]): SessionConfig {
     const config: SessionConfig = {
       clientName: "native-copilot.nvim",
@@ -663,7 +646,7 @@ export class CopilotRuntime {
   }
 
   private standardSessionConfig(standard: StandardConfig): SessionConfig {
-    const permission = this.standardPermission();
+    const permission = standard.permissions;
     const config: SessionConfig = {
       clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,

@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 import type {
-  AgentDefinition,
   FleetConfig,
   FleetDefinition,
   FleetValidationResult,
@@ -19,7 +18,7 @@ const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
 const stringList = z.array(z.string().min(1));
 
-const permissionProfileSchema = z.object({
+const permissionsSchema = z.object({
   tools: z.object({
     allow: stringList,
     deny: stringList,
@@ -82,10 +81,8 @@ export const fleetConfigSchema = z.object({
     model: z.string().min(1).optional(),
     reasoningEffort: reasoningEffort.optional(),
     reasoningSummary: reasoningSummary.optional(),
-    permissions: permissionProfileSchema.optional(),
-    permissionProfile: id.optional(),
-  }),
-  permissionProfiles: z.record(id, permissionProfileSchema).optional(),
+    permissions: permissionsSchema.optional(),
+  }).strict(),
   agents: z.record(
     id,
     z.object({
@@ -95,34 +92,20 @@ export const fleetConfigSchema = z.object({
       model: z.string().min(1).optional(),
       reasoningEffort: reasoningEffort.optional(),
       reasoningSummary: reasoningSummary.optional(),
-      permissions: permissionProfileSchema.optional(),
-      permissionProfile: id.optional(),
+      permissions: permissionsSchema.optional(),
       ui: z
         .object({
           icon: z.string().min(1).optional(),
           color: z.string().min(1).optional(),
         })
         .optional(),
-    }),
+    }).strict(),
   ),
   fleets: z.record(id, fleetDefinitionSchema),
-});
+}).strict();
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {
   issues.push({ path, message });
-}
-
-function configuredPermission(
-  config: FleetConfig,
-  owner: AgentDefinition | FleetConfig["standard"],
-): PermissionProfile | undefined {
-  if (owner.permissions) {
-    return owner.permissions;
-  }
-  if (owner.permissionProfile) {
-    return config.permissionProfiles?.[owner.permissionProfile];
-  }
-  return undefined;
 }
 
 function pathWithin(candidate: string, roots: string[], workspace: string): boolean {
@@ -227,15 +210,7 @@ export function validateFleet(
       addIssue(issues, `${memberPath}.agent`, `references unknown agent "${member.agent}"`);
       continue;
     }
-    const profile = configuredPermission(config, agent);
-    if (agent.permissionProfile && !profile) {
-      addIssue(
-        issues,
-        `agents.${member.agent}.permissionProfile`,
-        `references unknown profile "${agent.permissionProfile}"`,
-      );
-      continue;
-    }
+    const profile = agent.permissions;
 
     const recipients = new Set(member.recipients);
     for (const groupId of member.recipientGroups ?? []) {
@@ -383,25 +358,6 @@ export function validateConfig(config: FleetConfig, workspace = process.cwd()): 
   if (config.defaultFleetId && !config.fleets[config.defaultFleetId]) {
     addIssue(issues, "defaultFleetId", `references unknown fleet "${config.defaultFleetId}"`);
   }
-  if (
-    config.standard.permissionProfile &&
-    !config.permissionProfiles?.[config.standard.permissionProfile]
-  ) {
-    addIssue(
-      issues,
-      "standard.permissionProfile",
-      `references unknown profile "${config.standard.permissionProfile}"`,
-    );
-  }
-  for (const [agentId, agent] of Object.entries(config.agents)) {
-    if (agent.permissionProfile && !config.permissionProfiles?.[agent.permissionProfile]) {
-      addIssue(
-        issues,
-        `agents.${agentId}.permissionProfile`,
-        `references unknown profile "${agent.permissionProfile}"`,
-      );
-    }
-  }
   for (const fleetId of Object.keys(config.fleets)) {
     issues.push(...validateFleet(config, fleetId, workspace).issues);
   }
@@ -409,18 +365,7 @@ export function validateConfig(config: FleetConfig, workspace = process.cwd()): 
 }
 
 export function validateHostConfig(config: FleetConfig): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (
-    config.standard.permissionProfile &&
-    !config.permissionProfiles?.[config.standard.permissionProfile]
-  ) {
-    addIssue(
-      issues,
-      "standard.permissionProfile",
-      `references unknown profile "${config.standard.permissionProfile}"`,
-    );
-  }
-  return issues;
+  return [];
 }
 
 export async function loadConfig(path: string, workspace = process.cwd()): Promise<FleetConfig> {

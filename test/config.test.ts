@@ -54,15 +54,37 @@ describe("fleet configuration", () => {
   it("defaults agents without permissions to unrestricted native behavior", async () => {
     const config = await exampleConfig();
     delete config.standard.permissions;
-    delete config.standard.permissionProfile;
     delete config.agents.implementer!.permissions;
-    delete config.agents.implementer!.permissionProfile;
 
     expect(validateConfig(config, "C:\\work")).toEqual([]);
     expect(
       validateFleet(config, "engineering", "C:\\work").fleet?.members.get("implementer")
         ?.permission,
     ).toBeUndefined();
+  });
+
+  it("rejects the removed permission profile schema", async () => {
+    const config = await exampleConfig();
+    const legacy = {
+      ...config,
+      permissionProfiles: {
+        unrestricted: config.agents.planner!.permissions,
+      },
+    };
+
+    expect(fleetConfigSchema.safeParse(legacy).success).toBe(false);
+    expect(
+      fleetConfigSchema.safeParse({
+        ...config,
+        agents: {
+          ...config.agents,
+          implementer: {
+            ...config.agents.implementer!,
+            permissionProfile: "unrestricted",
+          },
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects dangling recipients before startup", async () => {
