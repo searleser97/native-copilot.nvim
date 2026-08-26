@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 import type {
+  AgentDefinition,
   FleetConfig,
   FleetDefinition,
   FleetValidationResult,
@@ -81,9 +82,10 @@ export const fleetConfigSchema = z.object({
     model: z.string().min(1).optional(),
     reasoningEffort: reasoningEffort.optional(),
     reasoningSummary: reasoningSummary.optional(),
-    permissionProfile: id,
+    permissions: permissionProfileSchema.optional(),
+    permissionProfile: id.optional(),
   }),
-  permissionProfiles: z.record(id, permissionProfileSchema),
+  permissionProfiles: z.record(id, permissionProfileSchema).optional(),
   agents: z.record(
     id,
     z.object({
@@ -93,7 +95,8 @@ export const fleetConfigSchema = z.object({
       model: z.string().min(1).optional(),
       reasoningEffort: reasoningEffort.optional(),
       reasoningSummary: reasoningSummary.optional(),
-      permissionProfile: id,
+      permissions: permissionProfileSchema.optional(),
+      permissionProfile: id.optional(),
       ui: z
         .object({
           icon: z.string().min(1).optional(),
@@ -107,6 +110,19 @@ export const fleetConfigSchema = z.object({
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {
   issues.push({ path, message });
+}
+
+function configuredPermission(
+  config: FleetConfig,
+  owner: AgentDefinition | FleetConfig["standard"],
+): PermissionProfile | undefined {
+  if (owner.permissions) {
+    return owner.permissions;
+  }
+  if (owner.permissionProfile) {
+    return config.permissionProfiles?.[owner.permissionProfile];
+  }
+  return undefined;
 }
 
 function pathWithin(candidate: string, roots: string[], workspace: string): boolean {
@@ -211,8 +227,8 @@ export function validateFleet(
       addIssue(issues, `${memberPath}.agent`, `references unknown agent "${member.agent}"`);
       continue;
     }
-    const profile = config.permissionProfiles[agent.permissionProfile];
-    if (!profile) {
+    const profile = configuredPermission(config, agent);
+    if (agent.permissionProfile && !profile) {
       addIssue(
         issues,
         `agents.${member.agent}.permissionProfile`,
@@ -251,17 +267,25 @@ export function validateFleet(
       description: agent.description,
       initialPrompt,
       reasoningSummary: member.reasoningSummary ?? agent.reasoningSummary ?? "detailed",
-      permission: narrowPermission(
+      recipients,
+      canBroadcast: member.canBroadcast ?? false,
+      autoStart: member.autoStart ?? true,
+    };
+    if (profile) {
+      resolved.permission = narrowPermission(
         profile,
         member.permissionNarrowing,
         workspace,
         issues,
         `${memberPath}.permissionNarrowing`,
-      ),
-      recipients,
-      canBroadcast: member.canBroadcast ?? false,
-      autoStart: member.autoStart ?? true,
-    };
+      );
+    } else if (member.permissionNarrowing) {
+      addIssue(
+        issues,
+        `${memberPath}.permissionNarrowing`,
+        "requires permissions to be configured on the referenced agent",
+      );
+    }
     const model = member.model ?? agent.model;
     if (model !== undefined) {
       resolved.model = model;
@@ -359,7 +383,10 @@ export function validateConfig(config: FleetConfig, workspace = process.cwd()): 
   if (config.defaultFleetId && !config.fleets[config.defaultFleetId]) {
     addIssue(issues, "defaultFleetId", `references unknown fleet "${config.defaultFleetId}"`);
   }
-  if (!config.permissionProfiles[config.standard.permissionProfile]) {
+  if (
+    config.standard.permissionProfile &&
+    !config.permissionProfiles?.[config.standard.permissionProfile]
+  ) {
     addIssue(
       issues,
       "standard.permissionProfile",
@@ -367,7 +394,7 @@ export function validateConfig(config: FleetConfig, workspace = process.cwd()): 
     );
   }
   for (const [agentId, agent] of Object.entries(config.agents)) {
-    if (!config.permissionProfiles[agent.permissionProfile]) {
+    if (agent.permissionProfile && !config.permissionProfiles?.[agent.permissionProfile]) {
       addIssue(
         issues,
         `agents.${agentId}.permissionProfile`,
@@ -383,7 +410,10 @@ export function validateConfig(config: FleetConfig, workspace = process.cwd()): 
 
 export function validateHostConfig(config: FleetConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  if (!config.permissionProfiles[config.standard.permissionProfile]) {
+  if (
+    config.standard.permissionProfile &&
+    !config.permissionProfiles?.[config.standard.permissionProfile]
+  ) {
     addIssue(
       issues,
       "standard.permissionProfile",

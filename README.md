@@ -129,8 +129,10 @@ task, tool, environment, or schedule rows. Use `/tasks` or
 `:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
 When Copilot requests an explicit managed permission, the plugin shows an `Approve once` /
-`Reject` prompt. Fleet permission profiles remain hard ceilings: requests outside a member's
-configured path, command, network, Git, or external-action policy are rejected before the prompt.
+`Reject` prompt. Standard mode and Fleet agents without an explicit `permissions` object otherwise
+allow all operations, preserving the configured Copilot CLI launcher's permission behavior.
+Optional permissions are declared directly on an agent and remain hard ceilings: requests outside
+its configured path, command, network, Git, or external-action policy are rejected before the prompt.
 Closing the prompt rejects the request, and pending requests are rejected when the host shuts down.
 Interactive approval is returned to the SDK as a one-request approval and is not persisted.
 
@@ -163,10 +165,13 @@ The plugin does not select Telescope merely because it is installed.
 
 The JSON file separates reusable agents from Fleet-local members:
 
-- `permissionProfiles` define user-approved ceilings.
-- `agents` define reusable prompts, models, reasoning effort, and UI metadata.
+- `agents` define reusable prompts, models, reasoning effort, UI metadata, and optional permission
+  ceilings.
+- Omitting `permissions` enables all operations by default; Standard mode also defaults to enabled.
 - `fleets` compose those agents into distinct members.
-- Fleet members define direct recipients, recipient groups, broadcast access, permission narrowing, and lazy/automatic startup.
+- Fleet members define direct recipients, recipient groups, broadcast access, permission narrowing,
+  and lazy/automatic startup. Permission narrowing requires the referenced agent to define
+  `permissions`.
 - `entryMember` controls the initially selected recipient.
 - `coordinatorMember` is an ordinary member reference, not a hard-coded role.
 

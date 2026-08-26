@@ -91,6 +91,21 @@ describe("instanceSessionId", () => {
     });
   });
 
+  it("allows all requests when an agent has no custom permission filter", () => {
+    const request = {
+      kind: "mcp" as const,
+      serverName: "example",
+      toolName: "example-write",
+      arguments: {},
+      toolCallId: "tool-call",
+      managedApprovalRequired: false,
+    };
+
+    expect(permissionDecision(undefined, "E:\\repo", request)).toEqual({
+      kind: "approve-once",
+    });
+  });
+
   it("allows managed requests inside the Fleet permission ceiling to reach the UI", () => {
     const request = {
       kind: "read" as const,

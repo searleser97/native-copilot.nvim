@@ -10,7 +10,8 @@ export interface StandardConfig {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
-  permissionProfile: string;
+  permissions?: PermissionProfile;
+  permissionProfile?: string;
 }
 
 export interface ToolPolicy {
@@ -39,7 +40,8 @@ export interface AgentDefinition {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
-  permissionProfile: string;
+  permissions?: PermissionProfile;
+  permissionProfile?: string;
   ui?: {
     icon?: string;
     color?: string;
@@ -90,7 +92,7 @@ export interface FleetConfig {
   schemaVersion: 1;
   defaultFleetId?: string;
   standard: StandardConfig;
-  permissionProfiles: Record<string, PermissionProfile>;
+  permissionProfiles?: Record<string, PermissionProfile>;
   agents: Record<string, AgentDefinition>;
   fleets: Record<string, FleetDefinition>;
 }
@@ -104,7 +106,7 @@ export interface ResolvedMember {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary: ReasoningSummary;
-  permission: PermissionProfile;
+  permission?: PermissionProfile;
   recipients: Set<string>;
   canBroadcast: boolean;
   autoStart: boolean;

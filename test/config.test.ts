@@ -26,6 +26,8 @@ describe("fleet configuration", () => {
     expect(result.valid).toBe(true);
     expect(result.fleet?.members.get("planner")?.recipients).toContain("coordinator");
     expect(result.fleet?.members.get("planner")?.reasoningSummary).toBe("detailed");
+    expect(result.fleet?.members.get("planner")?.permission?.commands).toBe(false);
+    expect(result.fleet?.members.get("implementer")?.permission).toBeUndefined();
   });
 
   it("rejects a missing coordinator fallback edge", async () => {
@@ -41,12 +43,26 @@ describe("fleet configuration", () => {
 
   it("rejects permission elevation through path overrides", async () => {
     const config = await exampleConfig();
-    config.fleets.engineering!.members.implementer!.permissionNarrowing = {
+    config.fleets.engineering!.members.planner!.permissionNarrowing = {
       writePaths: ["C:\\outside"],
     };
     const result = validateFleet(config, "engineering", "C:\\work");
     expect(result.valid).toBe(false);
     expect(result.issues.some((issue) => issue.message.includes("exceeds"))).toBe(true);
+  });
+
+  it("defaults agents without permissions to unrestricted native behavior", async () => {
+    const config = await exampleConfig();
+    delete config.standard.permissions;
+    delete config.standard.permissionProfile;
+    delete config.agents.implementer!.permissions;
+    delete config.agents.implementer!.permissionProfile;
+
+    expect(validateConfig(config, "C:\\work")).toEqual([]);
+    expect(
+      validateFleet(config, "engineering", "C:\\work").fleet?.members.get("implementer")
+        ?.permission,
+    ).toBeUndefined();
   });
 
   it("rejects dangling recipients before startup", async () => {

@@ -210,10 +210,13 @@ function reject(feedback: string): PermissionRequestResult {
 }
 
 export function permissionDecision(
-  profile: PermissionProfile,
+  profile: PermissionProfile | undefined,
   workspace: string,
   request: PermissionRequest,
 ): PermissionRequestResult {
+  if (!profile) {
+    return { kind: "approve-once" };
+  }
   switch (request.kind) {
       case "read":
         return isWithin(request.path, profile.paths.read, workspace)
@@ -525,7 +528,10 @@ export class CopilotRuntime {
     return true;
   }
 
-  private permissionHandler(profile: PermissionProfile, memberId: string): PermissionHandler {
+  private permissionHandler(
+    profile: PermissionProfile | undefined,
+    memberId: string,
+  ): PermissionHandler {
     return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
       const decision = permissionDecision(profile, this.workspace, request);
       if (decision.kind !== "approve-once" || !request.managedApprovalRequired) {
@@ -611,11 +617,18 @@ export class CopilotRuntime {
       });
   }
 
-  private standardPermission(): PermissionProfile {
-    const profile = this.config.permissionProfiles[this.config.standard.permissionProfile];
+  private standardPermission(): PermissionProfile | undefined {
+    if (this.config.standard.permissions) {
+      return this.config.standard.permissions;
+    }
+    const profileId = this.config.standard.permissionProfile;
+    if (!profileId) {
+      return undefined;
+    }
+    const profile = this.config.permissionProfiles?.[profileId];
     if (!profile) {
       throw new Error(
-        `Unknown standard permission profile "${this.config.standard.permissionProfile}"`,
+        `Unknown standard permission profile "${profileId}"`,
       );
     }
     return profile;
@@ -635,9 +648,11 @@ export class CopilotRuntime {
       onPermissionRequest: this.permissionHandler(member.permission, member.id),
       onMcpAuthRequest: this.mcpAuthHandler(member.id),
       tools,
-      availableTools: sdkToolPatterns(member.permission.tools.allow),
-      excludedTools: sdkToolPatterns(member.permission.tools.deny),
     };
+    if (member.permission) {
+      config.availableTools = sdkToolPatterns(member.permission.tools.allow);
+      config.excludedTools = sdkToolPatterns(member.permission.tools.deny);
+    }
     if (member.model !== undefined) {
       config.model = member.model;
     }
@@ -661,9 +676,11 @@ export class CopilotRuntime {
       onPermissionRequest: this.permissionHandler(permission, "standard"),
       onMcpAuthRequest: this.mcpAuthHandler("standard"),
       tools: [this.createStartFleetTool()],
-      availableTools: sdkToolPatterns(permission.tools.allow),
-      excludedTools: sdkToolPatterns(permission.tools.deny),
     };
+    if (permission) {
+      config.availableTools = sdkToolPatterns(permission.tools.allow);
+      config.excludedTools = sdkToolPatterns(permission.tools.deny);
+    }
     if (standard.model !== undefined) {
       config.model = standard.model;
     }
