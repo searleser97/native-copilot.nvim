@@ -275,6 +275,7 @@ end
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
 buffers.on_shown(member.views.conversation.buf)
 assert(vim.wo.foldmethod == 'expr')
+assert(vim.wo.foldminlines == 0)
 local reasoning_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line:find('Checking the implementation.', 1, true) then

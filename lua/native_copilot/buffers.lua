@@ -70,6 +70,7 @@ local function configure_folds(view)
       vim.wo[win].foldmethod = 'expr'
       vim.wo[win].foldexpr = foldexpr
       if first_setup then vim.wo[win].foldlevel = 99 end
+      vim.wo[win].foldminlines = 0
       vim.wo[win].foldenable = true
     end
   end
