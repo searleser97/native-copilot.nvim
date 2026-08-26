@@ -328,7 +328,7 @@ prompt_submit.callback()
 protocol.send = original_send
 assert(invoked_command.type == 'command.invoke')
 assert(invoked_command.payload.name == 'context')
-assert(buffer_text(coordinator_buf):match('# You · %d%d:%d%d:%d%d\n\n/context'))
+assert(buffer_text(coordinator_buf):match('👨 You · %d%d:%d%d:%d%d\n\n/context'))
 assert(not buffer_text(coordinator_buf):find('[command]', 1, true))
 fleet._on_event({
   v = 1,
@@ -344,7 +344,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '# Copilot · %d%d:%d%d:%d%d\n\nContext usage output'
+  '🤖 Copilot · %d%d:%d%d:%d%d\n\nContext usage output'
 ))
 protocol.send = function(message_type, payload)
   invoked_command = { type = message_type, payload = payload }
@@ -520,10 +520,10 @@ assert(prompt_sends[1].type == 'prompt.send')
 assert(prompt_sends[1].payload.content == 'Implement the edited first feature')
 assert(#vim.fn.win_findbuf(prompt_queue_buf) == 0, 'empty prompt queue pane remained open')
 assert(buffer_text(coordinator_buf):match(
-  '# You · %d%d:%d%d:%d%d\n\nImplement the edited first feature'
+  '👨 You · %d%d:%d%d:%d%d\n\nImplement the edited first feature'
 ))
 assert(buffer_text(coordinator_buf):match(
-  '# Copilot · %d%d:%d%d:%d%d · ○ processing…'
+  '🤖 Copilot · %d%d:%d%d:%d%d · ○ processing…'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
@@ -587,7 +587,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '# You · %d%d:%d%d:%d%d\n\nCheck deployment health'
+  '👨 You · %d%d:%d%d:%d%d\n\nCheck deployment health'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
@@ -950,7 +950,7 @@ fleet._on_event({
   },
 })
 conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
-assert(conversation_text:find('# Copilot', 1, true))
+assert(conversation_text:find('🤖 Copilot', 1, true))
 assert(conversation_text:find('Dynamically discovered command output.', 1, true))
 
 fleet.close()

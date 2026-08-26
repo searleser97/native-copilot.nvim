@@ -49,6 +49,11 @@ require("native_copilot").setup({
   stream_flush_ms = 80,
   follow_bottom = true,
   timestamp_format = '%H:%M:%S',
+  conversation = {
+    user_label = '👨 You',
+    copilot_label = '🤖 Copilot',
+    day_header_format = '%A, %B %d',
+  },
   prompt_queue_height = 5,
   task_detail_height = 12,
   frontend = {
@@ -120,11 +125,11 @@ Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
 transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
 name and status in the timeline; `<Enter>` reveals their arguments and result or error in the
-floating detail pane. The active turn shows `○ processing…` beside `# Copilot`; it does not create
+floating detail pane. The active turn shows `○ processing…` beside `🤖 Copilot`; it does not create
 a separate prompt-status row. Prompts submitted while Copilot is busy stay in a FIFO pane between
 the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
-Slash commands are rendered as normal `# You` turns rather than duplicated `[command]` rows; their
-text output remains under `# Copilot`, and any work they start is represented by the resulting
+Slash commands are rendered as normal `👨 You` turns rather than duplicated `[command]` rows; their
+text output remains under `🤖 Copilot`, and any work they start is represented by the resulting
 task, tool, environment, or schedule rows. Use `/tasks` or
 `:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
@@ -235,8 +240,9 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 ## Rendering and observability
 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
-renderer dependency. Conversation turns use only `# You` and `# Copilot` labels, without a
-redundant document title. Inline reasoning and errors remain part of each conversation buffer.
+renderer dependency. Conversation turns default to `👨 You` and `🤖 Copilot`, without a redundant
+document title. Both labels are configurable through `conversation` setup options. Inline
+reasoning and errors remain part of each conversation buffer.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
@@ -247,7 +253,10 @@ output. Set `follow_bottom = false` to preserve the current viewport instead.
 
 Conversation turns and activity rows show local timestamps. Timeline timestamps change whenever a
 row is updated, and a streamed Copilot response receives its final timestamp when the response
-completes. Customize the display with `timestamp_format`, using an `os.date` format string.
+completes. Customize the display with `timestamp_format`, using an `os.date` format string. The
+conversation starts with a local-date divider and adds another before the first newly rendered item
+after midnight. `conversation.day_header_format` controls that divider without repeating the date
+on every row.
 The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
 session. Both values refresh from SDK usage events after every model call.
 
@@ -286,7 +295,7 @@ feature policy.
 
 `/every`, `/after`, and model-created `manage_schedule` entries appear as stable `[schedule]` rows.
 Creation, re-arming, and cancellation update the original row. When a schedule fires, its message
-appears as a `# You` turn and its active response state appears beside `# Copilot`. Press `<Enter>`
+appears as a `👨 You` turn and its active response state appears beside `🤖 Copilot`. Press `<Enter>`
 on a schedule row to inspect its prompt and cadence without expanding that content in the main
 timeline.
 

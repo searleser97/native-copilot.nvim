@@ -83,7 +83,15 @@ end)
 commands.set_catalog('reviewer', command_catalog)
 assert(catalog_notified)
 unsubscribe()
-buffers.setup()
+local fake_now = os.time({ year = 2026, month = 8, day = 26, hour = 23, min = 59, sec = 55 })
+buffers.setup({
+  now = function() return fake_now end,
+  conversation = {
+    user_label = 'USER',
+    copilot_label = 'BOT',
+    day_header_format = '%m-%d',
+  },
+})
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
 assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')
@@ -99,7 +107,8 @@ local streaming_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
-assert(streaming_text:match('# Copilot · %d%d:%d%d:%d%d · ○ processing…'))
+assert(streaming_text:find('──────── 08-26 ────────', 1, true))
+assert(streaming_text:match('BOT · %d%d:%d%d:%d%d · ○ processing…'))
 buffers.append_conversation_delta('reviewer', 'message-1', 'looks correct.')
 buffers.complete_conversation('reviewer', 'message-1', 'The implementation looks correct.')
 buffers.append_activity_delta('reviewer', 'reasoning-late', 'Late but ')
@@ -110,25 +119,26 @@ local text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
-assert(text:find('# You', 1, true))
-assert(text:match('# You · %d%d:%d%d:%d%d'))
+assert(text:find('USER', 1, true))
+assert(text:match('USER · %d%d:%d%d:%d%d'))
 assert(text:find('Please review this.', 1, true))
 assert(text:find('> **Reasoning summary**', 1, true))
 assert(text:find('> Checking the implementation.', 1, true))
-assert(text:find('# Copilot', 1, true))
-assert(text:match('# Copilot · %d%d:%d%d:%d%d → %d%d:%d%d:%d%d'))
+assert(text:find('BOT', 1, true))
+assert(text:match('BOT · %d%d:%d%d:%d%d'))
 assert(not text:find('○ processing…', 1, true))
 assert(not text:find('# Reviewer', 1, true))
 assert(text:find('The implementation looks correct.', 1, true))
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
-local assistant_heading = text:find('# Copilot', 1, true)
+local assistant_heading = text:find('BOT ·', 1, true)
 assert(late_reasoning and assistant_heading and late_reasoning > assistant_heading)
 local _, count = text:gsub('The implementation looks correct%.', '')
 assert(count == 1, 'stream final message was duplicated')
 local _, reasoning_count = text:gsub('Checking the implementation%.', '')
 assert(reasoning_count == 1, 'stream final reasoning was duplicated')
 
-local _, headings_before_tool_turn = text:gsub('# Copilot ·', '')
+fake_now = os.time({ year = 2026, month = 8, day = 27, hour = 0, min = 0, sec = 5 })
+local _, headings_before_tool_turn = text:gsub('BOT ·', '')
 buffers.append_block('reviewer', 'conversation', 'You', 'Use a tool, then answer.')
 buffers.begin_response('reviewer', 'tool-turn')
 buffers.complete_conversation('reviewer', 'tool-call-message', '')
@@ -147,12 +157,17 @@ local tool_turn_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
   '\n'
 )
-local _, headings_after_tool_turn = tool_turn_text:gsub('# Copilot ·', '')
+local _, headings_after_tool_turn = tool_turn_text:gsub('BOT ·', '')
 assert(
   headings_after_tool_turn == headings_before_tool_turn + 1,
   'tool-only assistant message created a duplicate Copilot heading'
 )
 assert(not tool_turn_text:find('○ processing…', 1, true))
+local second_day = assert(tool_turn_text:find('──────── 08-27 ────────', 1, true))
+local second_prompt = assert(tool_turn_text:find('Use a tool, then answer.', 1, true))
+assert(second_day < second_prompt, 'new-day divider was not rendered before the next message')
+local _, day_header_count = tool_turn_text:gsub('──────── 08%-2%d ────────', '')
+assert(day_header_count == 2, 'conversation did not render exactly one divider per day')
 local tool_row = assert(tool_turn_text:find('[tool] search', 1, true))
 local reasoning_after_tool = assert(tool_turn_text:find('Checking the tool result.', 1, true))
 local adjacent_reasoning = assert(tool_turn_text:find('Confirming the result is relevant.', 1, true))

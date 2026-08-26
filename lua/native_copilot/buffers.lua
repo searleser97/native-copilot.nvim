@@ -8,10 +8,16 @@ local options = {
   stream_flush_ms = 80,
   follow_bottom = true,
   timestamp_format = '%H:%M:%S',
+  now = os.time,
+  conversation = {
+    user_label = '👨 You',
+    copilot_label = '🤖 Copilot',
+    day_header_format = '%A, %B %d',
+  },
 }
 
-local function timestamp()
-  return os.date(options.timestamp_format)
+local function timestamp(now)
+  return os.date(options.timestamp_format, now or options.now())
 end
 
 local function with_modifiable(buf, operation)
@@ -70,7 +76,7 @@ local function create_buffer(name, member_id, view_id)
     active_message = nil,
     awaiting_response = nil,
     message_heading = nil,
-    message_started_at = nil,
+    current_day = nil,
     last_block_kind = nil,
     last_activity = nil,
     timeline = {},
@@ -155,6 +161,25 @@ function M.setup(user_options)
   options = vim.tbl_deep_extend('force', options, user_options or {})
 end
 
+local function ensure_day_header(view, now)
+  if view.id ~= 'conversation' then return now end
+  now = now or options.now()
+  local day = os.date('%Y-%m-%d', now)
+  if view.current_day == day then return now end
+
+  flush(view)
+  local line_count = vim.api.nvim_buf_line_count(view.buf)
+  local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
+  local prefix = last == '' and '' or '\n'
+  view.pending = view.pending
+    .. prefix
+    .. ('──────── %s ────────\n'):format(os.date(options.conversation.day_header_format, now))
+  flush(view)
+  view.current_day = day
+  view.last_block_kind = nil
+  return now
+end
+
 local function append(view, text, final)
   if text == '' then return end
   view.last_block_kind = nil
@@ -171,11 +196,21 @@ end
 function M.append_block(member_id, view_id, heading, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
-  local level = view_id == 'conversation' and '#' or '##'
-  append(view, ('\n%s %s · %s\n\n%s\n'):format(level, heading, timestamp(), content), true)
+  local now = ensure_day_header(view, options.now())
+  local display_heading
+  if view_id == 'conversation' and heading == 'You' then
+    display_heading = options.conversation.user_label
+  elseif view_id == 'conversation' and heading == 'Copilot' then
+    display_heading = options.conversation.copilot_label
+  else
+    local level = view_id == 'conversation' and '#' or '##'
+    display_heading = ('%s %s'):format(level, heading)
+  end
+  append(view, ('\n%s · %s\n\n%s\n'):format(display_heading, timestamp(now), content), true)
 end
 
 local function begin_inline_activity(view, activity_id, heading)
+  local now = ensure_day_header(view, options.now())
   flush(view)
   local continuation = view.last_block_kind == 'activity' and view.last_activity ~= nil
   local line_count = vim.api.nvim_buf_line_count(view.buf)
@@ -190,7 +225,7 @@ local function begin_inline_activity(view, activity_id, heading)
   if continuation then
     view.pending = view.pending .. '>\n> '
   else
-    view.pending = view.pending .. ('\n> **%s** · %s\n>\n> '):format(heading, timestamp())
+    view.pending = view.pending .. ('\n> **%s** · %s\n>\n> '):format(heading, timestamp(now))
   end
   flush(view)
   view.last_activity = {
@@ -286,7 +321,7 @@ function M.append_activity_block(member_id, heading, content)
   if not view.streaming then finalize_render(view) end
 end
 
-local function timeline_lines(kind, label, status, detail)
+local function timeline_lines(kind, label, status, detail, now)
   local symbols = {
     running = '○',
     idle = '○',
@@ -304,7 +339,7 @@ local function timeline_lines(kind, label, status, detail)
       kind,
       label,
       suffix,
-      timestamp()
+      timestamp(now)
     ),
   }
 end
@@ -331,8 +366,9 @@ function M.upsert_timeline(member_id, item_id, item)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   flush(view)
+  local now = options.now()
   local record = view.timeline[item_id]
-  local lines = timeline_lines(item.kind, item.label, item.status, item.detail)
+  local lines = timeline_lines(item.kind, item.label, item.status, item.detail, now)
   local start_row = reconcile_environment_rows(view, item)
   if start_row then
     with_modifiable(view.buf, function()
@@ -355,6 +391,7 @@ function M.upsert_timeline(member_id, item_id, item)
   end
 
   if not start_row then
+    ensure_day_header(view, now)
     start_row = vim.api.nvim_buf_line_count(view.buf)
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
@@ -451,8 +488,8 @@ local function touch_message_heading(view, status)
       position[1] + 1,
       false,
       {
-        ('# Copilot · %s → %s%s'):format(
-          view.message_started_at or completed_at,
+        ('%s · %s%s'):format(
+          options.conversation.copilot_label,
           completed_at,
           status and (' · ' .. status) or ''
         ),
@@ -462,11 +499,19 @@ local function touch_message_heading(view, status)
 end
 
 local function begin_response(view, response_id)
+  local now = ensure_day_header(view, options.now())
   flush(view)
   vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
   local heading_row = vim.api.nvim_buf_line_count(view.buf)
-  view.message_started_at = timestamp()
-  append(view, ('\n# Copilot · %s · ○ processing…\n\n'):format(view.message_started_at), false)
+  local started_at = timestamp(now)
+  append(
+    view,
+    ('\n%s · %s · ○ processing…\n\n'):format(
+      options.conversation.copilot_label,
+      started_at
+    ),
+    false
+  )
   flush(view)
   view.message_heading = vim.api.nvim_buf_set_extmark(
     view.buf,

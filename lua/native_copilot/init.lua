@@ -74,6 +74,11 @@ local defaults = {
   stream_flush_ms = 80,
   follow_bottom = true,
   timestamp_format = '%H:%M:%S',
+  conversation = {
+    user_label = '👨 You',
+    copilot_label = '🤖 Copilot',
+    day_header_format = '%A, %B %d',
+  },
   frontend = {
     completion = 'native',
     picker = 'native',
@@ -2042,6 +2047,7 @@ function M.setup(user_options)
     stream_flush_ms = options.stream_flush_ms,
     follow_bottom = options.follow_bottom,
     timestamp_format = options.timestamp_format,
+    conversation = options.conversation,
   })
   vim.keymap.set('n', options.mappings.toggle, M.toggle, {
     desc = 'Toggle native Copilot',
