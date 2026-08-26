@@ -177,12 +177,13 @@ end
 local function begin_inline_activity(view, activity_id, heading)
   flush(view)
   local continuation = view.last_block_kind == 'activity' and view.last_activity ~= nil
-  local start_row = continuation
-      and view.last_activity.start_row
-      or vim.api.nvim_buf_line_count(view.buf)
+  local line_count = vim.api.nvim_buf_line_count(view.buf)
+  local start_row = continuation and view.last_activity.start_row or line_count
   view.active_activity = {
     id = activity_id,
     start_row = start_row,
+    body_start_row = continuation and line_count or start_row + 2,
+    content = '',
     extmark = continuation and view.last_activity.extmark or nil,
   }
   if continuation then
@@ -218,8 +219,40 @@ function M.append_activity_delta(member_id, activity_id, content)
     begin_inline_activity(view, activity_id, 'Reasoning summary')
   end
   view.activity_streaming = true
+  view.active_activity.content = view.active_activity.content .. content
   view.pending = view.pending .. content:gsub('\n', '\n> ')
   schedule_flush(view)
+end
+
+local function replace_activity_content(view, content)
+  local lines = {}
+  for _, line in ipairs(vim.split(content:gsub('\r\n', '\n'):gsub('\r', '\n'), '\n', { plain = true })) do
+    table.insert(lines, '> ' .. line)
+  end
+  table.insert(lines, '')
+  with_modifiable(view.buf, function()
+    vim.api.nvim_buf_set_lines(
+      view.buf,
+      view.active_activity.body_start_row,
+      vim.api.nvim_buf_line_count(view.buf),
+      false,
+      lines
+    )
+  end)
+  view.active_activity.extmark = vim.api.nvim_buf_set_extmark(
+    view.buf,
+    activity_namespace,
+    view.active_activity.start_row,
+    0,
+    {
+      id = view.active_activity.extmark,
+      end_row = vim.api.nvim_buf_line_count(view.buf),
+      end_col = 0,
+      hl_group = 'Comment',
+      hl_eol = true,
+      priority = 200,
+    }
+  )
 end
 
 function M.complete_activity(member_id, activity_id, content)
@@ -228,6 +261,9 @@ function M.complete_activity(member_id, activity_id, content)
   if view.active_activity and view.active_activity.id == activity_id then
     view.pending = view.pending .. '\n'
     flush(view)
+    if content ~= '' and content ~= view.active_activity.content then
+      replace_activity_content(view, content)
+    end
     touch_activity_heading(view, 'Reasoning summary')
     view.active_activity = nil
     view.activity_streaming = false
