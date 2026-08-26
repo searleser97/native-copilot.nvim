@@ -70,6 +70,7 @@ local function create_buffer(name, member_id, view_id)
     active_message = nil,
     awaiting_response = nil,
     message_heading = nil,
+    message_started_at = nil,
     last_block_kind = nil,
     last_activity = nil,
     timeline = {},
@@ -442,13 +443,20 @@ local function touch_message_heading(view, status)
     {}
   )
   if #position == 0 then return end
+  local completed_at = timestamp()
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(
       view.buf,
       position[1],
       position[1] + 1,
       false,
-      { ('# Copilot · %s%s'):format(timestamp(), status and (' · ' .. status) or '') }
+      {
+        ('# Copilot · %s → %s%s'):format(
+          view.message_started_at or completed_at,
+          completed_at,
+          status and (' · ' .. status) or ''
+        ),
+      }
     )
   end)
 end
@@ -457,7 +465,8 @@ local function begin_response(view, response_id)
   flush(view)
   vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
   local heading_row = vim.api.nvim_buf_line_count(view.buf)
-  append(view, ('\n# Copilot · %s · ○ processing…\n\n'):format(timestamp()), false)
+  view.message_started_at = timestamp()
+  append(view, ('\n# Copilot · %s · ○ processing…\n\n'):format(view.message_started_at), false)
   flush(view)
   view.message_heading = vim.api.nvim_buf_set_extmark(
     view.buf,
