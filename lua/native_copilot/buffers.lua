@@ -5,6 +5,7 @@ local render_generation = {}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local message_anchor_namespace = vim.api.nvim_create_namespace('native_copilot_message_anchor')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
+local render_markdown_namespace = vim.api.nvim_create_namespace('render-markdown.nvim')
 local options = {
   render_debounce_ms = 200,
   stream_flush_ms = 80,
@@ -34,6 +35,9 @@ local function render_markdown(buf, enabled)
         event = 'NativeCopilot',
       })
     else
+      -- render-markdown debounces buf_disable(), so clear its stale virtual
+      -- decorations synchronously before replacing timeline source lines.
+      vim.api.nvim_buf_clear_namespace(buf, render_markdown_namespace, 0, -1)
       renderer.buf_disable()
     end
   end)

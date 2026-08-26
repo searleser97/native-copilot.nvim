@@ -161,6 +161,37 @@ vim.wait(80)
 assert(#render_calls == 2, 'completed reasoning did not render')
 
 buffers.set_state('reviewer', 'busy')
+local renderer_namespace = vim.api.nvim_create_namespace('render-markdown.nvim')
+vim.api.nvim_buf_set_extmark(member.views.conversation.buf, renderer_namespace, 0, 0, {
+  virt_text = { { 'stale-rendered-row', 'Comment' } },
+})
+buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
+  kind = 'environment',
+  label = 'MCP myenghub',
+  status = 'running',
+  detail = 'pending',
+})
+assert(
+  #vim.api.nvim_buf_get_extmarks(
+    member.views.conversation.buf,
+    renderer_namespace,
+    0,
+    -1,
+    {}
+  ) == 0,
+  'timeline mutation left stale render-markdown decorations visible'
+)
+buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
+  kind = 'environment',
+  label = 'MCP myenghub',
+  status = 'completed',
+  detail = 'connected',
+})
+local mcp_rows = 0
+for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line:find('[environment] MCP myenghub', 1, true) then mcp_rows = mcp_rows + 1 end
+end
+assert(mcp_rows == 1, 'MCP status transition duplicated the underlying timeline row')
 buffers.append_activity_block('reviewer', 'Error', 'Activity-only terminal output.')
 vim.wait(80)
 assert(#render_calls == 3, 'activity-only output did not render while member state was busy')
