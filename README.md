@@ -125,9 +125,9 @@ changes, so completion does not reorder earlier work.
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
 transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
-name and status in the timeline; failed tool and task rows also include a concise error summary.
-`<Enter>` reveals complete arguments, results, and errors in the floating detail pane. The active
-Copilot heading cycles through `writing.`, `writing..`, and
+name and status in the timeline. `<Enter>` reveals complete arguments, results, and errors in the
+floating detail pane, including failure details for failed tools and tasks. The active Copilot
+heading cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
 responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
 `🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted

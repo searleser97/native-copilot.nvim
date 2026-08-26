@@ -1002,16 +1002,12 @@ fleet._on_event({
   },
 })
 assert(
-  buffer_text(observer_buf):find(
-    '🔴 **[tool] powershell** — failed: Command exited with code 1',
-    1,
-    true
-  ),
+  buffer_text(observer_buf):find('🔴 **[tool] powershell** — failed', 1, true),
   'failed tool kept its running indicator'
 )
 assert(
   buffer_text(observer_buf):find(
-    '🔴 **[task] [shell] Parse PR JSON details using python** — failed: Command exited with code 1',
+    '🔴 **[task] [shell] Parse PR JSON details using python**',
     1,
     true
   ),

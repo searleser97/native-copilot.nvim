@@ -572,23 +572,6 @@ local function json_value(value)
   return value ~= vim.NIL and value or nil
 end
 
-local function failure_summary(value)
-  value = json_value(value)
-  if type(value) == 'table' then
-    return failure_summary(
-      json_value(value.message)
-      or json_value(value.error)
-      or json_value(value.detail)
-      or json_value(value.stderr)
-      or json_value(value.content)
-    )
-  end
-  if value == nil then return nil end
-  local summary = tostring(value):gsub('[\r\n]+', ' '):gsub('%s+', ' ')
-  if #summary > 240 then summary = summary:sub(1, 237) .. '...' end
-  return summary ~= '' and summary or nil
-end
-
 local function task_description(task)
   if type(task) ~= 'table' then return 'Unknown task' end
   local detail = json_value(task.description)
@@ -632,18 +615,11 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   item.name = tool_name or item.name
   item.status = status
   item.details = vim.tbl_deep_extend('force', item.details or {}, details or {})
-  local detail = status
-  if status == 'running' then
-    detail = 'processing…'
-  elseif status == 'failed' then
-    local failure = failure_summary(item.details.error) or failure_summary(item.details.result)
-    detail = failure and ('failed: ' .. failure) or 'failed'
-  end
   buffers.upsert_timeline(member_id, 'tool:' .. call_id, {
     kind = 'tool',
     label = item.name,
     status = status,
-    detail = detail,
+    detail = status == 'running' and 'processing…' or status,
     details = item.details,
   })
 
@@ -714,7 +690,6 @@ local function merge_tasks(member_id, incoming)
       end
       local current_task = by_id[task.id]
       local status = json_value(current_task.status) or 'idle'
-      local failure = status == 'failed' and failure_summary(current_task.error) or nil
       if was_known or status == 'running' or status == 'idle' or status == 'failed' then
         buffers.upsert_timeline(member_id, 'task:' .. task.id, {
           kind = 'task',
@@ -723,7 +698,6 @@ local function merge_tasks(member_id, incoming)
             task_description(current_task)
           ),
           status = status,
-          detail = failure and ('failed: ' .. failure) or nil,
           task = current_task,
         })
       end
