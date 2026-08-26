@@ -378,7 +378,7 @@ prompt_submit.callback()
 protocol.send = original_send
 assert(invoked_command.type == 'command.invoke')
 assert(invoked_command.payload.name == 'context')
-assert(buffer_text(coordinator_buf):match('👨 You · %d%d:%d%d:%d%d\n\n/context'))
+assert(buffer_text(coordinator_buf):match('👨 You · %d%d:%d%d:%d%d\n\n /context'))
 assert(not buffer_text(coordinator_buf):find('[command]', 1, true))
 fleet._on_event({
   v = 1,
