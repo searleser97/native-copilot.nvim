@@ -676,7 +676,8 @@ assert(native_picker.opts.prompt == 'Tasks')
 assert(native_picker.items[1].option.name == 'list')
 local resumed_session
 vim.ui.select = function(items, opts, on_choice)
-  native_picker = { items = items, opts = opts, on_choice = on_choice }
+  native_picker = { items = items, opts = opts }
+  on_choice(items[1])
 end
 protocol.send = function(message_type, payload)
   if message_type == 'session.resume' then resumed_session = payload.sessionId end
@@ -716,8 +717,7 @@ assert(native_picker.items[2].display:find('3 minutes ago', 1, true))
 local permission_response
 local original_send = protocol.send
 vim.ui.select = function(items, opts, on_choice)
-  native_picker = { items = items, opts = opts }
-  on_choice(items[1])
+  native_picker = { items = items, opts = opts, on_choice = on_choice }
 end
 protocol.send = function(message_type, payload)
   if message_type == 'permission.respond' then permission_response = payload end
