@@ -961,8 +961,14 @@ assert(
   'task linked to a failed tool kept its running indicator'
 )
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
-vim.api.nvim_win_set_cursor(0, { assert(line_with(observer_buf, '[tool] powershell')), 0 })
-observer_enter.callback()
+local failed_tool_row = assert(line_with(observer_buf, '[tool] powershell'))
+vim.api.nvim_win_set_cursor(0, { failed_tool_row, 0 })
+local failed_tool_item = buffers.timeline_item_at_cursor(observer_buf, failed_tool_row)
+assert(failed_tool_item and failed_tool_item.status == 'failed', 'failed tool details were not retained')
+local failed_tool_enter = vim.api.nvim_buf_call(observer_buf, function()
+  return vim.fn.maparg('<CR>', 'n', false, true)
+end)
+failed_tool_enter.callback()
 tool_detail_buf = vim.api.nvim_get_current_buf()
 tool_detail_text = buffer_text(tool_detail_buf)
 assert(
