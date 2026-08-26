@@ -81,6 +81,7 @@ interface LiveSession {
   runId: string;
   memberId: string;
   modelId: string | undefined;
+  aicUsed: number;
   busy: boolean;
   sequence: number;
   taskRefresh: number;
@@ -393,6 +394,7 @@ export class CopilotRuntime {
         ? defaultModel.id
         : undefined;
     const modelId = current.modelId ?? live.modelId ?? defaultModelId;
+    live.modelId = modelId;
     return {
       models: models.list,
       current: {
@@ -800,6 +802,7 @@ export class CopilotRuntime {
       runId,
       memberId,
       modelId: config.model,
+      aicUsed: 0,
       busy: false,
       sequence: 0,
       taskRefresh: 0,
@@ -852,6 +855,23 @@ export class CopilotRuntime {
       "member.state",
       { state: "idle", sessionId },
       { runId, memberId, target: "status" },
+    );
+    try {
+      await this.modelState(memberId);
+    } catch (error) {
+      this.emit(
+        "environment.error",
+        {
+          component: "Model",
+          message: error instanceof Error ? error.message : String(error),
+        },
+        { runId, memberId, target: "activity", done: true },
+      );
+    }
+    this.emit(
+      "session.metrics",
+      { modelId: live.modelId, aicUsed: live.aicUsed },
+      { runId, memberId, target: "status", done: true },
     );
     this.refreshTasks(live);
     return live;
@@ -949,6 +969,15 @@ export class CopilotRuntime {
           target: "activity",
           done: true,
         });
+        break;
+      case "assistant.usage":
+        live.modelId = event.data.model || live.modelId;
+        live.aicUsed += (event.data.copilotUsage?.totalNanoAiu ?? 0) / 1_000_000_000;
+        this.emit(
+          "session.metrics",
+          { modelId: live.modelId, aicUsed: live.aicUsed },
+          { ...fields, target: "status", done: true },
+        );
         break;
       case "assistant.turn_start":
         live.busy = true;

@@ -61,6 +61,22 @@ local function client_commands(fleets)
   }
 end
 
+local function update_conversation_label(member_id)
+  local entry = buffers.get_member(member_id)
+  if not entry then return end
+  local metrics = state.session_metrics[member_id] or {}
+  local model = metrics.model_id or 'detecting…'
+  local aic = tonumber(metrics.aic_used) or 0
+  local label = (' %s  |  Model: %s  |  AIC used: %.3f '):format(
+    entry.display_name,
+    model,
+    aic
+  )
+  for _, win in ipairs(vim.fn.win_findbuf(entry.views.conversation.buf)) do
+    if vim.api.nvim_win_is_valid(win) then vim.wo[win].winbar = label end
+  end
+end
+
 local defaults = {
   node_command = 'node',
   runtime_command = vim.env.NVIM_COPILOT_CMD or vim.env.COPILOT_CLI_CMD,
@@ -120,6 +136,7 @@ local state = {
   prompt_queue_paused = {},
   prompt_queue_edit = nil,
   prompt_queue_sequence = 0,
+  session_metrics = {},
   schedules = {},
 }
 
@@ -1014,6 +1031,7 @@ function M.show_member(member_id, view_id)
   vim.api.nvim_win_set_buf(win, entry.views[view_id or 'conversation'].buf)
   buffers.mark_read(member_id)
   update_prompt_label()
+  update_conversation_label(member_id)
   refresh_prompt_queue()
   vim.api.nvim_set_current_win(win)
 end
@@ -1033,6 +1051,7 @@ function M.show_overview()
     vim.api.nvim_win_set_buf(0, buffers.buffer(members[index], 'conversation'))
   end
   vim.cmd('wincmd =')
+  for index = 1, maximum do update_conversation_label(members[index]) end
   update_prompt_label()
 end
 
@@ -1528,12 +1547,25 @@ function M._on_event(message)
     return
   elseif message.type == 'model.changed' then
     local model = payload.model or {}
+    local member_id = event_member(message)
+    local metrics = state.session_metrics[member_id] or {}
+    metrics.model_id = model.modelId or model_id(model) or metrics.model_id
+    state.session_metrics[member_id] = metrics
+    update_conversation_label(member_id)
     buffers.append_block(
-      event_member(message),
+      member_id,
       'conversation',
       'Copilot',
       ('Model switched to `%s`.'):format(model.modelId or model_id(model) or 'unknown')
     )
+    return
+  elseif message.type == 'session.metrics' then
+    local member_id = event_member(message)
+    state.session_metrics[member_id] = {
+      model_id = payload.modelId,
+      aic_used = payload.aicUsed,
+    }
+    update_conversation_label(member_id)
     return
   elseif message.type == 'mcp.list' then
     local target = payload.target or event_member(message)
@@ -1814,6 +1846,7 @@ function M._on_event(message)
     state.queued_prompts = {}
     state.prompt_queue_paused = {}
     state.prompt_queue_edit = nil
+    state.session_metrics = {}
     state.schedules = {}
     state.mode = 'fleet-loading'
     state.active_fleet = payload.fleetId
@@ -1852,6 +1885,7 @@ function M._on_event(message)
     state.queued_prompts = {}
     state.prompt_queue_paused = {}
     state.prompt_queue_edit = nil
+    state.session_metrics = {}
     state.schedules = {}
     state.task_detail = nil
     state.task_progress = nil

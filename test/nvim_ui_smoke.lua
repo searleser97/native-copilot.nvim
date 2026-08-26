@@ -388,11 +388,20 @@ assert(invoked_command.type == 'model.switch')
 assert(invoked_command.payload.modelId == 'claude-sonnet-5')
 fleet._on_event({
   v = 1,
+  type = 'session.metrics',
+  memberId = 'coordinator',
+  payload = { modelId = 'gpt-5.4', aicUsed = 0.1254 },
+})
+assert(vim.wo[coordinator_win].winbar:find('Model: gpt%-5%.4'))
+assert(vim.wo[coordinator_win].winbar:find('AIC used: 0%.125'))
+fleet._on_event({
+  v = 1,
   type = 'model.changed',
   memberId = 'coordinator',
   payload = { model = { modelId = 'claude-sonnet-5' } },
 })
 assert(buffer_text(coordinator_buf):find('Model switched to `claude-sonnet-5`.', 1, true))
+assert(vim.wo[coordinator_win].winbar:find('Model: claude%-sonnet%-5'))
 protocol.send = function(message_type, payload)
   invoked_command = { type = message_type, payload = payload }
   return 'mcp-list-request'

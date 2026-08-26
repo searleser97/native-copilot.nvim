@@ -242,6 +242,8 @@ output. Set `follow_bottom = false` to preserve the current viewport instead.
 Conversation turns and activity rows show local timestamps. Timeline timestamps change whenever a
 row is updated, and a streamed Copilot response receives its final timestamp when the response
 completes. Customize the display with `timestamp_format`, using an `os.date` format string.
+The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
+session. Both values refresh from SDK usage events after every model call.
 
 SDK-provided reasoning summaries, intent, errors, tools, prompts, schedules, tasks, and environment status
 appear inline in the conversation, similar to Copilot CLI's timeline. Whether reasoning content is
