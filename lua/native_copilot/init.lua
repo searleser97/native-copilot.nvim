@@ -70,7 +70,6 @@ local defaults = {
   prompt_height = 8,
   task_detail_height = 12,
   overview_max_agents = 4,
-  render_debounce_ms = 200,
   stream_flush_ms = 80,
   follow_bottom = true,
   frontend = {
@@ -388,7 +387,7 @@ local function ensure_prompt_buffer()
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
-  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].filetype = 'native-copilot'
   vim.b[buf].ai_prompt = true
   vim.b[buf].native_copilot_prompt = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
@@ -671,7 +670,7 @@ local function ensure_detail_buffer()
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
-  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].filetype = 'native-copilot'
   vim.bo[buf].modifiable = false
   vim.keymap.set('n', 'q', close_task_detail, { buffer = buf, desc = 'Close activity details' })
   vim.keymap.set('n', '<BS>', close_task_detail, {
@@ -925,7 +924,7 @@ local function update_status_buffer()
     vim.bo[state.status_buf].buftype = 'nofile'
     vim.bo[state.status_buf].bufhidden = 'hide'
     vim.bo[state.status_buf].swapfile = false
-    vim.bo[state.status_buf].filetype = 'markdown'
+    vim.bo[state.status_buf].filetype = 'native-copilot'
     vim.b[state.status_buf].native_copilot = true
   end
   local lines = {
@@ -1877,7 +1876,6 @@ end
 function M.setup(user_options)
   options = vim.tbl_deep_extend('force', vim.deepcopy(defaults), user_options or {})
   buffers.setup({
-    render_debounce_ms = options.render_debounce_ms,
     stream_flush_ms = options.stream_flush_ms,
     follow_bottom = options.follow_bottom,
   })

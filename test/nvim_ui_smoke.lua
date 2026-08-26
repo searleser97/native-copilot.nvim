@@ -232,7 +232,17 @@ assert(
 )
 local github_mcp_row = assert(line_with(coordinator_buf, '[environment] MCP github'))
 local local_mcp_row = assert(line_with(coordinator_buf, '[environment] MCP local'))
-assert(local_mcp_row - github_mcp_row == 2, 'MCP rows should have exactly one blank line between them')
+assert(local_mcp_row - github_mcp_row == 1, 'MCP rows should be directly adjacent')
+vim.bo[coordinator_buf].modifiable = true
+vim.api.nvim_buf_set_lines(
+  coordinator_buf,
+  github_mcp_row,
+  github_mcp_row,
+  false,
+  { '> ○ **[environment] MCP github** — orphaned pending' }
+)
+vim.bo[coordinator_buf].modifiable = false
+assert(line_count_with(coordinator_buf, '[environment] MCP github') == 2)
 fleet._on_event({
   v = 1,
   type = 'environment.status',
@@ -244,6 +254,7 @@ fleet._on_event({
 })
 assert(buffer_text(coordinator_buf):find('○ **[environment] MCP github** — pending', 1, true))
 assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
+assert(line_count_with(coordinator_buf, '[environment] MCP github') == 1)
 fleet._on_event({
   v = 1,
   type = 'environment.status',

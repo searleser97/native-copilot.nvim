@@ -2,13 +2,6 @@ local root = vim.env.NATIVE_COPILOT_ROOT
 assert(root and root ~= '', 'NATIVE_COPILOT_ROOT is required')
 vim.opt.runtimepath:prepend(root)
 
-local render_calls = {}
-package.loaded['render-markdown'] = {
-  buf_enable = function() end,
-  buf_disable = function() end,
-  render = function(context) table.insert(render_calls, context) end,
-}
-
 local buffers = require('native_copilot.buffers')
 local commands = require('native_copilot.commands')
 assert(commands.parse('/autopilot on').name == 'autopilot')
@@ -90,10 +83,10 @@ end)
 commands.set_catalog('reviewer', command_catalog)
 assert(catalog_notified)
 unsubscribe()
-buffers.setup({ render_debounce_ms = 30 })
+buffers.setup()
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
-assert(vim.bo[member.views.conversation.buf].filetype == 'markdown')
+assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')
 assert(vim.b[member.views.conversation.buf].native_copilot == true)
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Please review this.')
@@ -144,43 +137,20 @@ for _, mark in ipairs(activity_marks) do
   assert(mark[4].hl_group == 'Comment')
   assert(mark[4].end_row <= assistant_row, 'inline activity highlight leaked into the assistant response')
 end
-assert(#render_calls == 0, 'hidden buffer was rendered')
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
 buffers.on_shown(member.views.conversation.buf)
-vim.wait(80)
-assert(#render_calls == 1, 'visible buffer was not rendered once')
-assert(render_calls[1].buf == member.views.conversation.buf)
-assert(#render_calls[1].win == 1)
 
-buffers.append_block('reviewer', 'conversation', 'You', 'Inspect the render lifecycle.')
+buffers.append_block('reviewer', 'conversation', 'You', 'Inspect the plain text lifecycle.')
 buffers.append_activity_delta('reviewer', 'reasoning-2', 'Still reasoning...')
-vim.wait(80)
-assert(#render_calls == 1, 'Markdown rendered while reasoning was streaming')
 buffers.complete_activity('reviewer', 'reasoning-2', 'Still reasoning...')
-vim.wait(80)
-assert(#render_calls == 2, 'completed reasoning did not render')
 
 buffers.set_state('reviewer', 'busy')
-local renderer_namespace = vim.api.nvim_create_namespace('render-markdown.nvim')
-vim.api.nvim_buf_set_extmark(member.views.conversation.buf, renderer_namespace, 0, 0, {
-  virt_text = { { 'stale-rendered-row', 'Comment' } },
-})
 buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
   kind = 'environment',
   label = 'MCP myenghub',
   status = 'running',
   detail = 'pending',
 })
-assert(
-  #vim.api.nvim_buf_get_extmarks(
-    member.views.conversation.buf,
-    renderer_namespace,
-    0,
-    -1,
-    {}
-  ) == 0,
-  'timeline mutation left stale render-markdown decorations visible'
-)
 buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
   kind = 'environment',
   label = 'MCP myenghub',
@@ -192,9 +162,35 @@ for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 
   if line:find('[environment] MCP myenghub', 1, true) then mcp_rows = mcp_rows + 1 end
 end
 assert(mcp_rows == 1, 'MCP status transition duplicated the underlying timeline row')
+local mcp_row
+for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line:find('[environment] MCP myenghub', 1, true) then
+    mcp_row = index - 1
+    break
+  end
+end
+assert(mcp_row ~= nil)
+vim.bo[member.views.conversation.buf].modifiable = true
+vim.api.nvim_buf_set_lines(
+  member.views.conversation.buf,
+  mcp_row + 1,
+  mcp_row + 1,
+  false,
+  { '> ○ **[environment] MCP myenghub** — orphaned pending' }
+)
+vim.bo[member.views.conversation.buf].modifiable = false
+buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {
+  kind = 'environment',
+  label = 'MCP myenghub',
+  status = 'completed',
+  detail = 'connected',
+})
+mcp_rows = 0
+for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
+  if line:find('[environment] MCP myenghub', 1, true) then mcp_rows = mcp_rows + 1 end
+end
+assert(mcp_rows == 1, 'MCP reconciliation did not remove an orphaned source row')
 buffers.append_activity_block('reviewer', 'Error', 'Activity-only terminal output.')
-vim.wait(80)
-assert(#render_calls == 3, 'activity-only output did not render while member state was busy')
 
 require('native_copilot').setup({
   mappings = {

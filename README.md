@@ -14,7 +14,6 @@ The Neovim plugin owns a local Node.js host through versioned NDJSON over stdio.
 - GitHub Copilot access and a Copilot CLI login
 - An authenticated [GitHub CLI](https://cli.github.com/) (`gh auth login`) for the built-in GitHub MCP server
 - Optional picker UI through [Telescope](https://github.com/nvim-telescope/telescope.nvim)
-- Optional rich rendering through [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim)
 
 The Copilot SDK is a local dependency of this repository. A global SDK installation is neither required nor used.
 
@@ -35,9 +34,6 @@ Load the local plugin with `lazy.nvim`:
   "searleser97/native-copilot.nvim",
   lazy = false,
   build = "npm install --no-audit --no-fund && npm run build",
-  dependencies = {
-    "MeanderingProgrammer/render-markdown.nvim",
-  },
   config = function()
     require("native_copilot").setup()
   end,
@@ -51,7 +47,6 @@ require("native_copilot").setup({
   -- Defaults to NVIM_COPILOT_CMD, then COPILOT_CLI_CMD, when either is set.
   runtime_command = nil,
   stream_flush_ms = 80,
-  render_debounce_ms = 200,
   follow_bottom = true,
   task_detail_height = 12,
   frontend = {
@@ -225,14 +220,16 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 
 ## Rendering and observability
 
-Conversation, mailbox, and status views are native `nofile` Markdown buffers. Conversation turns
-use only `# You` and `# Copilot` headings, without a redundant document title. Inline reasoning
-and errors remain part of each conversation buffer. The buffers retain normal Neovim navigation,
-search, yank, folds, marks, and window mappings.
+Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
+renderer dependency. Conversation turns use only `# You` and `# Copilot` labels, without a
+redundant document title. Inline reasoning and errors remain part of each conversation buffer.
+The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
-Streaming deltas are batched and appended only to the changed buffer tail. Rich Markdown rendering is disabled while a response is streaming, debounced at turn completion, scoped to windows where the buffer is visible, and deferred for hidden buffers until they become visible. Configure this with `stream_flush_ms` and `render_debounce_ms`.
+Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
+interval with `stream_flush_ms`.
 
-Conversation windows follow the final line when opened, switched, reopened, rendered, or updated by streaming output. Set `follow_bottom = false` to preserve the current viewport instead.
+Conversation windows follow the final line when opened, switched, reopened, or updated by streaming
+output. Set `follow_bottom = false` to preserve the current viewport instead.
 
 SDK-provided reasoning summaries, intent, errors, tools, prompts, schedules, tasks, and environment status
 appear inline in the conversation, similar to Copilot CLI's timeline. Whether reasoning content is

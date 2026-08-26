@@ -1,13 +1,10 @@
 local M = {}
 
 local registry = {}
-local render_generation = {}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local message_anchor_namespace = vim.api.nvim_create_namespace('native_copilot_message_anchor')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
-local render_markdown_namespace = vim.api.nvim_create_namespace('render-markdown.nvim')
 local options = {
-  render_debounce_ms = 200,
   stream_flush_ms = 80,
   follow_bottom = true,
 }
@@ -18,29 +15,6 @@ local function with_modifiable(buf, operation)
   vim.bo[buf].modifiable = true
   operation()
   vim.bo[buf].modifiable = was_modifiable
-end
-
-local function render_markdown(buf, enabled)
-  if not vim.api.nvim_buf_is_valid(buf) then return end
-  local wins = vim.fn.win_findbuf(buf)
-  if enabled and #wins == 0 then return end
-  pcall(vim.api.nvim_buf_call, buf, function()
-    local ok, renderer = pcall(require, 'render-markdown')
-    if not ok then return end
-    if enabled then
-      renderer.buf_enable()
-      renderer.render({
-        buf = buf,
-        win = wins,
-        event = 'NativeCopilot',
-      })
-    else
-      -- render-markdown debounces buf_disable(), so clear its stale virtual
-      -- decorations synchronously before replacing timeline source lines.
-      vim.api.nvim_buf_clear_namespace(buf, render_markdown_namespace, 0, -1)
-      renderer.buf_disable()
-    end
-  end)
 end
 
 local function visible(buf)
@@ -61,23 +35,7 @@ local function follow_bottom(view)
 end
 
 local function finalize_render(view)
-  view.dirty = true
-  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
-  local generation = render_generation[view.buf]
-  vim.defer_fn(function()
-    if not vim.api.nvim_buf_is_valid(view.buf) then return end
-    if
-      render_generation[view.buf] ~= generation
-      or view.streaming
-      or view.activity_streaming
-      or not visible(view.buf)
-    then
-      return
-    end
-    render_markdown(view.buf, true)
-    view.dirty = false
-    follow_bottom(view)
-  end, options.render_debounce_ms)
+  follow_bottom(view)
 end
 
 local function create_buffer(name, member_id, view_id)
@@ -87,7 +45,7 @@ local function create_buffer(name, member_id, view_id)
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
   vim.bo[buf].undofile = false
-  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].filetype = 'native-copilot'
   vim.bo[buf].modifiable = false
   vim.b[buf].native_copilot = true
   vim.b[buf].native_copilot_member = member_id
@@ -96,7 +54,6 @@ local function create_buffer(name, member_id, view_id)
   with_modifiable(buf, function()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
   end)
-  render_markdown(buf, false)
   return {
     buf = buf,
     member_id = member_id,
@@ -105,7 +62,6 @@ local function create_buffer(name, member_id, view_id)
     flush_scheduled = false,
     streaming = false,
     activity_streaming = false,
-    dirty = false,
     active_message = nil,
     message_anchor = nil,
     deferred_activity = nil,
@@ -193,7 +149,6 @@ end
 
 local function append(view, text, final)
   if text == '' then return end
-  if not view.streaming then render_markdown(view.buf, false) end
   view.streaming = not final
   view.pending = view.pending .. text
   schedule_flush(view)
@@ -228,9 +183,6 @@ local function insert_activity_before_message(view, heading, content)
     view.message_anchor = nil
     return false
   end
-  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
-  view.dirty = true
-  render_markdown(view.buf, false)
   local lines = { '', ('> **%s**'):format(heading), '>' }
   for _, line in ipairs(vim.split(content, '\n', { plain = true })) do
     table.insert(lines, '> ' .. line)
@@ -264,9 +216,6 @@ end
 
 local function begin_inline_activity(view, activity_id, heading)
   flush(view)
-  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
-  view.dirty = true
-  render_markdown(view.buf, false)
   local start_row = vim.api.nvim_buf_line_count(view.buf)
   view.active_activity = {
     id = activity_id,
@@ -282,9 +231,6 @@ function M.append_activity_delta(member_id, activity_id, content)
   if view.message_anchor then
     if not view.deferred_activity or view.deferred_activity.id ~= activity_id then
       view.deferred_activity = { id = activity_id, content = '' }
-      render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
-      view.dirty = true
-      render_markdown(view.buf, false)
     end
     view.deferred_activity.content = view.deferred_activity.content .. content
     view.activity_streaming = true
@@ -342,22 +288,43 @@ local function timeline_lines(kind, label, status, detail)
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   return {
     ('> %s **[%s] %s**%s'):format(symbols[status] or '?', kind, label, suffix),
-    '',
   }
+end
+
+local function reconcile_mcp_rows(view, item)
+  if item.kind ~= 'environment' or not vim.startswith(item.label or '', 'MCP ') then return nil end
+  local marker = ('**[environment] %s**'):format(item.label)
+  local rows = {}
+  for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
+    if line:find(marker, 1, true) then table.insert(rows, index - 1) end
+  end
+  if #rows == 0 then return nil end
+
+  for index = #rows, 2, -1 do
+    local row = rows[index]
+    local following = vim.api.nvim_buf_get_lines(view.buf, row + 1, row + 2, false)[1]
+    local end_row = following == '' and row + 2 or row + 1
+    with_modifiable(view.buf, function()
+      vim.api.nvim_buf_set_lines(view.buf, row, end_row, false, {})
+    end)
+  end
+  return rows[1]
 end
 
 function M.upsert_timeline(member_id, item_id, item)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   flush(view)
-  render_generation[view.buf] = (render_generation[view.buf] or 0) + 1
-  view.dirty = true
-  render_markdown(view.buf, false)
-
   local record = view.timeline[item_id]
   local lines = timeline_lines(item.kind, item.label, item.status, item.detail)
-  local start_row
-  if record then
+  local start_row = reconcile_mcp_rows(view, item)
+  if start_row then
+    local following = vim.api.nvim_buf_get_lines(view.buf, start_row + 1, start_row + 2, false)[1]
+    local end_row = following == '' and start_row + 2 or start_row + 1
+    with_modifiable(view.buf, function()
+      vim.api.nvim_buf_set_lines(view.buf, start_row, end_row, false, lines)
+    end)
+  elseif record then
     local position = vim.api.nvim_buf_get_extmark_by_id(
       view.buf,
       timeline_namespace,
@@ -500,9 +467,6 @@ function M.on_shown(buf)
       if view.buf == buf then
         if view.id == 'conversation' then entry.unread = 0 end
         follow_bottom(view)
-        if view.dirty and not view.streaming and not view.activity_streaming then
-          finalize_render(view)
-        end
         return
       end
     end
@@ -518,6 +482,5 @@ function M.reset()
     end
   end
   registry = {}
-  render_generation = {}
 end
 return M
