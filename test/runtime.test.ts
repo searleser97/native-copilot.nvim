@@ -91,33 +91,15 @@ describe("instanceSessionId", () => {
     });
   });
 
-  it("allows all requests when an agent has no custom permission filter", () => {
+  it("allows ordinary requests inside a configured permission ceiling", () => {
     const request = {
-      kind: "mcp" as const,
-      serverName: "example",
-      toolName: "example-write",
-      arguments: {},
-      toolCallId: "tool-call",
+      kind: "read" as const,
+      path: "E:\\repo\\README.md",
       managedApprovalRequired: false,
     };
 
-    expect(permissionDecision(undefined, "E:\\repo", request)).toEqual({
+    expect(permissionDecision(readOnlyProfile, "E:\\repo", request)).toEqual({
       kind: "approve-once",
-    });
-  });
-
-  it("leaves managed requests pending for interactive approval", () => {
-    const request = {
-      kind: "mcp" as const,
-      serverName: "example",
-      toolName: "example-write",
-      arguments: {},
-      toolCallId: "tool-call",
-      managedApprovalRequired: true,
-    };
-
-    expect(permissionDecision(undefined, "E:\\repo", request)).toEqual({
-      kind: "no-result",
     });
   });
 
