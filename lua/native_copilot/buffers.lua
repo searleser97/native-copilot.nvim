@@ -272,7 +272,9 @@ local function begin_inline_activity(view, activity_id, heading)
   if continuation then
     view.pending = view.pending .. ' >\n > '
   else
-    view.pending = view.pending .. ('\n > **%s**\n >\n > '):format(heading)
+    local last = vim.api.nvim_buf_get_lines(view.buf, -2, -1, false)[1] or ''
+    local prefix = last == '' and '' or '\n\n'
+    view.pending = view.pending .. prefix .. (' > **%s**\n >\n > '):format(heading)
   end
   flush(view)
   view.last_activity = {
@@ -717,9 +719,10 @@ function M.append_conversation_delta(member_id, message_id, content)
     end
   end
   if first_visible_delta then
+    local follows_activity = view.last_block_kind == 'activity'
     local line_count = vim.api.nvim_buf_line_count(view.buf)
     local last = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, line_count, false)[1] or ''
-    if last ~= '' then append(view, '\n', false) end
+    if follows_activity or last ~= '' then append(view, '\n', false) end
   end
   append(view, indent_response_delta(view, content), false)
 end

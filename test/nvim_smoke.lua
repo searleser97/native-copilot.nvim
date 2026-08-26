@@ -127,11 +127,19 @@ assert(text:find('\n Please review this.', 1, true))
 assert(text:find(' > **Reasoning summary**', 1, true))
 assert(not text:find(' > **Reasoning summary** ·', 1, true))
 assert(text:find(' > Checking the implementation.', 1, true))
+assert(
+  text:match('BOT · %d%d:%d%d:%d%d\n\n > %*%*Reasoning summary%*%*'),
+  'reasoning summary was not separated from the Copilot heading by exactly one blank line'
+)
 assert(text:find('BOT', 1, true))
 assert(text:match('BOT · %d%d:%d%d:%d%d'))
 assert(not text:find('BOT · writing', 1, true))
 assert(not text:find('# Reviewer', 1, true))
 assert(text:find('\n The implementation looks correct.', 1, true))
+assert(
+  text:find(' > Checking the implementation.\n\n The implementation looks correct.', 1, true),
+  'assistant response was not separated from reasoning by exactly one blank line'
+)
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
 local assistant_heading = text:find('BOT ·', 1, true)
 assert(late_reasoning and assistant_heading and late_reasoning > assistant_heading)
