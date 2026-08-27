@@ -5,12 +5,12 @@ import { resolve } from "node:path";
 import { argv, env, exit, kill, ppid, stderr } from "node:process";
 import { FleetDatabase } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
-import { CopilotRuntime } from "./runtime.js";
-import { PROTOCOL_VERSION, type DynamicFleetDefinition } from "./types.js";
+import { CopilotRuntime, resolveRuntimeCommand } from "./runtime.js";
+import { PROTOCOL_VERSION, type DynamicAgentDefinition, type DynamicFleetDefinition } from "./types.js";
 
 interface HostOptions {
   databasePath: string;
-  runtimeCommand: string | undefined;
+  runtimeCommandResolver: string | undefined;
   workspace: string;
 }
 
@@ -35,8 +35,7 @@ function hostOptions(): HostOptions {
         env.NATIVE_COPILOT_DATABASE ??
         resolve(dataRoot, "native-copilot", "state.sqlite"),
     ),
-    runtimeCommand:
-      env.NATIVE_COPILOT_RUNTIME_COMMAND,
+    runtimeCommandResolver: env.NATIVE_COPILOT_RUNTIME_COMMAND_RESOLVER,
   };
 }
 
@@ -61,6 +60,10 @@ function requiredString(
 
 async function main(): Promise<void> {
   const options = hostOptions();
+  const runtimeCommand = await resolveRuntimeCommand(
+    options.runtimeCommandResolver,
+    options.workspace,
+  );
   const db = new FleetDatabase(options.databasePath);
   const interruptedRuns = db.markInterruptedWork(
     "Owning Neovim host is no longer running",
@@ -271,13 +274,69 @@ async function main(): Promise<void> {
         });
         return;
       case "fleet.stop":
-        await runtime.stopActive("Fleet stopped by user");
-        await runtime.openStandard();
+        await runtime.stopFleet(
+          requiredString(payload, "fleetId", command.type),
+          "Fleet stopped by user",
+        );
         protocol.send("request.complete", { type: command.type }, {
           requestId: command.id,
           done: true,
         });
         return;
+      case "fleet.agent.add": {
+        const fleetId = requiredString(payload, "fleetId", command.type);
+        if (typeof payload.agent !== "object" || payload.agent === null) {
+          throw new Error(`${command.type} requires payload.agent`);
+        }
+        const result = await runtime.mutateFleetAddOrUpdate(
+          fleetId,
+          payload.agent as DynamicAgentDefinition,
+        );
+        protocol.send("fleet.agent.updated", { fleetId, ...result }, {
+          requestId: command.id,
+          done: true,
+        });
+        return;
+      }
+      case "fleet.agent.remove": {
+        const fleetId = requiredString(payload, "fleetId", command.type);
+        const agentId = requiredString(payload, "agentId", command.type);
+        const newEntryAgent =
+          typeof payload.newEntryAgent === "string" ? payload.newEntryAgent : undefined;
+        const result = await runtime.mutateFleetRemove(fleetId, agentId, newEntryAgent);
+        protocol.send("fleet.agent.updated", { fleetId, ...result }, {
+          requestId: command.id,
+          done: true,
+        });
+        return;
+      }
+      case "fleet.agent.move": {
+        const sourceFleetId = requiredString(payload, "sourceFleetId", command.type);
+        const destinationFleetId = requiredString(payload, "destinationFleetId", command.type);
+        const agentId = requiredString(payload, "agentId", command.type);
+        const replacementEntryAgentId =
+          typeof payload.replacementEntryAgentId === "string"
+            ? payload.replacementEntryAgentId
+            : undefined;
+        const destinationAgent =
+          typeof payload.destinationAgent === "object" && payload.destinationAgent !== null
+            ? (payload.destinationAgent as DynamicAgentDefinition)
+            : undefined;
+        const result = await runtime.mutateFleetMove(
+          sourceFleetId,
+          destinationFleetId,
+          agentId,
+          {
+            ...(replacementEntryAgentId ? { replacementEntryAgentId } : {}),
+            ...(destinationAgent ? { destinationAgent } : {}),
+          },
+        );
+        protocol.send("fleet.agent.moved", { ...result }, {
+          requestId: command.id,
+          done: true,
+        });
+        return;
+      }
       case "prompt.send":
         await runtime.sendUserPrompt(
           requiredString(payload, "target", command.type),
@@ -377,7 +436,7 @@ async function main(): Promise<void> {
     (type, payload, fields) => {
       protocol.send(type, payload, fields);
     },
-    options.runtimeCommand,
+    runtimeCommand,
   );
 
   const parentMonitor = setInterval(() => {

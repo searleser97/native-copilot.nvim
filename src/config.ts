@@ -10,7 +10,11 @@ const idPattern = /^[a-z][a-z0-9_]*$/;
 const id = z.string().min(1).regex(
   idPattern,
   "must start with a lowercase letter and contain only lowercase letters, numbers, and underscores",
-).describe("Tool-safe identifier used in generated send_to_<agent> tool names.");
+).describe(
+  "Tool-safe identifier used in generated send_to_<agent> tool names. Must be unique within the " +
+    "Fleet — this is the only uniqueness requirement, so several agents may share the same role or " +
+    "display name as long as their IDs differ.",
+);
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
 const stringList = z.array(z.string().min(1));
@@ -41,7 +45,10 @@ export const dynamicPermissionSchema = z.union([
 
 export const dynamicAgentSchema = z.object({
   id,
-  displayName: z.string().min(1).describe("Human-readable agent name shown in the UI."),
+  displayName: z.string().min(1).describe(
+    "Human-readable agent name shown in the UI. Need not be unique; a Fleet may contain multiple " +
+      "agents with the same role or name (for example two planners) as long as their IDs differ.",
+  ),
   description: z.string().min(1).describe("Concise statement of this agent's responsibility."),
   prompt: z.string().min(1).describe("Complete role and operating instructions for this agent."),
   model: z.string().min(1).optional().describe("Model ID; omit to inherit the runtime default."),
@@ -72,7 +79,8 @@ export const dynamicFleetSchema = z.object({
   ),
   entryAgent: id.describe("Agent ID that receives the objective and begins coordination."),
   agents: z.array(dynamicAgentSchema).min(1).max(12).describe(
-    "Complete runtime definitions for every Fleet member.",
+    "Complete runtime definitions for every Fleet member. Only agent IDs must be unique; multiple " +
+      "members may share the same role or display name (for example two developers) with distinct IDs.",
   ),
 }).strict();
 

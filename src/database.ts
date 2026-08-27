@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export type RunMode = "standard" | "fleet";
 export type RunStatus = "active" | "stopped" | "interrupted";
-export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
+export type MessageStatus = "pending" | "delivering" | "delivered" | "failed" | "settled";
 
 export interface StoredMessage {
   id: string;
@@ -17,6 +17,13 @@ export interface StoredMessage {
   sequence: number;
   createdAt: string;
   updatedAt: string;
+  reason?: string | null;
+}
+
+/** A message settled during an agent move, with the status it held beforehand. */
+export interface SettledMessage {
+  id: string;
+  previousStatus: MessageStatus;
 }
 
 export interface StateSnapshot {
@@ -59,7 +66,7 @@ export class FleetDatabase {
         version INTEGER NOT NULL
       );
       INSERT INTO schema_meta(version)
-      SELECT 4
+      SELECT 5
       WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
 
       CREATE TABLE IF NOT EXISTS runs (
@@ -91,10 +98,11 @@ export class FleetDatabase {
         target TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('user', 'agent', 'system')),
         content TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed', 'settled')),
         sequence INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        reason TEXT,
         UNIQUE(run_id, target, sequence)
       );
 
@@ -165,6 +173,37 @@ export class FleetDatabase {
         UPDATE schema_meta SET version = 4;
         COMMIT;
       `);
+    }
+    if (schema.version < 5) {
+      // Expand the message status CHECK to include 'settled' and add a reason column.
+      // The messages table is referenced by delivery_leases(message_id); foreign keys
+      // cannot be toggled inside a transaction, so disable them around the rebuild.
+      this.db.exec("PRAGMA foreign_keys = OFF");
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE messages_v5 (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          source TEXT NOT NULL,
+          target TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('user', 'agent', 'system')),
+          content TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed', 'settled')),
+          sequence INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          reason TEXT,
+          UNIQUE(run_id, target, sequence)
+        );
+        INSERT INTO messages_v5(id, run_id, source, target, kind, content, status, sequence, created_at, updated_at, reason)
+        SELECT id, run_id, source, target, kind, content, status, sequence, created_at, updated_at, NULL
+        FROM messages;
+        DROP TABLE messages;
+        ALTER TABLE messages_v5 RENAME TO messages;
+        UPDATE schema_meta SET version = 5;
+        COMMIT;
+      `);
+      this.db.exec("PRAGMA foreign_keys = ON");
     }
   }
 
@@ -293,6 +332,71 @@ export class FleetDatabase {
     if (result.changes !== 1) {
       throw new Error(`Fleet run "${id}" could not be resumed.`);
     }
+  }
+
+  updateFleetDefinition(id: string, fleetDefinition: string): void {
+    const result = this.db
+      .prepare(
+        `UPDATE runs SET fleet_definition = ? WHERE id = ? AND mode = 'fleet'`,
+      )
+      .run(fleetDefinition, id);
+    if (result.changes !== 1) {
+      throw new Error(`Fleet run "${id}" could not be updated with a new definition.`);
+    }
+  }
+
+  // Atomically persists new definitions for several Fleet runs in one transaction.
+  // Used when moving an agent between two active Fleets so both the source and the
+  // destination definitions are committed together or not at all.
+  updateFleetDefinitions(updates: Array<{ runId: string; fleetDefinition: string }>): void {
+    this.transaction(() => {
+      const statement = this.db.prepare(
+        `UPDATE runs SET fleet_definition = ? WHERE id = ? AND mode = 'fleet'`,
+      );
+      for (const update of updates) {
+        const result = statement.run(update.fleetDefinition, update.runId);
+        if (result.changes !== 1) {
+          throw new Error(
+            `Fleet run "${update.runId}" could not be updated with a new definition.`,
+          );
+        }
+      }
+    });
+  }
+
+  // Moves a persisted member session record from one run to another in a single
+  // transaction, preserving the same SDK session id. Used when an agent is moved to
+  // another Fleet while keeping its conversation history.
+  reassociateSession(
+    fromRunId: string,
+    toRunId: string,
+    memberId: string,
+    sessionId: string,
+    state: string,
+  ): void {
+    this.transaction(() => {
+      this.db
+        .prepare("DELETE FROM member_sessions WHERE run_id = ? AND member_id = ?")
+        .run(fromRunId, memberId);
+      this.db
+        .prepare(
+          `INSERT INTO member_sessions(run_id, member_id, session_id, state, last_active_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(run_id, member_id) DO UPDATE SET
+             session_id = excluded.session_id,
+             state = excluded.state,
+             last_active_at = excluded.last_active_at`,
+        )
+        .run(toRunId, memberId, sessionId, state, now());
+    });
+  }
+
+  // Removes a single member session record, e.g. the stale source record left after
+  // an agent is moved to another Fleet without a preserved live session.
+  deleteSession(runId: string, memberId: string): void {
+    this.db
+      .prepare("DELETE FROM member_sessions WHERE run_id = ? AND member_id = ?")
+      .run(runId, memberId);
   }
 
   finishRun(id: string, status: Exclude<RunStatus, "active">, reason?: string): void {
@@ -426,7 +530,10 @@ export class FleetDatabase {
   completeMessage(id: string): void {
     this.transaction(() => {
       this.db
-        .prepare("UPDATE messages SET status = 'delivered', updated_at = ? WHERE id = ?")
+        .prepare(
+          `UPDATE messages SET status = 'delivered', updated_at = ?
+           WHERE id = ? AND status IN ('pending', 'delivering')`,
+        )
         .run(now(), id);
       this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?").run(id);
     });
@@ -436,7 +543,10 @@ export class FleetDatabase {
     this.transaction(() => {
       const status: MessageStatus = retry ? "pending" : "failed";
       this.db
-        .prepare("UPDATE messages SET status = ?, updated_at = ? WHERE id = ?")
+        .prepare(
+          `UPDATE messages SET status = ?, updated_at = ?
+           WHERE id = ? AND status IN ('pending', 'delivering')`,
+        )
         .run(status, now(), id);
       if (retry) {
         this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?").run(id);
@@ -444,6 +554,58 @@ export class FleetDatabase {
         this.db
           .prepare("UPDATE delivery_leases SET last_error = ? WHERE message_id = ?")
           .run(error, id);
+      }
+    });
+  }
+
+  /**
+   * Settle every still-in-flight (pending/delivering) message addressed to a target
+   * in a run. Used when an agent is moved to another Fleet: its source-run mailbox
+   * must NOT migrate, so undelivered messages are terminally settled with a reason
+   * and any outstanding delivery lease is released. Already-delivered/failed history
+   * is preserved untouched. Returns the affected ids with their prior status so a
+   * failed move can restore them.
+   */
+  settleMovedMessages(runId: string, target: string, reason: string): SettledMessage[] {
+    return this.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT id, status FROM messages
+           WHERE run_id = ? AND target = ? AND status IN ('pending', 'delivering')`,
+        )
+        .all(runId, target) as unknown as Array<{ id: string; status: MessageStatus }>;
+      if (rows.length === 0) {
+        return [];
+      }
+      const timestamp = now();
+      const settle = this.db.prepare(
+        "UPDATE messages SET status = 'settled', reason = ?, updated_at = ? WHERE id = ?",
+      );
+      const dropLease = this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?");
+      for (const row of rows) {
+        settle.run(reason, timestamp, row.id);
+        dropLease.run(row.id);
+      }
+      return rows.map((row) => ({ id: row.id, previousStatus: row.status }));
+    });
+  }
+
+  /**
+   * Restore previously-settled messages back to a safely redeliverable 'pending'
+   * state. Used to roll back {@link settleMovedMessages} when an in-progress agent
+   * move fails after its mailbox was settled.
+   */
+  restoreMovedMessages(entries: SettledMessage[]): void {
+    if (entries.length === 0) {
+      return;
+    }
+    this.transaction(() => {
+      const timestamp = now();
+      const restore = this.db.prepare(
+        "UPDATE messages SET status = 'pending', reason = NULL, updated_at = ? WHERE id = ? AND status = 'settled'",
+      );
+      for (const entry of entries) {
+        restore.run(timestamp, entry.id);
       }
     });
   }

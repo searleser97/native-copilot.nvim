@@ -87,8 +87,8 @@ function M.start(opts, on_event)
   }
   state.job = vim.fn.jobstart(command, {
     cwd = opts.workspace or vim.uv.cwd(),
-    env = opts.runtime_command and {
-      NATIVE_COPILOT_RUNTIME_COMMAND = opts.runtime_command,
+    env = opts.runtime_command_resolver and {
+      NATIVE_COPILOT_RUNTIME_COMMAND_RESOLVER = opts.runtime_command_resolver,
     } or nil,
     stdout_buffered = false,
     stderr_buffered = false,

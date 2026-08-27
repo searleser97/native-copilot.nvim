@@ -11,22 +11,25 @@ end
 fleet.show_member('standard')
 fleet._on_event({
   v = 1,
-  type = 'mode.changed',
+  type = 'standard.ready',
   payload = {
-    mode = 'standard',
     displayName = 'Copilot',
   },
 })
 assert(
   vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt == true,
-  'mode initialization did not return focus to the input buffer'
+  'Standard initialization did not return focus to the input buffer'
+)
+assert(
+  require('native_copilot.buffers').get_member('standard'),
+  'Standard supervisor session was not created'
 )
 fleet._on_event({
   v = 1,
   type = 'fleet.loading',
   payload = {
-    mode = 'fleet-loading',
     fleetId = 'ui-smoke',
+    name = 'UI Smoke Fleet',
     entryMember = 'coordinator',
     recovered = false,
     connectingMembers = { 'coordinator', 'planner', 'implementer', 'reviewer' },
@@ -39,6 +42,10 @@ fleet._on_event({
     },
   },
 })
+assert(
+  require('native_copilot.buffers').get_member('standard'),
+  'Standard supervisor was dropped when a Fleet started loading'
+)
 local loading_entry = require('native_copilot.buffers').get_member('coordinator')
 assert(loading_entry.state == 'loading', 'Fleet member did not enter loading state')
 assert(
@@ -52,10 +59,10 @@ local loading_text = table.concat(
 assert(loading_text:find('Starting Fleet', 1, true), 'Fleet startup activity is missing')
 fleet._on_event({
   v = 1,
-  type = 'mode.changed',
+  type = 'fleet.ready',
   payload = {
-    mode = 'fleet',
     fleetId = 'ui-smoke',
+    name = 'UI Smoke Fleet',
     entryMember = 'coordinator',
     members = {
       { id = 'coordinator', displayName = 'Coordinator' },
@@ -67,8 +74,13 @@ fleet._on_event({
   },
 })
 assert(
-  vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt == true,
-  'Fleet initialization did not return focus to the input buffer'
+  require('native_copilot.buffers').get_member('standard'),
+  'Standard supervisor was dropped when a Fleet became ready'
+)
+fleet.show_member('coordinator')
+assert(
+  vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt ~= true,
+  'showing a Fleet member should focus its conversation view'
 )
 fleet._on_event({
   v = 1,
@@ -890,15 +902,16 @@ local visible = {}
 for _, win in ipairs(wins) do
   visible[vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))] = true
 end
+assert(visible['native-copilot://standard/conversation'], 'Standard supervisor missing from overview')
 assert(visible['native-copilot://coordinator/conversation'])
 assert(visible['native-copilot://planner/conversation'])
 assert(visible['native-copilot://implementer/conversation'])
-assert(visible['native-copilot://reviewer/conversation'])
 local prompt_visible = false
 for name in pairs(visible) do
   if vim.fn.fnamemodify(name, ':t') == 'AI Prompt' then prompt_visible = true end
 end
 assert(prompt_visible, 'missing prompt buffer; visible=' .. vim.inspect(visible))
+assert(not visible['native-copilot://reviewer/conversation'])
 assert(not visible['native-copilot://observer/conversation'])
 
 fleet._on_event({
@@ -961,12 +974,15 @@ fleet._on_event({
   done = false,
   payload = {
     eventType = 'tool.execution_start',
-    data = { toolCallId = 'tool-call-1', toolName = 'view', arguments = { path = 'secret' } },
+    data = {
+      toolCallId = 'tool-call-1',
+      toolName = 'view',
+      arguments = { path = 'nested/CLAUDE.md' },
+    },
   },
 })
 conversation_text = buffer_text(observer_buf)
-assert(conversation_text:find('🟡 **[tool] view** — processing…', 1, true))
-assert(not conversation_text:find('secret', 1, true))
+assert(conversation_text:find('🟡 **[tool] view** — nested/CLAUDE.md', 1, true))
 local tool_row = assert(line_with(observer_buf, '[tool] view'))
 fleet._on_event({
   v = 1,
@@ -994,7 +1010,7 @@ local tool_detail_buf = vim.api.nvim_get_current_buf()
 local tool_detail_text = buffer_text(tool_detail_buf)
 assert(vim.api.nvim_win_get_config(0).relative == 'editor')
 assert(tool_detail_text:find('Arguments:', 1, true))
-assert(tool_detail_text:find('secret', 1, true))
+assert(tool_detail_text:find('nested/CLAUDE.md', 1, true))
 assert(tool_detail_text:find('Result:', 1, true))
 assert(tool_detail_text:find('tool output must stay hidden', 1, true))
 vim.api.nvim_buf_call(tool_detail_buf, function()
@@ -1120,7 +1136,7 @@ conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1,
 assert(not conversation_text:find('tool output must stay hidden', 1, true))
 assert(not conversation_text:find('secret', 1, true))
 assert(
-  conversation_text:find('🟢 **[tool] view** — completed', 1, true),
+  conversation_text:find('🟢 **[tool] view** — nested/CLAUDE.md', 1, true),
   'tool status did not update in place'
 )
 assert(
@@ -1203,5 +1219,256 @@ assert(
   'reopened conversation did not follow its last line'
 )
 assert(vim.fn.line('w$') == vim.api.nvim_buf_line_count(observer_buf), 'reopened bottom is hidden')
-fleet.close()
+
+-- Multiple Fleets run concurrently. The same raw member id in two Fleets must
+-- not collide, and the Standard supervisor stays active throughout.
+local function start_fleet(fleet_id, name, members)
+  fleet._on_event({
+    v = 1,
+    type = 'fleet.loading',
+    payload = {
+      fleetId = fleet_id,
+      name = name,
+      entryMember = members[1].id,
+      recovered = false,
+      connectingMembers = { members[1].id },
+      members = members,
+    },
+  })
+  fleet._on_event({
+    v = 1,
+    type = 'fleet.ready',
+    payload = { fleetId = fleet_id, name = name, entryMember = members[1].id, members = members },
+  })
+end
+
+start_fleet('fleet_a', 'Fleet A', { { id = 'fleet_a/planner', displayName = 'Planner' } })
+start_fleet('fleet_b', 'Fleet B', { { id = 'fleet_b/planner', displayName = 'Planner' } })
+
+local multi_buffers = require('native_copilot.buffers')
+assert(multi_buffers.get_member('fleet_a/planner'), 'Fleet A planner missing')
+assert(multi_buffers.get_member('fleet_b/planner'), 'Fleet B planner missing')
+assert(
+  multi_buffers.buffer('fleet_a/planner', 'conversation')
+    ~= multi_buffers.buffer('fleet_b/planner', 'conversation'),
+  'two Fleets sharing a raw member id collided on one buffer'
+)
+assert(multi_buffers.get_member('standard'), 'Standard supervisor was dropped while Fleets ran')
+
+fleet._on_event({
+  v = 1,
+  id = 'a-planner-message',
+  type = 'conversation.message',
+  memberId = 'fleet_a/planner',
+  target = 'conversation',
+  done = true,
+  payload = { messageId = 'a-planner-message', content = 'Only for Fleet A planner.' },
+})
+local a_text = table.concat(
+  vim.api.nvim_buf_get_lines(multi_buffers.buffer('fleet_a/planner', 'conversation'), 0, -1, false),
+  '\n'
+)
+local b_text = table.concat(
+  vim.api.nvim_buf_get_lines(multi_buffers.buffer('fleet_b/planner', 'conversation'), 0, -1, false),
+  '\n'
+)
+assert(a_text:find('Only for Fleet A planner.', 1, true), 'Fleet A planner missed its own message')
+assert(
+  not b_text:find('Only for Fleet A planner.', 1, true),
+  'a message leaked across Fleets that share a raw member id'
+)
+
+-- Adding and removing members in one active Fleet is incremental.
+fleet._on_event({
+  v = 1,
+  type = 'fleet.updated',
+  payload = {
+    fleetId = 'fleet_b',
+    entryMember = 'fleet_b/planner',
+    added = { { id = 'fleet_b/reviewer', displayName = 'Reviewer' } },
+    updated = {},
+    removed = {},
+    members = { { id = 'fleet_b/planner' }, { id = 'fleet_b/reviewer' } },
+  },
+})
+assert(multi_buffers.get_member('fleet_b/reviewer'), 'fleet.updated did not add the new member')
+fleet._on_event({
+  v = 1,
+  type = 'fleet.updated',
+  payload = {
+    fleetId = 'fleet_b',
+    entryMember = 'fleet_b/planner',
+    added = {},
+    updated = {},
+    removed = { 'fleet_b/reviewer' },
+    members = { { id = 'fleet_b/planner' } },
+  },
+})
+assert(not multi_buffers.get_member('fleet_b/reviewer'), 'fleet.updated did not remove the member')
+assert(
+  multi_buffers.get_member('fleet_b/planner'),
+  'fleet.updated wrongly removed a retained member'
+)
+
+-- Stopping one Fleet leaves Standard and the other Fleet untouched.
+fleet._on_event({
+  v = 1,
+  type = 'fleet.stopped',
+  payload = { fleetId = 'fleet_a', members = { 'fleet_a/planner' } },
+})
+assert(not multi_buffers.get_member('fleet_a/planner'), 'stopping Fleet A did not remove its members')
+assert(multi_buffers.get_member('fleet_b/planner'), 'stopping Fleet A wrongly removed Fleet B')
+assert(multi_buffers.get_member('standard'), 'stopping a Fleet dropped the Standard supervisor')
+
+-- Instruction discovery remains an aggregate count. Individual nested reads
+-- appear through normal tool rows instead.
+fleet._on_event({
+  v = 1,
+  type = 'environment.loaded',
+  memberId = 'standard',
+  payload = {
+    component = 'Instructions',
+    items = {
+      {
+        label = 'Repository guidelines',
+        sourcePath = '.github/copilot-instructions.md',
+        type = 'repository',
+      },
+      { label = 'Personal notes', sourcePath = 'AGENTS.md' },
+    },
+  },
+})
+local standard_text = table.concat(
+  vim.api.nvim_buf_get_lines(multi_buffers.buffer('standard', 'conversation'), 0, -1, false),
+  '\n'
+)
+assert(
+  standard_text:find('[environment] Instructions', 1, true),
+  'aggregate instruction row was not rendered'
+)
+assert(
+  standard_text:find('2 loaded', 1, true),
+  'aggregate instruction count was not rendered'
+)
+assert(
+  not standard_text:find('.github/copilot-instructions.md', 1, true),
+  'instruction source path leaked into the aggregate timeline'
+)
+
+-- Moving an agent between two active Fleets follows the moved member without
+-- collision and leaves every other member in place.
+start_fleet('fleet_c', 'Fleet C', {
+  { id = 'fleet_c/planner', displayName = 'Planner' },
+  { id = 'fleet_c/mover', displayName = 'Mover' },
+})
+start_fleet('fleet_d', 'Fleet D', { { id = 'fleet_d/planner', displayName = 'Planner' } })
+assert(multi_buffers.get_member('fleet_c/mover'), 'move setup: source mover missing')
+
+-- The moved agent carries its own conversation history before the move.
+fleet._on_event({
+  v = 1,
+  id = 'mover-history',
+  type = 'conversation.message',
+  memberId = 'fleet_c/mover',
+  target = 'conversation',
+  done = true,
+  payload = { messageId = 'mover-history', content = 'Mover history line.' },
+})
+
+-- Source Fleet loses the moved agent incrementally (never a full reset).
+fleet._on_event({
+  v = 1,
+  type = 'fleet.updated',
+  payload = {
+    fleetId = 'fleet_c',
+    entryMember = 'fleet_c/planner',
+    added = {},
+    updated = {},
+    removed = { 'fleet_c/mover' },
+    members = { { id = 'fleet_c/planner' } },
+  },
+})
+-- Destination Fleet gains it under its own qualified target.
+fleet._on_event({
+  v = 1,
+  type = 'fleet.updated',
+  payload = {
+    fleetId = 'fleet_d',
+    entryMember = 'fleet_d/planner',
+    added = { { id = 'fleet_d/mover', displayName = 'Mover' } },
+    updated = {},
+    removed = {},
+    members = { { id = 'fleet_d/planner' }, { id = 'fleet_d/mover' } },
+  },
+})
+fleet._on_event({
+  v = 1,
+  type = 'fleet.agent.moved',
+  payload = {
+    sourceFleetId = 'fleet_c',
+    destinationFleetId = 'fleet_d',
+    agentId = 'mover',
+  },
+})
+
+assert(not multi_buffers.get_member('fleet_c/mover'), 'move did not remove the agent from the source Fleet')
+assert(multi_buffers.get_member('fleet_d/mover'), 'move did not add the agent to the destination Fleet')
+assert(multi_buffers.get_member('fleet_c/planner'), 'move disturbed a retained source member')
+assert(multi_buffers.get_member('fleet_d/planner'), 'move disturbed a retained destination member')
+assert(
+  multi_buffers.buffer('fleet_c/planner', 'conversation')
+    ~= multi_buffers.buffer('fleet_d/mover', 'conversation'),
+  'moved agent collided with a source member buffer'
+)
+assert(multi_buffers.get_member('standard'), 'move dropped the Standard supervisor')
+
+-- Host-restart reconciliation: a `hello` treats status.fleets as authoritative,
+-- dropping local Fleets and members the host no longer reports while preserving
+-- the reported ones and the Standard supervisor.
+start_fleet('fleet_e', 'Fleet E', {
+  { id = 'fleet_e/planner', displayName = 'Planner' },
+  { id = 'fleet_e/worker', displayName = 'Worker' },
+})
+start_fleet('fleet_f', 'Fleet F', { { id = 'fleet_f/planner', displayName = 'Planner' } })
+assert(multi_buffers.get_member('fleet_e/worker'), 'reconcile setup: fleet_e worker missing')
+assert(multi_buffers.get_member('fleet_f/planner'), 'reconcile setup: fleet_f planner missing')
+
+fleet._on_event({
+  v = 1,
+  type = 'hello',
+  payload = {
+    recoverableFleets = {},
+    standard = { displayName = 'Copilot' },
+    status = {
+      standard = { state = 'idle' },
+      fleets = {
+        {
+          fleetId = 'fleet_e',
+          name = 'Fleet E',
+          entryMember = 'fleet_e/planner',
+          -- fleet_e/worker is intentionally absent: the host no longer reports it.
+          members = { { id = 'fleet_e/planner', displayName = 'Planner' } },
+        },
+        -- fleet_f is intentionally absent entirely: the host no longer runs it.
+      },
+      members = { { id = 'fleet_e/planner', state = 'idle' } },
+    },
+  },
+})
+
+assert(multi_buffers.get_member('standard'), 'reconcile dropped the Standard supervisor')
+assert(multi_buffers.get_member('fleet_e/planner'), 'reconcile dropped a still-reported member')
+assert(
+  not multi_buffers.get_member('fleet_e/worker'),
+  'reconcile kept a member the host no longer reports'
+)
+assert(
+  not multi_buffers.get_member('fleet_f/planner'),
+  'reconcile kept a Fleet the host no longer reports'
+)
+
+vim.cmd('tabonly')
+local close_ok, close_error = pcall(fleet.close)
+assert(close_ok, 'closing Native Copilot as the last tab failed: ' .. tostring(close_error))
+assert(#vim.api.nvim_list_tabpages() == 1, 'closing the last Native Copilot tab left extra tabs')
 print('nvim UI smoke passed')

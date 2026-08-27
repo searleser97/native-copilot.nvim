@@ -57,9 +57,7 @@ end
 
 local defaults = {
   node_command = 'node',
-  runtime_command = vim.g.native_copilot_command
-    or vim.env.NVIM_COPILOT_CMD
-    or vim.env.COPILOT_CLI_CMD,
+  runtime_command_resolver = vim.env.NVIM_COPILOT_CMD_RESOLVER,
   database_path = default_database,
   workspace = nil,
   prompt_height = 8,
@@ -104,6 +102,8 @@ local state = {
   selected = 'standard',
   mode = 'stopped',
   active_fleet = nil,
+  fleets = {},
+  member_meta = {},
   member_order = { 'standard' },
   tasks = {},
   environment = {},
@@ -311,8 +311,8 @@ local function submit_prompt()
     notify('The prompt is empty.', vim.log.levels.WARN)
     return
   end
-  if state.mode == 'fleet' and not buffers.get_member(state.selected) then
-    notify('Select a fleet member before sending.', vim.log.levels.WARN)
+  if not buffers.get_member(state.selected) then
+    notify('Select an agent before sending.', vim.log.levels.WARN)
     return
   end
   set_prompt_lines({ '' })
@@ -569,6 +569,32 @@ local function task_at_cursor()
   return item, member_id
 end
 
+local function tool_timeline_detail(tool_name, arguments, status)
+  if type(arguments) ~= 'table' then
+    return status == 'running' and 'processing…' or status
+  end
+
+  local name = (tool_name or ''):lower()
+  local detail
+  if name == 'view' or name == 'read' or name == 'read_file' or name == 'read-file' then
+    detail = json_value(arguments.path)
+      or json_value(arguments.filePath)
+      or json_value(arguments.file)
+      or json_value(arguments.fileName)
+  elseif name == 'glob' then
+    detail = json_value(arguments.pattern)
+  elseif name == 'rg' or name == 'grep' or name == 'search' or name == 'search_code' then
+    detail = json_value(arguments.pattern) or json_value(arguments.query)
+  end
+
+  if type(detail) ~= 'string' or detail == '' then
+    return status == 'running' and 'processing…' or status
+  end
+  detail = detail:gsub('[\r\n]+', ' ')
+  if #detail > 180 then detail = detail:sub(1, 177) .. '...' end
+  return detail
+end
+
 local function update_tool_call(member_id, call_id, tool_name, status, details)
   local activity = state.tool_calls[member_id]
   if not activity then
@@ -598,7 +624,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     kind = 'tool',
     label = item.name,
     status = status,
-    detail = status == 'running' and 'processing…' or status,
+    detail = tool_timeline_detail(item.name, item.details.arguments, status),
     details = item.details,
   })
 
@@ -920,6 +946,59 @@ local function ordered_members()
   return result
 end
 
+local function target_fleet_id(member_id)
+  local slash = member_id:find('/', 1, true)
+  if not slash then return nil end
+  return member_id:sub(1, slash - 1)
+end
+
+local function order_contains(member_id)
+  for _, id in ipairs(state.member_order) do
+    if id == member_id then return true end
+  end
+  return false
+end
+
+local function add_to_order(member_id)
+  if not order_contains(member_id) then table.insert(state.member_order, member_id) end
+end
+
+local function remove_from_order(member_id)
+  for index, id in ipairs(state.member_order) do
+    if id == member_id then
+      table.remove(state.member_order, index)
+      return
+    end
+  end
+end
+
+-- Clears one member's transient UI state and buffers without touching any other
+-- member, keeping Standard and other Fleets intact during incremental lifecycle
+-- transitions.
+local function reset_member(member_id)
+  buffers.remove_member(member_id)
+  state.tasks[member_id] = nil
+  state.environment[member_id] = nil
+  state.tool_calls[member_id] = nil
+  state.session_metrics[member_id] = nil
+  state.active_prompts[member_id] = nil
+  state.queued_prompts[member_id] = nil
+  state.prompt_queue_paused[member_id] = nil
+  state.command_requests[member_id] = nil
+  state.member_meta[member_id] = nil
+  commands.set_catalog(member_id, nil)
+end
+
+local function member_label(member_id)
+  local entry = buffers.get_member(member_id)
+  local name = entry and entry.display_name or member_id
+  local meta = state.member_meta[member_id]
+  if meta and meta.fleetName then
+    return ('%s · %s'):format(meta.fleetName, name)
+  end
+  return name
+end
+
 local function cycle_member(step)
   local members = ordered_members()
   if #members == 0 then return end
@@ -1033,7 +1112,7 @@ local function start_host()
   if protocol.is_running() then return true end
   return protocol.start({
     node_command = options.node_command,
-    runtime_command = options.runtime_command,
+    runtime_command_resolver = options.runtime_command_resolver,
     database_path = options.database_path,
     workspace = current_workspace(),
   }, M._on_event)
@@ -1049,6 +1128,9 @@ end
 function M.close()
   if not is_ui_open() then return end
   close_task_detail()
+  if #vim.api.nvim_list_tabpages() == 1 then
+    vim.cmd('tabnew')
+  end
   vim.api.nvim_set_current_tabpage(state.tab)
   vim.cmd('tabclose')
   state.tab = nil
@@ -1110,19 +1192,38 @@ local function update_status_buffer()
     vim.bo[state.status_buf].filetype = 'native-copilot'
     vim.b[state.status_buf].native_copilot = true
   end
+  local active_fleets = {}
+  for fleet_id in pairs(state.fleets) do table.insert(active_fleets, fleet_id) end
+  table.sort(active_fleets)
   local lines = {
     '# Native Copilot Status',
     '',
     ('- **Mode:** %s'):format(state.mode),
-    ('- **Fleet:** %s'):format(state.active_fleet or 'none'),
+    ('- **Standard:** %s'):format(buffers.get_member('standard') and 'active' or 'stopped'),
+    ('- **Active Fleets:** %d'):format(#active_fleets),
     ('- **Selected recipient:** %s'):format(state.selected),
     '',
-    '| Member | State | Unread |',
-    '|---|---:|---:|',
   }
+  for _, fleet_id in ipairs(active_fleets) do
+    local fleet = state.fleets[fleet_id]
+    table.insert(lines, ('- Fleet `%s` — %s (%d members)'):format(
+      fleet_id,
+      fleet.name or fleet_id,
+      #(fleet.members or {})
+    ))
+  end
+  if #active_fleets > 0 then table.insert(lines, '') end
+  table.insert(lines, '| Member | Fleet | State | Unread |')
+  table.insert(lines, '|---|---|---:|---:|')
   for _, member_id in ipairs(ordered_members()) do
     local entry = buffers.get_member(member_id)
-    table.insert(lines, ('| %s | %s | %d |'):format(entry.display_name, entry.state, entry.unread))
+    local meta = state.member_meta[member_id]
+    table.insert(lines, ('| %s | %s | %s | %d |'):format(
+      entry.display_name,
+      meta and (meta.fleetName or meta.fleetId) or '—',
+      entry.state,
+      entry.unread
+    ))
   end
   vim.bo[state.status_buf].modifiable = true
   vim.api.nvim_buf_set_lines(state.status_buf, 0, -1, false, lines)
@@ -1323,7 +1424,7 @@ function M.select()
     for _, view_id in ipairs({ 'conversation', 'messages' }) do
       table.insert(entries, {
         display = ('%s — %s%s'):format(
-          entry.display_name,
+          member_label(member_id),
           view_id,
           entry.unread > 0 and ('  [' .. entry.unread .. ' unread]') or ''
         ),
@@ -1369,8 +1470,19 @@ function M.select_fleet()
   if not start_host() then return end
   ensure_ui()
   local entries = {}
-  if state.mode == 'fleet' then
-    table.insert(entries, { display = 'Stop Fleet and return to Standard Copilot', kind = 'stop' })
+  local active_ids = {}
+  for fleet_id in pairs(state.fleets) do
+    table.insert(active_ids, fleet_id)
+  end
+  table.sort(active_ids)
+  for _, fleet_id in ipairs(active_ids) do
+    local fleet = state.fleets[fleet_id]
+    table.insert(entries, {
+      display = ('Stop %s (%d members)'):format(fleet.name or fleet_id, #(fleet.members or {})),
+      ordinal = ('stop %s %s'):format(fleet_id, fleet.name or ''),
+      kind = 'stop',
+      fleetId = fleet_id,
+    })
   end
   for _, run in ipairs(state.recoverable_fleets) do
     table.insert(entries, {
@@ -1395,13 +1507,7 @@ function M.select_fleet()
   end
   picker('Copilot Fleets', entries, function(item)
     if item.kind == 'stop' then
-      buffers.reset()
-      state.configured_buffers = {}
-      state.tasks = {}
-      state.member_order = { 'standard' }
-      state.selected = 'standard'
-      ensure_member('standard', 'Copilot')
-      send('fleet.stop')
+      send('fleet.stop', { fleetId = item.fleetId })
       return
     end
     if item.kind == 'recover' then
@@ -1496,6 +1602,62 @@ function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
     state.recoverable_fleets = payload.recoverableFleets or {}
+    local status = payload.status or {}
+    -- Reconcile against a host that may already have Standard and Fleets running
+    -- (for example when the UI reattaches to a live host).
+    if status.standard then
+      add_to_order('standard')
+      ensure_member('standard', (payload.standard and payload.standard.displayName) or 'Copilot')
+      if state.mode == 'stopped' then state.mode = 'standard' end
+    end
+    -- status.fleets is authoritative: rebuild each reported Fleet, and after a host
+    -- restart drop any local Fleet or member the host no longer reports so stale
+    -- buffers/order entries never linger.
+    local reported_fleets = {}
+    local reported_members = {}
+    for _, fleet in ipairs(status.fleets or {}) do
+      local fleet_id = fleet.fleetId
+      reported_fleets[fleet_id] = true
+      local record = state.fleets[fleet_id] or { members = {} }
+      local previous_members = record.members or {}
+      record.name = fleet.name
+      record.entryMember = fleet.entryMember
+      record.members = {}
+      for _, member_info in ipairs(fleet.members or {}) do
+        ensure_member(member_info.id, member_info.displayName)
+        add_to_order(member_info.id)
+        table.insert(record.members, member_info.id)
+        reported_members[member_info.id] = true
+        state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = fleet.name }
+      end
+      -- Remove members this Fleet previously had but no longer reports.
+      for _, member_id in ipairs(previous_members) do
+        if not reported_members[member_id] then
+          reset_member(member_id)
+          remove_from_order(member_id)
+          if state.selected == member_id then state.selected = 'standard' end
+        end
+      end
+      state.fleets[fleet_id] = record
+    end
+    -- Remove entire Fleets the host no longer reports.
+    for fleet_id, record in pairs(state.fleets) do
+      if not reported_fleets[fleet_id] then
+        for _, member_id in ipairs(record.members or {}) do
+          reset_member(member_id)
+          remove_from_order(member_id)
+          if state.selected == member_id then state.selected = 'standard' end
+        end
+        state.fleets[fleet_id] = nil
+      end
+    end
+    for _, member_info in ipairs(status.members or {}) do
+      if buffers.get_member(member_info.id) then
+        buffers.set_state(member_info.id, member_info.state == 'busy' and 'busy' or 'idle')
+      end
+    end
+    if not buffers.get_member(state.selected) then state.selected = 'standard' end
+    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
     return
   elseif message.type == 'sessions.list' then
     local entries = {}
@@ -1851,97 +2013,142 @@ function M._on_event(message)
     buffers.append_activity_block(
       'standard',
       'Fleet requested',
-      ('%s will start when the current turn becomes idle.'):format(payload.fleetId or 'Fleet')
+      ('%s will start alongside Standard when the current turn becomes idle.'):format(
+        payload.fleetId or 'Fleet'
+      )
     )
     return
-  elseif message.type == 'fleet.loading' then
-    commands.reset_catalogs()
-    state.command_requests = {}
+  elseif message.type == 'standard.ready' then
     close_task_detail()
-    buffers.reset()
-    state.configured_buffers = {}
-    state.tasks = {}
-    state.environment = {}
-    state.tool_calls = {}
-    state.prompt_calls = {}
-    state.active_prompts = {}
-    state.queued_prompts = {}
-    state.prompt_queue_paused = {}
-    state.prompt_queue_edit = nil
-    state.session_metrics = {}
-    state.schedules = {}
-    state.mode = 'fleet-loading'
-    state.active_fleet = payload.fleetId
-    state.member_order = {}
-    local connecting = {}
-    for _, member_id in ipairs(payload.connectingMembers or {}) do connecting[member_id] = true end
-    for _, member_info in ipairs(payload.members or {}) do
-      table.insert(state.member_order, member_info.id)
-      ensure_member(member_info.id, member_info.displayName)
-      buffers.set_state(member_info.id, connecting[member_info.id] and 'loading' or 'standby')
-    end
-    state.selected = payload.entryMember or state.member_order[1]
-    if state.selected then
-      buffers.append_activity_block(
-        state.selected,
-        payload.recovered and 'Recovering Fleet' or 'Starting Fleet',
-        ('Connecting %d of %d configured members...'):format(
-          #(payload.connectingMembers or {}),
-          #state.member_order
-        )
-      )
-    end
-    if is_ui_open() and state.selected then M.show_member(state.selected) end
-    return
-  elseif message.type == 'session.loading' then
-    commands.reset_catalogs()
-    state.command_requests = {}
-    close_task_detail()
-    buffers.reset()
-    state.configured_buffers = {}
-    state.tasks = {}
-    state.environment = {}
-    state.tool_calls = {}
-    state.prompt_calls = {}
-    state.active_prompts = {}
-    state.queued_prompts = {}
-    state.prompt_queue_paused = {}
-    state.prompt_queue_edit = nil
-    state.session_metrics = {}
-    state.schedules = {}
-    state.task_detail = nil
-    state.task_progress = nil
-    state.mode = 'standard-loading'
-    state.active_fleet = nil
-    state.member_order = { 'standard' }
-    state.selected = 'standard'
-    ensure_member('standard', 'Copilot')
-    buffers.set_state('standard', 'loading')
-    if is_ui_open() then M.show_member('standard') end
-    return
-  elseif message.type == 'mode.changed' then
-    commands.reset_catalogs()
-    state.command_requests = {}
-    close_task_detail()
-    state.mode = payload.mode or 'stopped'
-    state.active_fleet = payload.fleetId
-    if payload.mode == 'standard' then
-      state.member_order = { 'standard' }
-      state.selected = 'standard'
-      ensure_member('standard', payload.displayName or 'Copilot')
-      if protocol.is_running() then send('hello') end
-    elseif payload.mode == 'fleet' then
-      state.member_order = {}
-      for _, member_info in ipairs(payload.members or {}) do
-        table.insert(state.member_order, member_info.id)
-        ensure_member(member_info.id, member_info.displayName)
-      end
-      state.selected = payload.entryMember or state.member_order[1]
-    end
+    state.mode = 'standard'
+    add_to_order('standard')
+    ensure_member('standard', payload.displayName or 'Copilot')
+    buffers.set_state('standard', 'idle')
+    if not buffers.get_member(state.selected) then state.selected = 'standard' end
+    if protocol.is_running() then send('hello') end
     if is_ui_open() and buffers.get_member(state.selected) then
       M.show_member(state.selected)
       focus_prompt()
     end
+    return
+  elseif message.type == 'session.loading' then
+    -- Only the Standard session is reloaded; concurrent Fleets are untouched.
+    close_task_detail()
+    reset_member('standard')
+    state.mode = 'standard-loading'
+    add_to_order('standard')
+    ensure_member('standard', 'Copilot')
+    buffers.set_state('standard', 'loading')
+    state.selected = 'standard'
+    if is_ui_open() then M.show_member('standard') end
+    return
+  elseif message.type == 'fleet.loading' then
+    local fleet_id = payload.fleetId
+    state.fleets[fleet_id] = {
+      name = payload.name,
+      entryMember = payload.entryMember,
+      recovered = payload.recovered,
+      members = {},
+    }
+    local connecting = {}
+    for _, member_id in ipairs(payload.connectingMembers or {}) do connecting[member_id] = true end
+    for _, member_info in ipairs(payload.members or {}) do
+      ensure_member(member_info.id, member_info.displayName)
+      add_to_order(member_info.id)
+      table.insert(state.fleets[fleet_id].members, member_info.id)
+      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = payload.name }
+      buffers.set_state(member_info.id, connecting[member_info.id] and 'loading' or 'standby')
+    end
+    if payload.entryMember and buffers.get_member(payload.entryMember) then
+      buffers.append_activity_block(
+        payload.entryMember,
+        payload.recovered and 'Recovering Fleet' or 'Starting Fleet',
+        ('Connecting %d of %d configured members...'):format(
+          #(payload.connectingMembers or {}),
+          #(payload.members or {})
+        )
+      )
+    end
+    if is_ui_open() and not buffers.get_member(state.selected) then
+      state.selected = payload.entryMember or state.selected
+      if buffers.get_member(state.selected) then M.show_member(state.selected) end
+    end
+    return
+  elseif message.type == 'fleet.ready' then
+    local fleet_id = payload.fleetId
+    local fleet = state.fleets[fleet_id] or { members = {} }
+    fleet.name = payload.name
+    fleet.entryMember = payload.entryMember
+    fleet.recovered = payload.recovered
+    fleet.members = {}
+    for _, member_info in ipairs(payload.members or {}) do
+      ensure_member(member_info.id, member_info.displayName)
+      add_to_order(member_info.id)
+      table.insert(fleet.members, member_info.id)
+      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = payload.name }
+    end
+    state.fleets[fleet_id] = fleet
+    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
+    return
+  elseif message.type == 'fleet.updated' then
+    local fleet_id = payload.fleetId
+    local fleet = state.fleets[fleet_id]
+    if not fleet then return end
+    for _, member_id in ipairs(payload.removed or {}) do
+      reset_member(member_id)
+      remove_from_order(member_id)
+      if state.selected == member_id then
+        state.selected = 'standard'
+        if is_ui_open() and buffers.get_member('standard') then M.show_member('standard') end
+      end
+    end
+    for _, member_info in ipairs(payload.added or {}) do
+      ensure_member(member_info.id, member_info.displayName)
+      add_to_order(member_info.id)
+      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = fleet.name }
+    end
+    for _, member_info in ipairs(payload.updated or {}) do
+      ensure_member(member_info.id, member_info.displayName)
+      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = fleet.name }
+    end
+    fleet.entryMember = payload.entryMember or fleet.entryMember
+    fleet.members = {}
+    for _, member_info in ipairs(payload.members or {}) do
+      table.insert(fleet.members, member_info.id)
+    end
+    return
+  elseif message.type == 'fleet.stopped' then
+    local fleet_id = payload.fleetId
+    for _, member_id in ipairs(payload.members or {}) do
+      reset_member(member_id)
+      remove_from_order(member_id)
+      if state.selected == member_id then state.selected = 'standard' end
+    end
+    state.fleets[fleet_id] = nil
+    if not buffers.get_member(state.selected) then state.selected = 'standard' end
+    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
+    return
+  elseif message.type == 'fleet.error' then
+    buffers.append_activity_block(
+      'standard',
+      'Fleet error',
+      ('%s: %s'):format(payload.fleetId or 'Fleet', payload.message or 'startup failed')
+    )
+    return
+  elseif message.type == 'fleet.agent.updated' then
+    notify(('Fleet %s: %s %s'):format(
+      payload.fleetId or '?',
+      payload.action or 'updated',
+      payload.agentId or ''
+    ))
+    return
+  elseif message.type == 'fleet.agent.moved' then
+    notify(('Moved %s from Fleet %s to Fleet %s%s'):format(
+      payload.agentId or '?',
+      payload.sourceFleetId or '?',
+      payload.destinationFleetId or '?',
+      payload.sessionPreserved and ' (history preserved)' or ''
+    ))
     return
   end
 

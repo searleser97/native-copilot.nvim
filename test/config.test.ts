@@ -59,6 +59,53 @@ describe("dynamic fleet configuration", () => {
     });
   });
 
+  it("allows multiple same-role agents that only differ by ID", () => {
+    const definition: DynamicFleetDefinition = {
+      id: "dual_planning",
+      name: "Dual Planning",
+      description: "Two planners collaborate with a shared implementer.",
+      objective: "Plan the change from two angles, then implement it.",
+      entryAgent: "planner_a",
+      agents: [
+        {
+          id: "planner_a",
+          displayName: "Planner",
+          description: "Plans the change.",
+          prompt: "Draft an approach and coordinate with the other planner.",
+          permissions: { mode: "prompt" },
+          canTalkTo: ["planner_b", "implementer"],
+        },
+        {
+          id: "planner_b",
+          displayName: "Planner",
+          description: "Plans the change.",
+          prompt: "Draft an alternative approach and coordinate with the other planner.",
+          permissions: { mode: "prompt" },
+          canTalkTo: ["planner_a", "implementer"],
+        },
+        {
+          id: "implementer",
+          displayName: "Implementer",
+          description: "Implements the agreed plan.",
+          prompt: "Implement the plan the planners agree on.",
+          permissions: { mode: "inherit" },
+          canTalkTo: ["planner_a", "planner_b"],
+        },
+      ],
+    };
+
+    const result = validateFleet(definition);
+
+    expect(result.valid).toBe(true);
+    expect(result.issues).toEqual([]);
+    expect(result.fleet?.members.get("planner_a")?.displayName).toBe("Planner");
+    expect(result.fleet?.members.get("planner_b")?.displayName).toBe("Planner");
+    // Same role, distinct routing identities and dedicated peer tools.
+    expect(result.fleet?.members.get("implementer")?.recipients).toEqual(
+      new Set(["planner_a", "planner_b"]),
+    );
+  });
+
   it("rejects peer tools targeting unknown agents", () => {
     const definition = structuredClone(exampleFleet);
     definition.agents[0]!.canTalkTo.push("tester");

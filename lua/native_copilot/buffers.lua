@@ -1072,4 +1072,18 @@ function M.reset()
   end
   registry = {}
 end
+
+-- Removes a single member's buffers without disturbing other members, so one
+-- Fleet stopping or an agent being removed never clears the Standard session or
+-- another concurrently active Fleet.
+function M.remove_member(member_id)
+  local entry = registry[member_id]
+  if not entry then return end
+  for _, view in pairs(entry.views) do
+    if vim.api.nvim_buf_is_valid(view.buf) then
+      pcall(vim.api.nvim_buf_delete, view.buf, { force = true })
+    end
+  end
+  registry[member_id] = nil
+end
 return M

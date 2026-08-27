@@ -1,9 +1,9 @@
 # native-copilot.nvim
 
-A native Neovim interface for GitHub Copilot with two explicit operating modes:
+A native Neovim interface for GitHub Copilot built around a persistent supervisor:
 
-- **Standard Copilot**: one general-purpose Copilot session per Neovim instance.
-- **Fleet mode**: any number of independently configured Copilot sessions with durable, ACL-controlled agent-to-agent messaging.
+- **Standard Copilot**: one general-purpose Copilot session per Neovim instance that stays connected as the supervisor.
+- **Fleets**: any number of independently configured Copilot session groups that run **concurrently alongside Standard**, each with durable, ACL-controlled agent-to-agent messaging.
 
 The Neovim plugin owns a local Node.js host through versioned NDJSON over stdio. The host owns the official `@github/copilot-sdk`, Copilot sessions, configuration validation, and SQLite recovery state. It is not a daemon: exiting Neovim shuts down the host and all SDK-owned Copilot processes.
 
@@ -44,8 +44,8 @@ UI and rendering defaults can be adjusted in `setup`:
 
 ```lua
 require("native_copilot").setup({
-  -- Defaults to vim.g.native_copilot_command, then the legacy environment variables.
-  runtime_command = nil,
+  -- Defaults to NVIM_COPILOT_CMD_RESOLVER.
+  runtime_command_resolver = nil,
   stream_flush_ms = 80,
   follow_bottom = true,
   timestamp_format = '%H:%M:%S',
@@ -63,20 +63,29 @@ require("native_copilot").setup({
 })
 ```
 
-`runtime_command` lets the SDK use the same resolved command as an existing Copilot CLI setup.
-Launchers that build workspace-sensitive commands can resolve them before starting Neovim:
+`runtime_command_resolver` is a shell expression that prints the fully resolved Copilot command.
+Set `NVIM_COPILOT_CMD_RESOLVER` globally so both ordinary `nvim` and specialized launchers use the
+same configuration. The resolver runs once per host start with the Neovim workspace as its current
+directory, allowing repository-sensitive MCP exclusions to be generated dynamically:
 
 ```powershell
-$command = & C:\private\Invoke-ConfiguredCopilot.ps1 --print-command
-$json = $command | ConvertTo-Json -Compress
-nvim --cmd "lua vim.g.native_copilot_command = $json"
+$env:NVIM_COPILOT_CMD_RESOLVER = @"
+& {
+  . 'C:\private\Invoke-ConfiguredCopilot.ps1'
+  Get-ConfiguredCopilotCommand
+}
+"@
 ```
 
-The plugin launches that command as the SDK transport and maps supported CLI session flags
-(`--allow-all`, tool filters, disabled MCP servers, model, and reasoning effort) onto SDK session
-configuration because SDK-created sessions do not reliably inherit those policies from process
-arguments. `NVIM_COPILOT_CMD` and `COPILOT_CLI_CMD` remain compatibility fallbacks. If no command
-is configured, the SDK's bundled Copilot runtime is used. No Fleet configuration file is required:
+The plugin invokes the resolver, requires a nonempty command, launches that command as the SDK
+transport, and maps supported CLI session flags
+(`--allow-all`, tool filters, disabled MCP servers, `--additional-mcp-config`, model, and reasoning
+effort) onto SDK session configuration because SDK-created sessions do not reliably inherit those
+policies from process arguments. Every session — Standard and Fleet members — is built from this one
+parsed native policy, so children inherit it by default (see
+[Inherited native configuration](#inherited-native-configuration)). The former
+`vim.g.native_copilot_command`, `NVIM_COPILOT_CMD`, and `COPILOT_CLI_CMD` inputs are not read. If no
+resolver is configured, the SDK's bundled Copilot runtime is used. No Fleet configuration file is required:
 the `create_fleet` tool schema describes the complete runtime definition to Standard Copilot.
 Store reusable Fleet requests as ordinary prompt snippets and submit them through the prompt buffer.
 
@@ -95,7 +104,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | Binding | Action |
 |---|---|
 | `<leader>ait` | Toggle the native Copilot tab; starts Standard Copilot when needed |
-| `<leader>aif` | Recover or stop a dynamic Fleet |
+| `<leader>aif` | Stop an active Fleet or recover an inactive one |
 | `<leader>ais` | Telescope picker for overview, status, member, and view |
 | `[a` / `]a` | Previous/next member conversation |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
@@ -120,9 +129,11 @@ changes, so completion does not reorder earlier work.
 
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
-transitions from startup to `ready`. Foreground tools use `[tool]` rows and expose only the tool
-name and status in the timeline. `<Enter>` reveals complete arguments, results, and errors in the
-floating detail pane, including failure details for failed tools and tasks. The active Copilot
+transitions from startup to `ready`. Foreground tools use `[tool]` rows. File reads and code searches
+also show their target path or query directly in the compact row, making on-demand reads of nested
+instruction files such as `CLAUDE.md` visible without opening details. Other arguments remain in the
+`<Enter>` floating detail pane together with complete results and errors, including failure details
+for failed tools and tasks. The active Copilot
 heading cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
 responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
@@ -179,6 +190,12 @@ Each Fleet/member pair receives a different Copilot session scoped to the curren
 fleet-<workspace-hash>-<instance-id>-<fleet-id>-<member-id>
 ```
 
+Raw member IDs (`planner`, `reviewer`, …) only need to be unique **within** a Fleet. The UI and
+runtime address every member through a Fleet-qualified target of the form `<fleet-id>/<member-id>`,
+so two different Fleets can each contain a `planner` without colliding. Raw member IDs remain the
+identity used inside the Fleet definition, the run-scoped SQLite session/message records, and the
+dedicated `send_to_<agent>` peer tools.
+
 Every generated agent receives its own top-level SDK session and conversation context.
 Closing and reopening the Copilot tab in the same Neovim process keeps those sessions. Starting a new Neovim process creates fresh Standard and Fleet-member sessions instead of automatically resuming the previous process's transcript.
 
@@ -186,17 +203,101 @@ Each Neovim process owns an independent host, runtime, and set of top-level SDK 
 runs record their owning host process, so opening another Neovim instance does not mark or recover
 the first instance's work. Runs whose owning host has exited become recoverable.
 
-Neovim always starts in Standard mode with one Copilot session. A multi-session Fleet is created
-when Standard Copilot invokes the guarded `create_fleet` tool, either from an ordinary prompt or
-`/fleet <objective>`. Creation waits for the current Standard turn to become idle. Only agents with
+### Inherited native configuration
+
+The host parses the resolved main Copilot command **once** into a single, typed native policy
+object (`NativePolicy`) and builds every session — the Standard supervisor and each Fleet member —
+from one shared scaffold (`nativeSessionScaffold`). This is code-level reuse, not merely equivalent
+behavior: there is exactly one parsed policy and one base builder, and agent-specific settings are
+applied as overlays on that shared object. By default a child agent therefore receives exactly the
+same native configuration as the main agent:
+
+- **Working directory / config discovery / instruction files** — every session uses the same
+  workspace `workingDirectory` with `enableConfigDiscovery`, so workspace `.mcp.json`, discovered
+  instruction files, and skills resolve identically for children and the main agent.
+- **MCP configuration** — servers discovered from the workspace plus every `--additional-mcp-config`
+  source (parsed once into a single native MCP-server record) are inherited by all sessions. A
+  user-provided `--additional-mcp-config` that is missing, unreadable, invalid JSON, or the wrong
+  shape surfaces a clear error rather than being silently dropped.
+- **Native tool / MCP policy** — `--available-tools`, `--excluded-tools`, and `--disable-mcp-server`
+  from the main command apply to every session as a shared ceiling. A bare `*` pattern is normalized
+  into SDK-valid source-qualified patterns (`builtin:*`, `custom:*`, `mcp:*`) before any session
+  config is derived.
+- **Model / reasoning effort** — `--model` and `--reasoning-effort` from the main command become the
+  default for every session, including Fleet members.
+- **Permission policy** — `--allow-all` installs the SDK `approveAll` handler for the main session;
+  children inherit that behavior unless they narrow it.
+
+Agent settings only **narrow or deliberately override** this single source of truth; they never
+recreate a parallel definition:
+
+- A member's `permissions.tools.allow` becomes its `availableTools` allowlist and is **not** widened
+  back by the native list. It must be a semantic **subset** of the native tool ceiling (an empty
+  native allowlist means unrestricted; bare `*` and source wildcards such as `builtin:*` are
+  expanded and matched). A member allowlist that requests tools outside the native ceiling is
+  **rejected** at Fleet creation, mutation, or move rather than silently intersected. Native
+  `excludedTools`/`disabledMcpServers` still merge as a ceiling.
+- A member's `mcpServers` subset disables the other Fleet MCP servers for that member.
+- A member's `model` / `reasoningEffort` / `reasoningSummary` override the inherited defaults.
+- An MCP server a member defines itself takes precedence over an inherited native server of the same
+  name.
+
+Omitting any of these fields inherits the main session's value.
+
+Neovim always starts Standard Copilot with one supervisor session that **stays connected** for the
+life of the host. A Fleet is created when Standard Copilot invokes the guarded `create_fleet` tool,
+either from an ordinary prompt or `/fleet <objective>`. Creating a Fleet never stops Standard or any
+other running Fleet; multiple Fleets run concurrently on separate objectives. Creation waits for the
+current Standard turn to become idle, and multiple `create_fleet` calls may queue while Standard is
+busy. Duplicate active or pending Fleet IDs are rejected. Only agents with
 `autoStart` are connected initially; other top-level member
 sessions remain visibly in `standby` until first prompted, queried for session commands, or sent a
 mailbox message.
 
+### Mutating an active Fleet
+
+Standard Copilot has four additional guarded tools for adjusting a Fleet that is already running,
+each identified by `fleetId` (the `move` tool identifies both a source and destination Fleet):
+
+- `add_agent_to_fleet` — an explicit **upsert** keyed by agent ID: if no agent with the given ID
+  exists it is added, and if one already exists its complete definition is replaced (updated) in
+  place. The resulting Fleet is re-validated against the same permission and MCP ceilings as creation
+  before it is applied.
+- `remove_agent_from_fleet` — removes a member, prunes it from every peer's `canTalkTo`, disconnects
+  that session, and reconnects affected peers with their updated `send_to_<agent>` tool set. Removing
+  the entry agent is rejected unless a replacement entry agent is supplied atomically, and the final
+  remaining member cannot be removed.
+- `move_agent_to_fleet` — atomically moves one active agent from `sourceFleetId` to
+  `destinationFleetId`. The move is rejected unless both Fleets are active, the agent's ID is unused
+  in the destination (IDs must stay unique within one Fleet), and the source keeps at least one
+  member. Moving the source's entry agent requires a valid `replacementEntryAgentId` that is applied
+  to the source atomically. By default the moved agent's `canTalkTo` is filtered down to peers that
+  exist in the destination; supply an optional complete `destinationAgent` definition (its `id` must
+  equal the moved agent's ID) to override its prompt, tools, permissions, or peers, still validated
+  against the destination's permission and MCP ceilings. The moved agent is rebuilt under the
+  destination-qualified target with the destination Fleet's native-config overlay and peer tools,
+  resuming the **same** Copilot session so its conversation history follows it; the persisted session
+  record is reassociated to the destination run. Source peers that referenced the agent and both
+  Fleets' definitions are updated and persisted atomically, and affected peers in both Fleets are
+  reconnected. The source mailbox is **not** migrated: any of the moved agent's still-in-flight
+  (pending or delivering) source messages are atomically **settled** in the source run with an
+  explicit reason when the move commits, while already-delivered history is preserved. If validation,
+  persistence, or reconnection fails, the move rolls back — restoring the settled mailbox, removing
+  any destination session, and returning the agent to its source — so no partial in-memory or
+  on-disk state remains.
+
+Because a member's dedicated peer tools are fixed at session creation, changing a peer set
+reconnects and resumes the affected member sessions under the same session IDs; Copilot's session
+store preserves their conversation history across the reconnect. Every mutation is persisted to the
+run's stored Fleet definition so it survives recovery.
+
 `/fleet` intentionally replaces the runtime's built-in command in this UI. With an objective it
-asks Standard Copilot to generate a Fleet; without one it opens recovery/stop actions. Recovery reconnects every member
+asks Standard Copilot to generate a Fleet; without one it opens per-Fleet stop and recovery actions.
+Recovery reconnects every member
 session previously created for that run, preserves its mailbox association, and starts any missing
-`autoStart` members. Active runs owned by another Neovim instance are never offered.
+`autoStart` members. An inactive Fleet can be recovered alongside Standard and other already-active
+Fleets, and recovery rejects a Fleet ID that is already active. Active runs owned by another Neovim
+instance are never offered.
 
 If the runtime did not persist a member because it never had conversation activity, recovery
 recreates that empty member session under the same ID. A missing session with recorded conversation
@@ -207,6 +308,11 @@ activity is treated as an error rather than silently presenting an empty replace
 A generated Fleet is rejected before startup when it contains duplicate or unsafe agent IDs,
 an invalid entry agent, unknown/self communication peers, unavailable MCP servers, malformed
 permission policies, or an `approveAll` request that exceeds the main session authority.
+
+Agent **IDs** are the only values that must be unique within a Fleet, because they drive unambiguous
+routing and the generated `send_to_<agent>` tool names. Roles and display names are **not** required
+to be unique: a single Fleet may intentionally contain multiple agents with the same conceptual role
+(for example two planners or two developers) as long as each has a distinct ID.
 
 Fleet startup is all-or-nothing. Telescope marks invalid profiles and displays their exact diagnostics.
 
@@ -220,7 +326,8 @@ the Copilot runtime chooses its default model.
 
 Every Fleet agent receives one tool per declared peer: `send_to_planner`, `send_to_tester`, and so
 on. Agents have no tool for undeclared peers, so `canTalkTo` is enforced structurally rather than
-through a free-form recipient argument.
+through a free-form recipient argument. Peer messaging is scoped to a single Fleet: a `send_to_<agent>`
+tool only reaches the same-Fleet member, so identical raw member IDs in different Fleets never cross.
 
 Messages are written transactionally to SQLite before delivery. Busy recipients are not interrupted; their mailbox is drained after the session becomes idle. Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after restart.
 
@@ -268,13 +375,18 @@ Copilot runtime. The plugin does not manufacture or expose private hidden chain-
 
 Each session reports runtime/configuration discovery and loaded counts for tools, instructions,
 skills, MCP servers, plugins, and agents through conversation rows that update in place. MCP
-connection-state changes update the original server row without disturbing chronology.
+connection-state changes update the original server row without disturbing chronology. Discovered
+instruction sources are additionally listed as one compact `[environment] Instruction <label>` row
+per source, showing the source label and its file path (like Copilot CLI) rather than only a count.
+Instruction file **contents** are never rendered; sources flagged as disabled by default are marked
+accordingly. When Copilot discovers a nested instruction file on demand while traversing the
+codebase, the ordinary `view`/read tool row shows that path as well.
 
 Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it opens a task picker. `/fleet` is deliberately overridden by the client-native dynamic-Fleet command described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
 
 The client-native command set is intentionally small:
 
-- `/fleet <objective>` requests a generated Fleet; `/fleet` recovers or stops one.
+- `/fleet <objective>` requests a generated Fleet; `/fleet` stops an active Fleet or recovers one.
 - `/tasks` browses typed SDK background tasks and opens their floating details.
 - `/resume` lists and safely resumes workspace sessions.
 - `/model` opens the selected session's model picker; `/model <id>` switches directly.
