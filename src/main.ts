@@ -3,14 +3,12 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { argv, env, exit, kill, ppid, stderr } from "node:process";
-import { loadConfig } from "./config.js";
 import { FleetDatabase } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
 import { CopilotRuntime } from "./runtime.js";
 import { PROTOCOL_VERSION, type DynamicFleetDefinition } from "./types.js";
 
 interface HostOptions {
-  configPath: string;
   databasePath: string;
   runtimeCommand: string | undefined;
   workspace: string;
@@ -25,11 +23,6 @@ function hostOptions(): HostOptions {
   const workspace = resolve(
     option("--workspace") ?? env.NATIVE_COPILOT_WORKSPACE ?? process.cwd(),
   );
-  const configRoot =
-    env.NATIVE_COPILOT_CONFIG_HOME ??
-    (process.platform === "win32"
-      ? resolve(env.LOCALAPPDATA ?? homedir(), "nvim")
-      : resolve(env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "nvim"));
   const dataRoot =
     env.NATIVE_COPILOT_DATA_HOME ??
     (process.platform === "win32"
@@ -37,11 +30,6 @@ function hostOptions(): HostOptions {
       : resolve(env.XDG_DATA_HOME ?? resolve(homedir(), ".local", "share"), "nvim"));
   return {
     workspace,
-    configPath: resolve(
-      option("--config") ??
-        env.NATIVE_COPILOT_CONFIG ??
-        resolve(configRoot, "copilot", "fleets.json"),
-    ),
     databasePath: resolve(
       option("--db") ??
         env.NATIVE_COPILOT_DATABASE ??
@@ -73,7 +61,6 @@ function requiredString(
 
 async function main(): Promise<void> {
   const options = hostOptions();
-  const config = await loadConfig(options.configPath);
   const db = new FleetDatabase(options.databasePath);
   const interruptedRuns = db.markInterruptedWork(
     "Owning Neovim host is no longer running",
@@ -118,13 +105,11 @@ async function main(): Promise<void> {
             protocolVersion: PROTOCOL_VERSION,
             pid: process.pid,
             workspace: options.workspace,
-            configPath: options.configPath,
             databasePath: options.databasePath,
             interruptedRuns,
-            fleetExamples: config.fleetExamples,
             standard: {
-              id: config.standard.id,
-              displayName: config.standard.displayName,
+              id: "standard",
+              displayName: "Copilot",
             },
             status: runtime.status(),
             recoverableFleets: runtime.recoverableFleetRuns(),
@@ -387,7 +372,6 @@ async function main(): Promise<void> {
     exit(0);
   });
   runtime = new CopilotRuntime(
-    config,
     options.workspace,
     db,
     (type, payload, fields) => {

@@ -22,11 +22,9 @@ import { dynamicFleetSchema, validateFleet } from "./config.js";
 import type {
   DynamicFleetDefinition,
   DynamicPermission,
-  FleetConfig,
   PermissionProfile,
   ResolvedFleet,
   ResolvedMember,
-  StandardConfig,
 } from "./types.js";
 
 export interface RuntimeEmitter {
@@ -425,7 +423,6 @@ export class CopilotRuntime {
   >();
 
   constructor(
-    private readonly config: FleetConfig,
     private readonly workspace: string,
     private readonly db: FleetDatabase,
     private readonly emit: RuntimeEmitter,
@@ -803,47 +800,26 @@ export class CopilotRuntime {
     return config;
   }
 
-  private standardSessionConfig(standard: StandardConfig): SessionConfig {
-    const permission = standard.permissions;
-    const permissionHandler = this.permissionHandler(permission, "standard");
-    const examples = JSON.stringify(this.config.fleetExamples, null, 2);
+  private standardSessionConfig(): SessionConfig {
+    const permissionHandler = this.permissionHandler(undefined, "standard");
     const config: SessionConfig = {
       clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,
       streaming: true,
-      reasoningSummary: standard.reasoningSummary ?? "detailed",
+      reasoningSummary: "detailed",
       manageScheduleEnabled: true,
       enableSessionStore: true,
       enableConfigDiscovery: true,
-      systemMessage: {
-        mode: "append",
-        content:
-          `${standard.initialPrompt}\n\n` +
-          "When multiple independent specialists would improve the result, design a fleet and " +
-          "call create_fleet. Each agent chooses its own prompt, model, permissions, MCP subset, " +
-          "and canTalkTo peers. The examples below are illustrative, not predefined fleets:\n" +
-          examples,
-      },
       onPermissionRequest: permissionHandler,
       onMcpAuthRequest: this.mcpAuthHandler("standard"),
       tools: [this.createFleetTool()],
     };
-    if (permission) {
-      config.availableTools = sdkToolPatterns(permission.tools.allow);
-      config.excludedTools = sdkToolPatterns(permission.tools.deny);
-    }
-    if (standard.model !== undefined) {
-      config.model = standard.model;
-    }
-    if (standard.reasoningEffort !== undefined) {
-      config.reasoningEffort = standard.reasoningEffort;
-    }
     if (this.runtimeOptions.model !== undefined) {
       config.model = this.runtimeOptions.model;
     }
     if (this.runtimeOptions.reasoningEffort !== undefined) {
       config.reasoningEffort =
-        this.runtimeOptions.reasoningEffort as NonNullable<StandardConfig["reasoningEffort"]>;
+        this.runtimeOptions.reasoningEffort as NonNullable<SessionConfig["reasoningEffort"]>;
     }
     this.applyRuntimeOptions(config);
     return config;
@@ -852,10 +828,13 @@ export class CopilotRuntime {
   private createFleetTool(): Tool<any> {
     return defineTool("create_fleet", {
       description:
-        "Create and start a task-specific fleet after this Standard Copilot turn finishes. " +
-        "Define every agent at runtime. canTalkTo controls which peer-specific send_to_<agent> " +
-        "tools each agent receives. objective is delivered to the entry agent after startup. " +
-        "Omit mcpServers to inherit the main session MCP set.",
+        "Create and start a task-specific Fleet when the user asks for multiple collaborating " +
+        "agents or when independent planning, implementation, testing, or review would materially " +
+        "improve the result. Define every agent completely at runtime. Give each agent a focused " +
+        "prompt, least-privilege permissions, only the MCP servers it needs, and directional " +
+        "canTalkTo peers; each peer becomes a send_to_<agent> tool. The objective is delivered to " +
+        "entryAgent after startup. Omitted permissions and mcpServers inherit the main session. " +
+        "The Fleet replaces the active Standard session after this turn becomes idle.",
       parameters: dynamicFleetSchema,
       skipPermission: true,
       defer: "never",
@@ -1275,8 +1254,8 @@ export class CopilotRuntime {
       await this.connectSession(
         runId,
         "standard",
-        instanceSessionId(this.workspace, this.instanceId, "standard", this.config.standard.id),
-        this.standardSessionConfig(this.config.standard),
+        instanceSessionId(this.workspace, this.instanceId, "standard", "standard"),
+        this.standardSessionConfig(),
       );
       this.emit("mode.changed", { mode: "standard" }, { runId });
     } catch (error) {
@@ -1307,7 +1286,7 @@ export class CopilotRuntime {
         runId,
         "standard",
         sessionId,
-        this.standardSessionConfig(this.config.standard),
+        this.standardSessionConfig(),
         true,
       );
       this.emit("mode.changed", { mode: "standard", recovered: true, sessionId }, { runId });

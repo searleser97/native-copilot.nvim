@@ -83,7 +83,6 @@ function M.start(opts, on_event)
     opts.node_command or 'node',
     host,
     '--workspace', opts.workspace or vim.uv.cwd(),
-    '--config', opts.config_path,
     '--db', opts.database_path,
   }
   state.job = vim.fn.jobstart(command, {

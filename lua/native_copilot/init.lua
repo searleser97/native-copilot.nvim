@@ -60,7 +60,6 @@ local defaults = {
   runtime_command = vim.g.native_copilot_command
     or vim.env.NVIM_COPILOT_CMD
     or vim.env.COPILOT_CLI_CMD,
-  config_path = vim.fn.stdpath('config') .. '/copilot/fleets.json',
   database_path = default_database,
   workspace = nil,
   prompt_height = 8,
@@ -108,7 +107,6 @@ local state = {
   member_order = { 'standard' },
   tasks = {},
   environment = {},
-  fleet_examples = {},
   recoverable_fleets = {},
   overview = false,
   configured_buffers = {},
@@ -152,25 +150,6 @@ end
 
 local function current_workspace()
   return options.workspace or vim.uv.cwd()
-end
-
-local function ensure_default_config()
-  if vim.fn.filereadable(options.config_path) == 1 then return true end
-  local source = debug.getinfo(1, 'S').source:sub(2)
-  local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(source)))
-  local example = root .. '/examples/fleets.json'
-  if vim.fn.filereadable(example) ~= 1 then
-    notify('Default Fleet configuration template is missing.', vim.log.levels.ERROR)
-    return false
-  end
-  vim.fn.mkdir(vim.fs.dirname(options.config_path), 'p')
-  local ok, err = vim.uv.fs_copyfile(example, options.config_path)
-  if not ok then
-    notify(('Could not create %s: %s'):format(options.config_path, err), vim.log.levels.ERROR)
-    return false
-  end
-  notify('Created editable Fleet configuration at ' .. options.config_path)
-  return true
 end
 
 local function send(message_type, payload)
@@ -1052,11 +1031,9 @@ end
 
 local function start_host()
   if protocol.is_running() then return true end
-  if not ensure_default_config() then return false end
   return protocol.start({
     node_command = options.node_command,
     runtime_command = options.runtime_command,
-    config_path = options.config_path,
     database_path = options.database_path,
     workspace = current_workspace(),
   }, M._on_event)
@@ -1518,7 +1495,6 @@ end
 function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
-    state.fleet_examples = payload.fleetExamples or {}
     state.recoverable_fleets = payload.recoverableFleets or {}
     return
   elseif message.type == 'sessions.list' then

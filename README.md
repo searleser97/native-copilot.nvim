@@ -76,21 +76,15 @@ The plugin launches that command as the SDK transport and maps supported CLI ses
 (`--allow-all`, tool filters, disabled MCP servers, model, and reasoning effort) onto SDK session
 configuration because SDK-created sessions do not reliably inherit those policies from process
 arguments. `NVIM_COPILOT_CMD` and `COPILOT_CLI_CMD` remain compatibility fallbacks. If no command
-is configured, the SDK's bundled Copilot runtime is used.
-
-On first use, the plugin copies `examples\fleets.json` to the editable user configuration:
-
-```text
-%LOCALAPPDATA%\nvim\copilot\fleets.json
-```
+is configured, the SDK's bundled Copilot runtime is used. No Fleet configuration file is required:
+the `create_fleet` tool schema describes the complete runtime definition to Standard Copilot.
+Store reusable Fleet requests as ordinary prompt snippets and submit them through the prompt buffer.
 
 Runtime state is stored at:
 
 ```text
 %LOCALAPPDATA%\nvim-data\native-copilot\state.sqlite
 ```
-
-No credentials or tokens belong in `fleets.json`.
 
 The built-in `github-mcp-server` authenticates through `gh auth token` at session startup. The
 token is read directly from the GitHub CLI credential store, passed to the SDK in memory, and is
@@ -173,10 +167,11 @@ The plugin does not select Telescope merely because it is installed.
 
 ## Configuration
 
-The JSON file configures Standard Copilot and provides `fleetExamples` used only as prompt guidance.
-Fleets are not predefined. Standard Copilot calls `create_fleet` with complete runtime agent
-definitions for the current task. Each definition can select a model, reasoning effort, prompt,
-permissions, MCP server subset, UI metadata, startup behavior, and `canTalkTo` peers.
+Fleets are not predefined and require no external configuration file. The guarded `create_fleet`
+tool describes the complete runtime schema to Standard Copilot. Each generated definition can
+select a model, reasoning effort, prompt, permissions, MCP server subset, UI metadata, startup
+behavior, and directional `canTalkTo` peers. Personal Fleet recipes can be stored as ordinary
+prompt snippets outside the plugin and submitted like any other prompt.
 
 Each Fleet/member pair receives a different Copilot session scoped to the current Neovim instance:
 

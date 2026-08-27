@@ -1,33 +1,44 @@
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import {
-  dynamicFleetSchema,
-  fleetConfigSchema,
-  validateConfig,
-  validateFleet,
-} from "../src/config.js";
-import type { DynamicFleetDefinition, FleetConfig } from "../src/types.js";
+import { dynamicFleetSchema, validateFleet } from "../src/config.js";
+import type { DynamicFleetDefinition } from "../src/types.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-
-async function exampleConfig(): Promise<FleetConfig> {
-  const text = await readFile(resolve(here, "..", "examples", "fleets.json"), "utf8");
-  return fleetConfigSchema.parse(JSON.parse(text)) as FleetConfig;
-}
+const exampleFleet: DynamicFleetDefinition = {
+  id: "engineering_review",
+  name: "Engineering Review",
+  description: "Plans, implements, and reviews an engineering change.",
+  objective: "Complete the requested engineering change.",
+  entryAgent: "planner",
+  agents: [
+    {
+      id: "planner",
+      displayName: "Planner",
+      description: "Plans the change.",
+      prompt: "Investigate and send a plan to the implementer.",
+      permissions: { mode: "prompt" },
+      canTalkTo: ["implementer", "reviewer"],
+    },
+    {
+      id: "implementer",
+      displayName: "Implementer",
+      description: "Implements the change.",
+      prompt: "Implement and send the result to the reviewer.",
+      permissions: { mode: "inherit" },
+      canTalkTo: ["planner", "reviewer"],
+    },
+    {
+      id: "reviewer",
+      displayName: "Reviewer",
+      description: "Reviews the change.",
+      prompt: "Review and report findings.",
+      permissions: { mode: "prompt" },
+      canTalkTo: ["planner", "implementer"],
+    },
+  ],
+};
 
 describe("dynamic fleet configuration", () => {
-  it("treats configured fleets as examples instead of predefined launch targets", async () => {
-    const config = await exampleConfig();
-    expect(validateConfig(config)).toEqual([]);
-    expect(config.fleetExamples).toHaveLength(1);
-    expect(config).not.toHaveProperty("fleets");
-    expect(config).not.toHaveProperty("agents");
-  });
-
-  it("resolves runtime-defined agents and peer communication", async () => {
-    const definition = (await exampleConfig()).fleetExamples[0]!;
+  it("resolves runtime-defined agents and peer communication", () => {
+    const definition = structuredClone(exampleFleet);
     const result = validateFleet(definition);
 
     expect(result.valid).toBe(true);
@@ -38,8 +49,8 @@ describe("dynamic fleet configuration", () => {
     expect(result.fleet?.members.get("implementer")?.permission).toEqual({ mode: "inherit" });
   });
 
-  it("rejects duplicate runtime agent IDs", async () => {
-    const definition = structuredClone((await exampleConfig()).fleetExamples[0]!);
+  it("rejects duplicate runtime agent IDs", () => {
+    const definition = structuredClone(exampleFleet);
     definition.agents[1]!.id = "planner";
 
     expect(validateFleet(definition).issues).toContainEqual({
@@ -48,8 +59,8 @@ describe("dynamic fleet configuration", () => {
     });
   });
 
-  it("rejects peer tools targeting unknown agents", async () => {
-    const definition = structuredClone((await exampleConfig()).fleetExamples[0]!);
+  it("rejects peer tools targeting unknown agents", () => {
+    const definition = structuredClone(exampleFleet);
     definition.agents[0]!.canTalkTo.push("tester");
 
     expect(validateFleet(definition).issues).toContainEqual({
@@ -58,8 +69,8 @@ describe("dynamic fleet configuration", () => {
     });
   });
 
-  it("uses tool-safe agent IDs", async () => {
-    const definition = structuredClone((await exampleConfig()).fleetExamples[0]!);
+  it("uses tool-safe agent IDs", () => {
+    const definition = structuredClone(exampleFleet);
     definition.agents[0]!.id = "planning-agent";
 
     expect(dynamicFleetSchema.safeParse(definition).success).toBe(false);

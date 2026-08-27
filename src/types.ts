@@ -3,16 +3,6 @@ export const PROTOCOL_VERSION = 1 as const;
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type ReasoningSummary = "none" | "concise" | "detailed";
 
-export interface StandardConfig {
-  id: string;
-  displayName: string;
-  initialPrompt: string;
-  model?: string;
-  reasoningEffort?: ReasoningEffort;
-  reasoningSummary?: ReasoningSummary;
-  permissions?: PermissionProfile;
-}
-
 export interface ToolPolicy {
   allow: string[];
   deny: string[];
@@ -61,12 +51,6 @@ export interface DynamicFleetDefinition {
   objective: string;
   entryAgent: string;
   agents: DynamicAgentDefinition[];
-}
-
-export interface FleetConfig {
-  schemaVersion: 2;
-  standard: StandardConfig;
-  fleetExamples: DynamicFleetDefinition[];
 }
 
 export interface ResolvedMember {

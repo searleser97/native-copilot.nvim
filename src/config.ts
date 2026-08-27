@@ -1,8 +1,6 @@
-import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type {
   DynamicFleetDefinition,
-  FleetConfig,
   FleetValidationResult,
   ResolvedMember,
   ValidationIssue,
@@ -12,43 +10,53 @@ const idPattern = /^[a-z][a-z0-9_]*$/;
 const id = z.string().min(1).regex(
   idPattern,
   "must start with a lowercase letter and contain only lowercase letters, numbers, and underscores",
-);
+).describe("Tool-safe identifier used in generated send_to_<agent> tool names.");
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
 const stringList = z.array(z.string().min(1));
 
 export const permissionsSchema = z.object({
   tools: z.object({
-    allow: stringList,
-    deny: stringList,
+    allow: stringList.describe("SDK tool patterns this agent may use."),
+    deny: stringList.describe("SDK tool patterns explicitly denied to this agent."),
   }),
   paths: z.object({
-    read: stringList,
-    write: stringList,
+    read: stringList.describe("Readable roots; ${workspace} resolves to the active workspace."),
+    write: stringList.describe("Writable roots; ${workspace} resolves to the active workspace."),
   }),
-  commands: z.boolean(),
-  network: z.boolean(),
-  gitWrite: z.boolean(),
-  externalActions: z.boolean(),
+  commands: z.boolean().describe("Whether shell commands are allowed."),
+  network: z.boolean().describe("Whether network access is allowed."),
+  gitWrite: z.boolean().describe("Whether Git write operations are allowed."),
+  externalActions: z.boolean().describe("Whether MCP and other external actions are allowed."),
 }).strict();
 
 export const dynamicPermissionSchema = z.union([
-  z.object({ mode: z.enum(["inherit", "prompt", "approveAll"]) }).strict(),
+  z.object({
+    mode: z.enum(["inherit", "prompt", "approveAll"]).describe(
+      "inherit uses the main session policy; prompt asks interactively; approveAll requires the main command to grant --allow-all.",
+    ),
+  }).strict(),
   permissionsSchema,
 ]);
 
 export const dynamicAgentSchema = z.object({
   id,
-  displayName: z.string().min(1),
-  description: z.string().min(1),
-  prompt: z.string().min(1),
-  model: z.string().min(1).optional(),
-  reasoningEffort: reasoningEffort.optional(),
-  reasoningSummary: reasoningSummary.optional(),
-  permissions: dynamicPermissionSchema.optional(),
-  mcpServers: stringList.optional(),
-  canTalkTo: z.array(id),
-  autoStart: z.boolean().optional(),
+  displayName: z.string().min(1).describe("Human-readable agent name shown in the UI."),
+  description: z.string().min(1).describe("Concise statement of this agent's responsibility."),
+  prompt: z.string().min(1).describe("Complete role and operating instructions for this agent."),
+  model: z.string().min(1).optional().describe("Model ID; omit to inherit the runtime default."),
+  reasoningEffort: reasoningEffort.optional().describe("Optional reasoning effort override."),
+  reasoningSummary: reasoningSummary.optional().describe("Optional reasoning display level."),
+  permissions: dynamicPermissionSchema.optional().describe(
+    "Agent permission policy; omit to inherit the main session policy.",
+  ),
+  mcpServers: stringList.optional().describe(
+    "Subset of MCP server names loaded by the main session; omit to inherit all.",
+  ),
+  canTalkTo: z.array(id).describe(
+    "Directional peer IDs. Each entry creates a dedicated send_to_<agent> tool.",
+  ),
+  autoStart: z.boolean().optional().describe("Defaults to true; false starts the member lazily."),
   ui: z.object({
     icon: z.string().min(1).optional(),
     color: z.string().min(1).optional(),
@@ -56,26 +64,16 @@ export const dynamicAgentSchema = z.object({
 }).strict();
 
 export const dynamicFleetSchema = z.object({
-  id,
-  name: z.string().min(1),
-  description: z.string().min(1),
-  objective: z.string().min(1),
-  entryAgent: id,
-  agents: z.array(dynamicAgentSchema).min(1).max(12),
-}).strict();
-
-export const fleetConfigSchema = z.object({
-  schemaVersion: z.literal(2),
-  standard: z.object({
-    id,
-    displayName: z.string().min(1),
-    initialPrompt: z.string().min(1),
-    model: z.string().min(1).optional(),
-    reasoningEffort: reasoningEffort.optional(),
-    reasoningSummary: reasoningSummary.optional(),
-    permissions: permissionsSchema.optional(),
-  }).strict(),
-  fleetExamples: z.array(dynamicFleetSchema).min(1),
+  id: id.describe("Unique Fleet identifier."),
+  name: z.string().min(1).describe("Human-readable Fleet name."),
+  description: z.string().min(1).describe("Concise description of the Fleet's collaboration model."),
+  objective: z.string().min(1).describe(
+    "Complete task delivered automatically to the entry agent after startup.",
+  ),
+  entryAgent: id.describe("Agent ID that receives the objective and begins coordination."),
+  agents: z.array(dynamicAgentSchema).min(1).max(12).describe(
+    "Complete runtime definitions for every Fleet member.",
+  ),
 }).strict();
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {
@@ -159,30 +157,4 @@ export function validateFleet(
       members,
     },
   };
-}
-
-export function validateConfig(config: FleetConfig): ValidationIssue[] {
-  return config.fleetExamples.flatMap((example, index) =>
-    validateFleet(example, `fleetExamples.${index}`).issues
-  );
-}
-
-export async function loadConfig(path: string): Promise<FleetConfig> {
-  const text = await readFile(path, "utf8");
-  const parsed: unknown = JSON.parse(text);
-  const result = fleetConfigSchema.safeParse(parsed);
-  if (!result.success) {
-    const detail = result.error.issues
-      .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
-      .join("\n");
-    throw new Error(`Invalid Native Copilot configuration:\n${detail}`);
-  }
-  const config = result.data as FleetConfig;
-  const issues = validateConfig(config);
-  if (issues.length > 0) {
-    throw new Error(
-      `Invalid fleet examples:\n${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`,
-    );
-  }
-  return config;
 }
