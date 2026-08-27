@@ -597,7 +597,8 @@ export function additionalMcpServers(
       raw = trimmed;
       sourceLabel = "inline JSON";
     } else {
-      const path = isAbsolute(trimmed) ? trimmed : resolve(workspace, trimmed);
+      const fileValue = trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
+      const path = isAbsolute(fileValue) ? fileValue : resolve(workspace, fileValue);
       sourceLabel = path;
       if (!existsSync(path)) {
         throw new Error(`--additional-mcp-config file not found: ${path}`);

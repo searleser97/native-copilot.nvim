@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { SessionConfig } from "@github/copilot-sdk";
@@ -376,6 +376,19 @@ describe("additionalMcpServers", () => {
     expect(() =>
       additionalMcpServers(["./definitely-missing.mcp.json"], "E:\\repo"),
     ).toThrow(/file not found/);
+  });
+
+  it("reads the Copilot CLI @file form without treating @ as part of the path", () => {
+    const path = resolve(
+      tmpdir(),
+      `native-copilot-mcp-${process.pid}-${Date.now()}.json`,
+    );
+    runtimeDbPaths.push(path);
+    writeFileSync(path, JSON.stringify({ mcpServers: { docs: { command: "docs-server" } } }));
+
+    expect(additionalMcpServers([`@${path}`], "E:\\other-workspace")).toEqual({
+      docs: { command: "docs-server" },
+    });
   });
 });
 
