@@ -32,82 +32,56 @@ export interface PermissionProfile {
   externalActions: boolean;
 }
 
-export interface AgentDefinition {
-  name: string;
+export type DynamicPermission =
+  | { mode: "inherit" | "prompt" | "approveAll" }
+  | PermissionProfile;
+
+export interface DynamicAgentDefinition {
+  id: string;
+  displayName: string;
   description: string;
-  initialPrompt: string;
+  prompt: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
-  permissions?: PermissionProfile;
+  permissions?: DynamicPermission;
+  mcpServers?: string[];
+  canTalkTo: string[];
+  autoStart?: boolean;
   ui?: {
     icon?: string;
     color?: string;
   };
 }
 
-export interface PermissionNarrowing {
-  denyTools?: string[];
-  readPaths?: string[];
-  writePaths?: string[];
-  commands?: false;
-  network?: false;
-  gitWrite?: false;
-  externalActions?: false;
-}
-
-export interface FleetMember {
-  agent: string;
-  displayName?: string;
-  promptAppend?: string;
-  model?: string;
-  reasoningEffort?: ReasoningEffort;
-  reasoningSummary?: ReasoningSummary;
-  permissionNarrowing?: PermissionNarrowing;
-  recipients: string[];
-  recipientGroups?: string[];
-  canBroadcast?: boolean;
-  autoStart?: boolean;
-}
-
-export interface FleetValidationPolicy {
-  coordinatorFallback: "none" | "direct" | "path";
-  requireEntryReachability: boolean;
-  allowIsolatedMembers: boolean;
-}
-
-export interface FleetDefinition {
+export interface DynamicFleetDefinition {
+  id: string;
   name: string;
   description: string;
-  entryMember: string;
-  coordinatorMember?: string;
-  groups?: Record<string, string[]>;
-  validation: FleetValidationPolicy;
-  members: Record<string, FleetMember>;
+  objective: string;
+  entryAgent: string;
+  agents: DynamicAgentDefinition[];
 }
 
 export interface FleetConfig {
-  schemaVersion: 1;
-  defaultFleetId?: string;
+  schemaVersion: 2;
   standard: StandardConfig;
-  agents: Record<string, AgentDefinition>;
-  fleets: Record<string, FleetDefinition>;
+  fleetExamples: DynamicFleetDefinition[];
 }
 
 export interface ResolvedMember {
   id: string;
-  agentId: string;
   displayName: string;
   description: string;
   initialPrompt: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary: ReasoningSummary;
-  permission?: PermissionProfile;
+  permission?: DynamicPermission;
+  mcpServers?: Set<string>;
   recipients: Set<string>;
-  canBroadcast: boolean;
   autoStart: boolean;
-  ui?: AgentDefinition["ui"];
+  ui?: DynamicAgentDefinition["ui"];
 }
 
 export interface ResolvedFleet {
@@ -115,7 +89,7 @@ export interface ResolvedFleet {
   name: string;
   description: string;
   entryMember: string;
-  coordinatorMember?: string;
+  definition: DynamicFleetDefinition;
   members: Map<string, ResolvedMember>;
 }
 

@@ -1,24 +1,23 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 import type {
+  DynamicFleetDefinition,
   FleetConfig,
-  FleetDefinition,
   FleetValidationResult,
-  PermissionNarrowing,
-  PermissionProfile,
-  ResolvedFleet,
   ResolvedMember,
   ValidationIssue,
 } from "./types.js";
 
-const idPattern = /^[a-z0-9][a-z0-9._-]*$/;
-const id = z.string().min(1).regex(idPattern, "must be a stable lowercase identifier");
+const idPattern = /^[a-z][a-z0-9_]*$/;
+const id = z.string().min(1).regex(
+  idPattern,
+  "must start with a lowercase letter and contain only lowercase letters, numbers, and underscores",
+);
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
 const stringList = z.array(z.string().min(1));
 
-const permissionsSchema = z.object({
+export const permissionsSchema = z.object({
   tools: z.object({
     allow: stringList,
     deny: stringList,
@@ -31,49 +30,42 @@ const permissionsSchema = z.object({
   network: z.boolean(),
   gitWrite: z.boolean(),
   externalActions: z.boolean(),
-});
+}).strict();
 
-const permissionNarrowingSchema = z.object({
-  denyTools: stringList.optional(),
-  readPaths: stringList.optional(),
-  writePaths: stringList.optional(),
-  commands: z.literal(false).optional(),
-  network: z.literal(false).optional(),
-  gitWrite: z.literal(false).optional(),
-  externalActions: z.literal(false).optional(),
-});
+export const dynamicPermissionSchema = z.union([
+  z.object({ mode: z.enum(["inherit", "prompt", "approveAll"]) }).strict(),
+  permissionsSchema,
+]);
 
-const fleetMemberSchema = z.object({
-  agent: id,
-  displayName: z.string().min(1).optional(),
-  promptAppend: z.string().optional(),
+export const dynamicAgentSchema = z.object({
+  id,
+  displayName: z.string().min(1),
+  description: z.string().min(1),
+  prompt: z.string().min(1),
   model: z.string().min(1).optional(),
   reasoningEffort: reasoningEffort.optional(),
   reasoningSummary: reasoningSummary.optional(),
-  permissionNarrowing: permissionNarrowingSchema.optional(),
-  recipients: z.array(id),
-  recipientGroups: z.array(id).optional(),
-  canBroadcast: z.boolean().optional(),
+  permissions: dynamicPermissionSchema.optional(),
+  mcpServers: stringList.optional(),
+  canTalkTo: z.array(id),
   autoStart: z.boolean().optional(),
-});
+  ui: z.object({
+    icon: z.string().min(1).optional(),
+    color: z.string().min(1).optional(),
+  }).strict().optional(),
+}).strict();
 
-const fleetDefinitionSchema = z.object({
+export const dynamicFleetSchema = z.object({
+  id,
   name: z.string().min(1),
-  description: z.string(),
-  entryMember: id,
-  coordinatorMember: id.optional(),
-  groups: z.record(id, z.array(id)).optional(),
-  validation: z.object({
-    coordinatorFallback: z.enum(["none", "direct", "path"]),
-    requireEntryReachability: z.boolean(),
-    allowIsolatedMembers: z.boolean(),
-  }),
-  members: z.record(id, fleetMemberSchema),
-});
+  description: z.string().min(1),
+  objective: z.string().min(1),
+  entryAgent: id,
+  agents: z.array(dynamicAgentSchema).min(1).max(12),
+}).strict();
 
 export const fleetConfigSchema = z.object({
-  schemaVersion: z.literal(1),
-  defaultFleetId: id.optional(),
+  schemaVersion: z.literal(2),
   standard: z.object({
     id,
     displayName: z.string().min(1),
@@ -83,292 +75,99 @@ export const fleetConfigSchema = z.object({
     reasoningSummary: reasoningSummary.optional(),
     permissions: permissionsSchema.optional(),
   }).strict(),
-  agents: z.record(
-    id,
-    z.object({
-      name: z.string().min(1),
-      description: z.string(),
-      initialPrompt: z.string().min(1),
-      model: z.string().min(1).optional(),
-      reasoningEffort: reasoningEffort.optional(),
-      reasoningSummary: reasoningSummary.optional(),
-      permissions: permissionsSchema.optional(),
-      ui: z
-        .object({
-          icon: z.string().min(1).optional(),
-          color: z.string().min(1).optional(),
-        })
-        .optional(),
-    }).strict(),
-  ),
-  fleets: z.record(id, fleetDefinitionSchema),
+  fleetExamples: z.array(dynamicFleetSchema).min(1),
 }).strict();
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {
   issues.push({ path, message });
 }
 
-function pathWithin(candidate: string, roots: string[], workspace: string): boolean {
-  const expanded = resolve(workspace, candidate.replaceAll("${workspace}", workspace));
-  return roots.some((root) => {
-    const expandedRoot = resolve(workspace, root.replaceAll("${workspace}", workspace));
-    const child = relative(expandedRoot, expanded);
-    return child === "" || (!child.startsWith("..") && !isAbsolute(child));
-  });
-}
-
-export function narrowPermission(
-  base: PermissionProfile,
-  narrowing: PermissionNarrowing | undefined,
-  workspace: string,
-  issues: ValidationIssue[],
-  path: string,
-): PermissionProfile {
-  if (!narrowing) {
-    return structuredClone(base);
-  }
-  const read = narrowing.readPaths ?? base.paths.read;
-  const write = narrowing.writePaths ?? base.paths.write;
-  for (const candidate of read) {
-    if (!pathWithin(candidate, base.paths.read, workspace)) {
-      addIssue(issues, `${path}.readPaths`, `"${candidate}" exceeds the base read-path ceiling`);
-    }
-  }
-  for (const candidate of write) {
-    if (!pathWithin(candidate, base.paths.write, workspace)) {
-      addIssue(issues, `${path}.writePaths`, `"${candidate}" exceeds the base write-path ceiling`);
-    }
-  }
-  return {
-    tools: {
-      allow: [...base.tools.allow],
-      deny: [...new Set([...base.tools.deny, ...(narrowing.denyTools ?? [])])],
-    },
-    paths: { read: [...read], write: [...write] },
-    commands: narrowing.commands ?? base.commands,
-    network: narrowing.network ?? base.network,
-    gitWrite: narrowing.gitWrite ?? base.gitWrite,
-    externalActions: narrowing.externalActions ?? base.externalActions,
-  };
-}
-
-function reachable(start: string, members: Map<string, ResolvedMember>): Set<string> {
-  const seen = new Set<string>();
-  const pending = [start];
-  while (pending.length > 0) {
-    const current = pending.shift();
-    if (!current || seen.has(current)) {
-      continue;
-    }
-    seen.add(current);
-    for (const recipient of members.get(current)?.recipients ?? []) {
-      if (!seen.has(recipient)) {
-        pending.push(recipient);
-      }
-    }
-  }
-  return seen;
-}
-
 export function validateFleet(
-  config: FleetConfig,
-  fleetId: string,
-  workspace = process.cwd(),
+  definition: DynamicFleetDefinition,
+  path = "fleet",
 ): FleetValidationResult {
   const issues: ValidationIssue[] = [];
-  const definition = config.fleets[fleetId];
-  if (!definition) {
-    return { valid: false, issues: [{ path: `fleets.${fleetId}`, message: "unknown fleet" }] };
+  const parsed = dynamicFleetSchema.safeParse(definition);
+  if (!parsed.success) {
+    return {
+      valid: false,
+      issues: parsed.error.issues.map((issue) => ({
+        path: [path, ...issue.path].join("."),
+        message: issue.message,
+      })),
+    };
   }
 
-  const memberIds = new Set(Object.keys(definition.members));
-  if (!memberIds.has(definition.entryMember)) {
-    addIssue(issues, `fleets.${fleetId}.entryMember`, "does not reference a fleet member");
-  }
-  if (definition.coordinatorMember && !memberIds.has(definition.coordinatorMember)) {
-    addIssue(issues, `fleets.${fleetId}.coordinatorMember`, "does not reference a fleet member");
-  }
-
-  const groups = definition.groups ?? {};
-  for (const [groupId, groupMembers] of Object.entries(groups)) {
-    for (const memberId of groupMembers) {
-      if (!memberIds.has(memberId)) {
-        addIssue(
-          issues,
-          `fleets.${fleetId}.groups.${groupId}`,
-          `references unknown member "${memberId}"`,
-        );
-      }
-    }
-  }
-
+  const normalized = parsed.data as DynamicFleetDefinition;
   const members = new Map<string, ResolvedMember>();
-  for (const [memberId, member] of Object.entries(definition.members)) {
-    const memberPath = `fleets.${fleetId}.members.${memberId}`;
-    const agent = config.agents[member.agent];
-    if (!agent) {
-      addIssue(issues, `${memberPath}.agent`, `references unknown agent "${member.agent}"`);
+  const memberIds = new Set<string>();
+  for (const [index, agent] of normalized.agents.entries()) {
+    if (memberIds.has(agent.id)) {
+      addIssue(issues, `${path}.agents.${index}.id`, `duplicates agent "${agent.id}"`);
       continue;
     }
-    const profile = agent.permissions;
+    memberIds.add(agent.id);
+  }
 
-    const recipients = new Set(member.recipients);
-    for (const groupId of member.recipientGroups ?? []) {
-      const groupMembers = groups[groupId];
-      if (!groupMembers) {
-        addIssue(issues, `${memberPath}.recipientGroups`, `references unknown group "${groupId}"`);
-        continue;
-      }
-      groupMembers.forEach((recipient) => recipients.add(recipient));
+  if (!memberIds.has(normalized.entryAgent)) {
+    addIssue(issues, `${path}.entryAgent`, "does not reference an agent in this fleet");
+  }
+
+  for (const [index, agent] of normalized.agents.entries()) {
+    const recipients = new Set(agent.canTalkTo);
+    if (recipients.has(agent.id)) {
+      addIssue(issues, `${path}.agents.${index}.canTalkTo`, "cannot include the agent itself");
     }
-    recipients.delete(memberId);
     for (const recipient of recipients) {
       if (!memberIds.has(recipient)) {
         addIssue(
           issues,
-          `${memberPath}.recipients`,
-          `references unknown member "${recipient}"`,
+          `${path}.agents.${index}.canTalkTo`,
+          `references unknown agent "${recipient}"`,
         );
       }
     }
-
-    const initialPrompt = member.promptAppend
-      ? `${agent.initialPrompt}\n\nFleet-specific instructions:\n${member.promptAppend}`
-      : agent.initialPrompt;
-    const resolved: ResolvedMember = {
-      id: memberId,
-      agentId: member.agent,
-      displayName: member.displayName ?? agent.name,
+    const member: ResolvedMember = {
+      id: agent.id,
+      displayName: agent.displayName,
       description: agent.description,
-      initialPrompt,
-      reasoningSummary: member.reasoningSummary ?? agent.reasoningSummary ?? "detailed",
+      initialPrompt: agent.prompt,
+      reasoningSummary: agent.reasoningSummary ?? "detailed",
       recipients,
-      canBroadcast: member.canBroadcast ?? false,
-      autoStart: member.autoStart ?? true,
+      autoStart: agent.autoStart ?? true,
     };
-    if (profile) {
-      resolved.permission = narrowPermission(
-        profile,
-        member.permissionNarrowing,
-        workspace,
-        issues,
-        `${memberPath}.permissionNarrowing`,
-      );
-    } else if (member.permissionNarrowing) {
-      addIssue(
-        issues,
-        `${memberPath}.permissionNarrowing`,
-        "requires permissions to be configured on the referenced agent",
-      );
-    }
-    const model = member.model ?? agent.model;
-    if (model !== undefined) {
-      resolved.model = model;
-    }
-    const effort = member.reasoningEffort ?? agent.reasoningEffort;
-    if (effort !== undefined) {
-      resolved.reasoningEffort = effort;
-    }
-    if (agent.ui !== undefined) {
-      resolved.ui = agent.ui;
-    }
-    members.set(memberId, resolved);
-  }
-
-  if (!definition.validation.allowIsolatedMembers) {
-    for (const memberId of memberIds) {
-      const inbound = [...members.values()].some((member) => member.recipients.has(memberId));
-      const outbound = (members.get(memberId)?.recipients.size ?? 0) > 0;
-      if (memberIds.size > 1 && !inbound && !outbound) {
-        addIssue(
-          issues,
-          `fleets.${fleetId}.members.${memberId}`,
-          "is isolated but isolated members are not allowed",
-        );
-      }
-    }
-  }
-
-  const coordinator = definition.coordinatorMember;
-  if (definition.validation.coordinatorFallback !== "none" && !coordinator) {
-    addIssue(
-      issues,
-      `fleets.${fleetId}.coordinatorMember`,
-      "is required by the coordinator fallback policy",
-    );
-  } else if (coordinator) {
-    for (const memberId of memberIds) {
-      if (memberId === coordinator) {
-        continue;
-      }
-      if (
-        definition.validation.coordinatorFallback === "direct" &&
-        !members.get(memberId)?.recipients.has(coordinator)
-      ) {
-        addIssue(
-          issues,
-          `fleets.${fleetId}.members.${memberId}.recipients`,
-          `must directly include coordinator "${coordinator}"`,
-        );
-      }
-      if (
-        definition.validation.coordinatorFallback === "path" &&
-        !reachable(memberId, members).has(coordinator)
-      ) {
-        addIssue(
-          issues,
-          `fleets.${fleetId}.members.${memberId}.recipients`,
-          `must have a directed path to coordinator "${coordinator}"`,
-        );
-      }
-    }
-  }
-
-  if (definition.validation.requireEntryReachability && members.has(definition.entryMember)) {
-    const fromEntry = reachable(definition.entryMember, members);
-    for (const memberId of memberIds) {
-      if (!fromEntry.has(memberId)) {
-        addIssue(
-          issues,
-          `fleets.${fleetId}.entryMember`,
-          `cannot reach member "${memberId}"`,
-        );
-      }
-    }
+    if (agent.model !== undefined) member.model = agent.model;
+    if (agent.reasoningEffort !== undefined) member.reasoningEffort = agent.reasoningEffort;
+    if (agent.permissions !== undefined) member.permission = agent.permissions;
+    if (agent.mcpServers !== undefined) member.mcpServers = new Set(agent.mcpServers);
+    if (agent.ui !== undefined) member.ui = agent.ui;
+    members.set(agent.id, member);
   }
 
   if (issues.length > 0) {
     return { valid: false, issues };
   }
-  const fleet: ResolvedFleet = {
-    id: fleetId,
-    name: definition.name,
-    description: definition.description,
-    entryMember: definition.entryMember,
-    members,
+  return {
+    valid: true,
+    issues,
+    fleet: {
+      id: normalized.id,
+      name: normalized.name,
+      description: normalized.description,
+      entryMember: normalized.entryAgent,
+      definition: normalized,
+      members,
+    },
   };
-  if (definition.coordinatorMember !== undefined) {
-    fleet.coordinatorMember = definition.coordinatorMember;
-  }
-  return { valid: true, issues, fleet };
 }
 
-export function validateConfig(config: FleetConfig, workspace = process.cwd()): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (config.defaultFleetId && !config.fleets[config.defaultFleetId]) {
-    addIssue(issues, "defaultFleetId", `references unknown fleet "${config.defaultFleetId}"`);
-  }
-  for (const fleetId of Object.keys(config.fleets)) {
-    issues.push(...validateFleet(config, fleetId, workspace).issues);
-  }
-  return issues;
+export function validateConfig(config: FleetConfig): ValidationIssue[] {
+  return config.fleetExamples.flatMap((example, index) =>
+    validateFleet(example, `fleetExamples.${index}`).issues
+  );
 }
 
-export function validateHostConfig(config: FleetConfig): ValidationIssue[] {
-  return [];
-}
-
-export async function loadConfig(path: string, workspace = process.cwd()): Promise<FleetConfig> {
+export async function loadConfig(path: string): Promise<FleetConfig> {
   const text = await readFile(path, "utf8");
   const parsed: unknown = JSON.parse(text);
   const result = fleetConfigSchema.safeParse(parsed);
@@ -376,38 +175,14 @@ export async function loadConfig(path: string, workspace = process.cwd()): Promi
     const detail = result.error.issues
       .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
       .join("\n");
-    throw new Error(`Invalid fleet configuration:\n${detail}`);
+    throw new Error(`Invalid Native Copilot configuration:\n${detail}`);
   }
   const config = result.data as FleetConfig;
-  const issues = validateHostConfig(config);
+  const issues = validateConfig(config);
   if (issues.length > 0) {
     throw new Error(
-      `Invalid fleet configuration:\n${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`,
+      `Invalid fleet examples:\n${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`,
     );
   }
   return config;
-}
-
-export function fleetSummaries(
-  config: FleetConfig,
-  workspace = process.cwd(),
-): Array<{
-  id: string;
-  name: string;
-  description: string;
-  valid: boolean;
-  issues: ValidationIssue[];
-  members: number;
-}> {
-  return Object.entries(config.fleets).map(([fleetId, definition]: [string, FleetDefinition]) => {
-    const result = validateFleet(config, fleetId, workspace);
-    return {
-      id: fleetId,
-      name: definition.name,
-      description: definition.description,
-      valid: result.valid,
-      issues: result.issues,
-      members: Object.keys(definition.members).length,
-    };
-  });
 }

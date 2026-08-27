@@ -135,6 +135,56 @@ local function line_count_with(buf, text)
   end
   return count
 end
+fleet._on_event({
+  v = 1,
+  id = 'runtime-turn',
+  type = 'member.state',
+  memberId = 'planner',
+  payload = { state = 'busy', turnId = 'runtime-turn' },
+})
+fleet._on_event({
+  v = 1,
+  id = 'runtime-message-1',
+  type = 'conversation.message',
+  memberId = 'planner',
+  payload = { messageId = 'runtime-message-1', content = 'Before the tool.' },
+})
+fleet._on_event({
+  v = 1,
+  id = 'runtime-tool',
+  type = 'activity.event',
+  memberId = 'planner',
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = { toolCallId = 'runtime-tool', success = true },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'runtime-message-2',
+  type = 'conversation.message',
+  memberId = 'planner',
+  payload = { messageId = 'runtime-message-2', content = 'After the tool.' },
+})
+fleet._on_event({
+  v = 1,
+  id = 'runtime-turn-idle',
+  type = 'member.state',
+  memberId = 'planner',
+  payload = { state = 'idle' },
+})
+local runtime_turn_text = buffer_text(
+  require('native_copilot.buffers').buffer('planner', 'conversation')
+)
+assert(
+  line_count_with(
+    require('native_copilot.buffers').buffer('planner', 'conversation'),
+    '🤖 Copilot ·'
+  ) == 1,
+  'runtime-initiated tool turn rendered more than one Copilot heading'
+)
+assert(runtime_turn_text:find('Before the tool.', 1, true))
+assert(runtime_turn_text:find('After the tool.', 1, true))
 local timeline_text = buffer_text(coordinator_buf)
 assert(timeline_text:find('🟡 **[task] [agent] Review implementation**', 1, true))
 assert(

@@ -137,6 +137,7 @@ local function create_buffer(name, member_id, view_id)
     streaming = false,
     activity_streaming = false,
     active_message = nil,
+    response_active = false,
     response_line_start = true,
     awaiting_response = nil,
     message_heading = nil,
@@ -229,7 +230,7 @@ local function flush(view)
       view.active_activity.fold_extmark = vim.api.nvim_buf_set_extmark(
         view.buf,
         activity_fold_namespace,
-        view.active_activity.body_start_row,
+        view.active_activity.fold_start_row,
         0,
         {
           id = view.active_activity.fold_extmark,
@@ -413,6 +414,7 @@ local function begin_inline_activity(view, activity_id, heading)
     id = activity_id,
     start_row = start_row,
     body_start_row = body_start_row,
+    fold_start_row = continuation and view.last_activity.fold_start_row or body_start_row,
     content = '',
     extmark = continuation and view.last_activity.extmark or nil,
     fold_extmark = continuation and view.last_activity.fold_extmark or nil,
@@ -436,6 +438,7 @@ local function begin_inline_activity(view, activity_id, heading)
   flush(view)
   view.last_activity = {
     start_row = view.active_activity.start_row,
+    fold_start_row = view.active_activity.fold_start_row,
     extmark = view.active_activity.extmark,
     fold_extmark = view.active_activity.fold_extmark,
     plain = plain,
@@ -904,6 +907,7 @@ local function begin_response(view, response_id)
     'NativeCopilotAssistantHeader'
   )
   view.awaiting_response = response_id or true
+  view.response_active = true
   view.last_block_kind = 'header'
   animate_writing(view, view.writing_generation)
 end
@@ -976,6 +980,7 @@ function M.fail_response(member_id, detail)
   touch_message_heading(view, 'failed', detail or 'failed')
   view.awaiting_response = nil
   view.active_message = nil
+  view.response_active = false
   view.response_line_start = true
   view.streaming = false
   finalize_render(view)
@@ -993,6 +998,10 @@ function M.complete_conversation(member_id, message_id, content)
   elseif view.active_message == message_id then
     append(view, '\n', true)
     touch_message_heading(view, 'completed')
+  elseif view.response_active and view.message_heading then
+    prepare_pending_block(view, 1)
+    append(view, indent_response_delta(view, content) .. '\n', true)
+    touch_message_heading(view, 'completed')
   else
     M.append_block(member_id, 'conversation', 'Copilot', content)
   end
@@ -1004,7 +1013,11 @@ end
 function M.finish_response(member_id)
   local entry = registry[member_id]
   local view = entry and entry.views.conversation
-  if not view or (not view.awaiting_response and not view.active_message) then return end
+  if not view
+    or (not view.response_active and not view.awaiting_response and not view.active_message)
+  then
+    return
+  end
   flush(view)
   if view.awaiting_response and not view.active_message then
     remove_message_heading(view)
@@ -1013,6 +1026,7 @@ function M.finish_response(member_id)
   end
   view.awaiting_response = nil
   view.active_message = nil
+  view.response_active = false
   view.response_line_start = true
   view.streaming = false
   finalize_render(view)

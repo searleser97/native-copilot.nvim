@@ -3,6 +3,8 @@ import {
   configuredRuntimeConnection,
   instanceSessionId,
   permissionDecision,
+  runtimeSessionOptions,
+  usesApproveAll,
 } from "../src/runtime.js";
 
 const readOnlyProfile = {
@@ -26,6 +28,37 @@ describe("instanceSessionId", () => {
   describe("configuredRuntimeConnection", () => {
     it("uses the bundled runtime when no private launcher is configured", () => {
       expect(configuredRuntimeConnection(undefined, "win32")).toBeUndefined();
+    });
+
+    describe("runtimeSessionOptions", () => {
+      it("translates the resolved Copilot command into SDK session policy", () => {
+        expect(
+          runtimeSessionOptions(
+            "& copilot.exe '--allow-all' '--excluded-tools=ask_user' " +
+              "'--disable-mcp-server' 'workspace-server' '--model' 'claude-sonnet-5'",
+          ),
+        ).toEqual({
+          allowAll: true,
+          availableTools: [],
+          excludedTools: ["ask_user"],
+          disabledMcpServers: ["workspace-server"],
+          model: "claude-sonnet-5",
+        });
+      });
+
+      it("preserves quoted values and repeated MCP exclusions", () => {
+        expect(
+          runtimeSessionOptions(
+            "copilot.exe --excluded-tools='ask_user,shell' " +
+              "--disable-mcp-server one --disable-mcp-server='two servers'",
+          ),
+        ).toEqual({
+          allowAll: false,
+          availableTools: [],
+          excludedTools: ["ask_user", "shell"],
+          disabledMcpServers: ["one", "two servers"],
+        });
+      });
     });
 
     it("forwards SDK runtime flags through a PowerShell launcher", () => {
@@ -112,6 +145,19 @@ describe("instanceSessionId", () => {
 
     expect(permissionDecision(readOnlyProfile, "E:\\repo", request)).toEqual({
       kind: "no-result",
+    });
+  });
+
+  describe("usesApproveAll", () => {
+    it("inherits approve-all from the resolved main command", () => {
+      expect(usesApproveAll({ mode: "inherit" }, true)).toBe(true);
+      expect(usesApproveAll(undefined, true)).toBe(true);
+    });
+
+    it("keeps prompt and restrictive profiles interactive", () => {
+      expect(usesApproveAll({ mode: "prompt" }, true)).toBe(false);
+      expect(usesApproveAll(readOnlyProfile, true)).toBe(false);
+      expect(usesApproveAll({ mode: "inherit" }, false)).toBe(false);
     });
   });
 });

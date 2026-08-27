@@ -29,6 +29,7 @@ export interface StateSnapshot {
 export interface StoredFleetRun {
   id: string;
   fleetId: string;
+  fleetDefinition: string | null;
   status: RunStatus;
   startedAt: string;
   endedAt: string | null;
@@ -58,13 +59,14 @@ export class FleetDatabase {
         version INTEGER NOT NULL
       );
       INSERT INTO schema_meta(version)
-      SELECT 3
+      SELECT 4
       WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
 
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY,
         mode TEXT NOT NULL CHECK(mode IN ('standard', 'fleet')),
         fleet_id TEXT,
+        fleet_definition TEXT,
         workspace TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
         started_at TEXT NOT NULL,
@@ -156,6 +158,14 @@ export class FleetDatabase {
         COMMIT;
       `);
     }
+    if (schema.version < 4) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE runs ADD COLUMN fleet_definition TEXT;
+        UPDATE schema_meta SET version = 4;
+        COMMIT;
+      `);
+    }
   }
 
   private transaction<T>(operation: () => T): T {
@@ -213,19 +223,22 @@ export class FleetDatabase {
     fleetId: string | null,
     workspace: string,
     ownerPid: number,
+    fleetDefinition: string | null = null,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO runs(id, mode, fleet_id, workspace, status, started_at, owner_pid)
-         VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+        `INSERT INTO runs(
+           id, mode, fleet_id, fleet_definition, workspace, status, started_at, owner_pid
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
-      .run(id, mode, fleetId, workspace, now(), ownerPid);
+      .run(id, mode, fleetId, fleetDefinition, workspace, now(), ownerPid);
   }
 
   resumableFleetRuns(workspace: string, limit = 20): StoredFleetRun[] {
     const runs = this.db
       .prepare(
-        `SELECT id, fleet_id AS fleetId, status, started_at AS startedAt, ended_at AS endedAt
+        `SELECT id, fleet_id AS fleetId, fleet_definition AS fleetDefinition,
+                status, started_at AS startedAt, ended_at AS endedAt
          FROM runs
          WHERE mode = 'fleet' AND workspace = ? AND fleet_id IS NOT NULL
            AND status != 'active'
@@ -250,7 +263,8 @@ export class FleetDatabase {
   fleetRun(id: string, workspace: string): StoredFleetRun | undefined {
     const run = this.db
       .prepare(
-        `SELECT id, fleet_id AS fleetId, status, started_at AS startedAt, ended_at AS endedAt
+        `SELECT id, fleet_id AS fleetId, fleet_definition AS fleetDefinition,
+                status, started_at AS startedAt, ended_at AS endedAt
          FROM runs
          WHERE id = ? AND mode = 'fleet' AND workspace = ? AND fleet_id IS NOT NULL`,
       )

@@ -1,133 +1,76 @@
 {
-  "schemaVersion": 1,
-  "defaultFleetId": "engineering",
+  "schemaVersion": 2,
   "standard": {
     "id": "standard",
     "displayName": "Copilot",
     "initialPrompt": "You are a general-purpose software engineering assistant. Work directly with the user, inspect before editing, and validate completed changes.",
     "reasoningSummary": "detailed"
   },
-  "agents": {
-    "coordinator": {
-      "name": "Coordinator",
-      "description": "Coordinates work, detects blockers, and reports status without duplicating specialist work.",
-      "initialPrompt": "Coordinate the fleet. Break work into clear outcomes, route questions to the right members, reconcile disagreements, and give concise evidence-based status updates.",
-      "permissions": {
-        "tools": {
-          "allow": ["*"],
-          "deny": ["edit", "create", "apply_patch", "shell"]
+  "fleetExamples": [
+    {
+      "id": "engineering_review",
+      "name": "Engineering Review Fleet",
+      "description": "An illustrative planning, implementation, and independent review fleet.",
+      "objective": "Plan, implement, and review the user's requested engineering change.",
+      "entryAgent": "planner",
+      "agents": [
+        {
+          "id": "planner",
+          "displayName": "Planner",
+          "description": "Investigates requirements and produces an implementable plan.",
+          "prompt": "Investigate the request and codebase, identify constraints and risks, and send an actionable plan to the implementer.",
+          "model": "claude-opus-5",
+          "reasoningEffort": "high",
+          "permissions": {
+            "tools": {
+              "allow": ["*"],
+              "deny": ["edit", "create", "apply_patch", "shell"]
+            },
+            "paths": {
+              "read": ["${workspace}"],
+              "write": []
+            },
+            "commands": false,
+            "network": false,
+            "gitWrite": false,
+            "externalActions": false
+          },
+          "canTalkTo": ["implementer", "reviewer"]
         },
-        "paths": {
-          "read": ["${workspace}"],
-          "write": []
+        {
+          "id": "implementer",
+          "displayName": "Implementer",
+          "description": "Implements the requested change and reports evidence.",
+          "prompt": "Implement the requested outcome precisely, validate it, and send the result to the reviewer.",
+          "model": "claude-sonnet-5",
+          "reasoningEffort": "high",
+          "permissions": {
+            "mode": "inherit"
+          },
+          "canTalkTo": ["planner", "reviewer"]
         },
-        "commands": false,
-        "network": false,
-        "gitWrite": false,
-        "externalActions": false
-      },
-      "ui": {
-        "icon": "C",
-        "color": "DiagnosticInfo"
-      }
-    },
-    "planner": {
-      "name": "Planner",
-      "description": "Investigates requirements and produces an implementable plan.",
-      "initialPrompt": "Investigate the request and codebase, identify constraints and risks, and produce an implementation plan. Challenge assumptions and ask other members for evidence when needed.",
-      "permissions": {
-        "tools": {
-          "allow": ["*"],
-          "deny": ["edit", "create", "apply_patch", "shell"]
-        },
-        "paths": {
-          "read": ["${workspace}"],
-          "write": []
-        },
-        "commands": false,
-        "network": false,
-        "gitWrite": false,
-        "externalActions": false
-      },
-      "ui": {
-        "icon": "P",
-        "color": "DiagnosticHint"
-      }
-    },
-    "implementer": {
-      "name": "Implementer",
-      "description": "Implements approved work and validates the result.",
-      "initialPrompt": "Implement the requested outcome precisely. Reuse existing patterns, keep changes focused, validate the behavior, and report concrete evidence. Ask the planner or reviewer when requirements are ambiguous.",
-      "ui": {
-        "icon": "I",
-        "color": "DiagnosticOk"
-      }
-    },
-    "reviewer": {
-      "name": "Reviewer",
-      "description": "Reviews correctness, risks, and validation evidence.",
-      "initialPrompt": "Review plans and implementations critically. Focus on correctness, regressions, security, edge cases, and whether validation proves the requested behavior. Send actionable findings directly to the responsible member.",
-      "permissions": {
-        "tools": {
-          "allow": ["*"],
-          "deny": ["edit", "create", "apply_patch", "shell"]
-        },
-        "paths": {
-          "read": ["${workspace}"],
-          "write": []
-        },
-        "commands": false,
-        "network": false,
-        "gitWrite": false,
-        "externalActions": false
-      },
-      "ui": {
-        "icon": "R",
-        "color": "DiagnosticWarn"
-      }
-    }
-  },
-  "fleets": {
-    "engineering": {
-      "name": "Engineering Fleet",
-      "description": "A configurable planning, implementation, review, and coordination fleet.",
-      "entryMember": "coordinator",
-      "coordinatorMember": "coordinator",
-      "groups": {
-        "delivery": ["planner", "implementer", "reviewer"]
-      },
-      "validation": {
-        "coordinatorFallback": "direct",
-        "requireEntryReachability": true,
-        "allowIsolatedMembers": false
-      },
-      "members": {
-        "coordinator": {
-          "agent": "coordinator",
-          "recipients": ["planner", "implementer", "reviewer"],
-          "recipientGroups": ["delivery"],
-          "canBroadcast": true,
-          "autoStart": true
-        },
-        "planner": {
-          "agent": "planner",
-          "recipients": ["coordinator", "implementer", "reviewer"],
-          "canBroadcast": false,
-          "autoStart": true
-        },
-        "implementer": {
-          "agent": "implementer",
-          "recipients": ["coordinator", "planner", "reviewer"],
-          "canBroadcast": false,
-          "autoStart": true
-        },
-        "reviewer": {
-          "agent": "reviewer",
-          "recipients": ["coordinator", "planner", "implementer"],
-          "canBroadcast": false,
-          "autoStart": true
+        {
+          "id": "reviewer",
+          "displayName": "Reviewer",
+          "description": "Independently checks correctness and validation evidence.",
+          "prompt": "Review the implementation critically and send actionable findings to the implementer and final status to the planner.",
+          "permissions": {
+            "tools": {
+              "allow": ["*"],
+              "deny": ["edit", "create", "apply_patch", "shell"]
+            },
+            "paths": {
+              "read": ["${workspace}"],
+              "write": []
+            },
+            "commands": false,
+            "network": false,
+            "gitWrite": false,
+            "externalActions": false
+          },
+          "canTalkTo": ["planner", "implementer"]
         }
-      }
+      ]
     }
-  }
+  ]
 }

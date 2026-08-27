@@ -5,6 +5,7 @@ import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import {
   CopilotClient,
   RuntimeConnection,
+  approveAll,
   defineTool,
   type CopilotSession,
   type PermissionHandler,
@@ -17,8 +18,10 @@ import {
 } from "@github/copilot-sdk";
 import { z } from "zod";
 import { FleetDatabase } from "./database.js";
-import { validateFleet } from "./config.js";
+import { dynamicFleetSchema, validateFleet } from "./config.js";
 import type {
+  DynamicFleetDefinition,
+  DynamicPermission,
   FleetConfig,
   PermissionProfile,
   ResolvedFleet,
@@ -100,6 +103,31 @@ type ActiveMode =
   | { kind: "fleet"; runId: string; fleet: ResolvedFleet }
   | undefined;
 
+export interface RuntimeSessionOptions {
+  allowAll: boolean;
+  availableTools: string[];
+  excludedTools: string[];
+  disabledMcpServers: string[];
+  model?: string;
+  reasoningEffort?: string;
+}
+
+interface StoredDynamicFleet {
+  definition: DynamicFleetDefinition;
+  mcpServers: string[];
+}
+
+function storedDynamicFleet(value: string): StoredDynamicFleet {
+  const parsed = JSON.parse(value) as Partial<StoredDynamicFleet>;
+  if (!parsed.definition || !Array.isArray(parsed.mcpServers)) {
+    throw new Error("Stored fleet definition is invalid.");
+  }
+  return {
+    definition: parsed.definition,
+    mcpServers: parsed.mcpServers.filter((server): server is string => typeof server === "string"),
+  };
+}
+
 const persistEventTypes = new Set<SessionEvent["type"]>([
   "assistant.message",
   "assistant.reasoning",
@@ -141,6 +169,86 @@ const environmentProbes: EnvironmentProbe[] = [
     load: async (session) => (await session.rpc.agent.list()).agents,
   },
 ];
+
+function commandTokens(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (quote) {
+      if (character === quote) {
+        if (quote === "'" && command[index + 1] === "'") {
+          current += "'";
+          index += 1;
+        } else {
+          quote = undefined;
+        }
+      } else if (quote === '"' && character === "`" && index + 1 < command.length) {
+        current += command[index + 1];
+        index += 1;
+      } else {
+        current += character;
+      }
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (current !== "") {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+  if (current !== "") tokens.push(current);
+  return tokens.filter((token) => token !== "&");
+}
+
+export function runtimeSessionOptions(command: string | undefined): RuntimeSessionOptions {
+  const result: RuntimeSessionOptions = {
+    allowAll: false,
+    availableTools: [],
+    excludedTools: [],
+    disabledMcpServers: [],
+  };
+  const tokens = commandTokens(command ?? "");
+  const value = (index: number, prefix: string): [string | undefined, number] => {
+    const token = tokens[index]!;
+    const inline = token.startsWith(`${prefix}=`) ? token.slice(prefix.length + 1) : undefined;
+    return inline !== undefined ? [inline, index] : [tokens[index + 1], index + 1];
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (token === "--allow-all") {
+      result.allowAll = true;
+    } else if (token === "--available-tools" || token.startsWith("--available-tools=")) {
+      const [tools, consumed] = value(index, "--available-tools");
+      if (tools) result.availableTools.push(...tools.split(",").filter(Boolean));
+      index = consumed;
+    } else if (token === "--excluded-tools" || token.startsWith("--excluded-tools=")) {
+      const [tools, consumed] = value(index, "--excluded-tools");
+      if (tools) result.excludedTools.push(...tools.split(",").filter(Boolean));
+      index = consumed;
+    } else if (token === "--disable-mcp-server" || token.startsWith("--disable-mcp-server=")) {
+      const [server, consumed] = value(index, "--disable-mcp-server");
+      if (server) result.disabledMcpServers.push(server);
+      index = consumed;
+    } else if (token === "--model" || token.startsWith("--model=")) {
+      const [model, consumed] = value(index, "--model");
+      if (model) result.model = model;
+      index = consumed;
+    } else if (token === "--reasoning-effort" || token.startsWith("--reasoning-effort=")) {
+      const [effort, consumed] = value(index, "--reasoning-effort");
+      if (effort) result.reasoningEffort = effort;
+      index = consumed;
+    }
+  }
+  result.availableTools = [...new Set(result.availableTools)];
+  result.excludedTools = [...new Set(result.excludedTools)];
+  result.disabledMcpServers = [...new Set(result.disabledMcpServers)];
+  return result;
+}
 
 function projectKey(workspace: string): string {
   return createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0, 12);
@@ -276,6 +384,17 @@ export function permissionDecision(
   }
 }
 
+export function usesApproveAll(
+  permission: DynamicPermission | PermissionProfile | undefined,
+  mainAllowsAll: boolean,
+): boolean {
+  if (permission && "mode" in permission) {
+    return permission.mode === "approveAll" ||
+      (permission.mode === "inherit" && mainAllowsAll);
+  }
+  return permission === undefined && mainAllowsAll;
+}
+
 function sdkToolPatterns(patterns: string[]): string[] {
   const result = new Set<string>();
   for (const pattern of patterns) {
@@ -295,9 +414,11 @@ export class CopilotRuntime {
   private knownSessionIds = new Set<string>();
   private readonly live = new Map<string, LiveSession>();
   private readonly instanceId = randomUUID();
+  private readonly runtimeOptions: RuntimeSessionOptions;
+  private fleetMcpServers = new Set<string>();
   private active: ActiveMode;
   private shuttingDown = false;
-  private pendingFleetStart: string | undefined;
+  private pendingFleetStart: DynamicFleetDefinition | undefined;
   private readonly pendingPermissions = new Map<
     string,
     { resolve: (result: PermissionRequestResult) => void }
@@ -309,7 +430,9 @@ export class CopilotRuntime {
     private readonly db: FleetDatabase,
     private readonly emit: RuntimeEmitter,
     private readonly runtimeCommand?: string,
-  ) {}
+  ) {
+    this.runtimeOptions = runtimeSessionOptions(runtimeCommand);
+  }
 
   private async ensureClient(): Promise<CopilotClient> {
     if (this.client) {
@@ -532,17 +655,19 @@ export class CopilotRuntime {
   }
 
   private permissionHandler(
-    profile: PermissionProfile | undefined,
+    permission: DynamicPermission | PermissionProfile | undefined,
     memberId: string,
-  ): PermissionHandler | undefined {
-    if (!profile) {
-      return undefined;
+  ): PermissionHandler {
+    if (usesApproveAll(permission, this.runtimeOptions.allowAll)) {
+      return approveAll;
     }
-    const ceiling = profile;
+    const ceiling = permission && !("mode" in permission) ? permission : undefined;
     return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
-      const decision = permissionDecision(ceiling, this.workspace, request);
-      if (decision.kind !== "no-result") {
-        return decision;
+      if (ceiling) {
+        const decision = permissionDecision(ceiling, this.workspace, request);
+        if (decision.kind !== "no-result") {
+          return decision;
+        }
       }
       const requestId = randomUUID();
       this.emit(
@@ -554,6 +679,22 @@ export class CopilotRuntime {
         this.pendingPermissions.set(requestId, { resolve });
       });
     };
+  }
+
+  private applyRuntimeOptions(config: SessionConfig): void {
+    if (this.runtimeOptions.availableTools.length > 0 && config.availableTools === undefined) {
+      config.availableTools = [...this.runtimeOptions.availableTools];
+    }
+    if (this.runtimeOptions.excludedTools.length > 0) {
+      const configured = Array.isArray(config.excludedTools) ? config.excludedTools : [];
+      config.excludedTools = [...new Set([...configured, ...this.runtimeOptions.excludedTools])];
+    }
+    config.disabledMcpServers = [
+      ...new Set([
+        ...(config.disabledMcpServers ?? []),
+        ...this.runtimeOptions.disabledMcpServers,
+      ]),
+    ];
   }
 
   private mcpAuthHandler(memberId: string): McpAuthHandler {
@@ -636,11 +777,11 @@ export class CopilotRuntime {
       enableSessionStore: true,
       enableConfigDiscovery: true,
       systemMessage: { mode: "append", content: member.initialPrompt },
-      ...(permissionHandler ? { onPermissionRequest: permissionHandler } : {}),
+      onPermissionRequest: permissionHandler,
       onMcpAuthRequest: this.mcpAuthHandler(member.id),
       tools,
     };
-    if (member.permission) {
+    if (member.permission && !("mode" in member.permission)) {
       config.availableTools = sdkToolPatterns(member.permission.tools.allow);
       config.excludedTools = sdkToolPatterns(member.permission.tools.deny);
     }
@@ -650,12 +791,22 @@ export class CopilotRuntime {
     if (member.reasoningEffort !== undefined) {
       config.reasoningEffort = member.reasoningEffort;
     }
+    this.applyRuntimeOptions(config);
+    if (member.mcpServers) {
+      config.disabledMcpServers = [
+        ...new Set([
+          ...(config.disabledMcpServers ?? []),
+          ...[...this.fleetMcpServers].filter((server) => !member.mcpServers!.has(server)),
+        ]),
+      ];
+    }
     return config;
   }
 
   private standardSessionConfig(standard: StandardConfig): SessionConfig {
     const permission = standard.permissions;
     const permissionHandler = this.permissionHandler(permission, "standard");
+    const examples = JSON.stringify(this.config.fleetExamples, null, 2);
     const config: SessionConfig = {
       clientName: "native-copilot.nvim",
       workingDirectory: this.workspace,
@@ -664,10 +815,18 @@ export class CopilotRuntime {
       manageScheduleEnabled: true,
       enableSessionStore: true,
       enableConfigDiscovery: true,
-      systemMessage: { mode: "append", content: standard.initialPrompt },
-      ...(permissionHandler ? { onPermissionRequest: permissionHandler } : {}),
+      systemMessage: {
+        mode: "append",
+        content:
+          `${standard.initialPrompt}\n\n` +
+          "When multiple independent specialists would improve the result, design a fleet and " +
+          "call create_fleet. Each agent chooses its own prompt, model, permissions, MCP subset, " +
+          "and canTalkTo peers. The examples below are illustrative, not predefined fleets:\n" +
+          examples,
+      },
+      onPermissionRequest: permissionHandler,
       onMcpAuthRequest: this.mcpAuthHandler("standard"),
-      tools: [this.createStartFleetTool()],
+      tools: [this.createFleetTool()],
     };
     if (permission) {
       config.availableTools = sdkToolPatterns(permission.tools.allow);
@@ -679,84 +838,93 @@ export class CopilotRuntime {
     if (standard.reasoningEffort !== undefined) {
       config.reasoningEffort = standard.reasoningEffort;
     }
+    if (this.runtimeOptions.model !== undefined) {
+      config.model = this.runtimeOptions.model;
+    }
+    if (this.runtimeOptions.reasoningEffort !== undefined) {
+      config.reasoningEffort =
+        this.runtimeOptions.reasoningEffort as NonNullable<StandardConfig["reasoningEffort"]>;
+    }
+    this.applyRuntimeOptions(config);
     return config;
   }
 
-  private createStartFleetTool(): Tool<any> {
-    const fleetIds = Object.keys(this.config.fleets);
-    return defineTool("start_fleet", {
+  private createFleetTool(): Tool<any> {
+    return defineTool("create_fleet", {
       description:
-        "Request activation of a configured Copilot Fleet after the current Standard Copilot " +
-        `turn finishes. Available fleet IDs: ${fleetIds.join(", ") || "none"}.`,
-      parameters: z.object({
-        fleetId: z.string().min(1),
-      }),
+        "Create and start a task-specific fleet after this Standard Copilot turn finishes. " +
+        "Define every agent at runtime. canTalkTo controls which peer-specific send_to_<agent> " +
+        "tools each agent receives. objective is delivered to the entry agent after startup. " +
+        "Omit mcpServers to inherit the main session MCP set.",
+      parameters: dynamicFleetSchema,
       skipPermission: true,
       defer: "never",
-      handler: ({ fleetId }) => {
-        const result = validateFleet(this.config, fleetId, this.workspace);
+      handler: (definition) => {
+        const fleetDefinition = definition as DynamicFleetDefinition;
+        const result = validateFleet(fleetDefinition);
         if (!result.valid) {
           throw new Error(
-            `Fleet "${fleetId}" is unavailable: ${result.issues
+            `Fleet "${fleetDefinition.id}" is invalid: ${result.issues
               .map((issue) => `${issue.path}: ${issue.message}`)
               .join("; ")}`,
           );
         }
-        this.pendingFleetStart = fleetId;
-        this.emit("fleet.requested", { fleetId, startsWhen: "session.idle" });
+        if (
+          !this.runtimeOptions.allowAll &&
+          fleetDefinition.agents.some(
+            (agent) => agent.permissions && "mode" in agent.permissions &&
+              agent.permissions.mode === "approveAll",
+          )
+        ) {
+          throw new Error(
+            "approveAll child permissions require the main Copilot command to include --allow-all.",
+          );
+        }
+        this.pendingFleetStart = fleetDefinition;
+        this.emit(
+          "fleet.requested",
+          { fleetId: fleetDefinition.id, definition: fleetDefinition, startsWhen: "session.idle" },
+        );
         return {
           accepted: true,
-          fleetId,
+          fleetId: fleetDefinition.id,
           message: "The Fleet will start after this Standard Copilot turn becomes idle.",
         };
       },
     });
   }
 
-  private createSendMessageTool(fleet: ResolvedFleet, source: ResolvedMember): Tool<any> {
-    const targetDescription = [
-      ...source.recipients,
-      ...(source.canBroadcast ? ["broadcast"] : []),
-    ].join(", ");
-    return defineTool("send_message", {
-      description:
-        "Send a durable asynchronous message to another member of this fleet. " +
-        `Allowed recipients: ${targetDescription || "none"}.`,
-      parameters: z.object({
-        recipient: z.string().min(1).describe("Fleet-local member ID, or broadcast when allowed"),
-        subject: z.string().min(1).optional(),
-        message: z.string().min(1),
-      }),
-      skipPermission: true,
-      defer: "never",
-      handler: async ({ recipient, subject, message }) => {
-        const targets =
-          recipient === "broadcast"
-            ? source.canBroadcast
-              ? [...fleet.members.keys()].filter((memberId) => memberId !== source.id)
-              : []
-            : source.recipients.has(recipient)
-              ? [recipient]
-              : [];
-        if (targets.length === 0) {
-          throw new Error(`Recipient "${recipient}" is not allowed for member "${source.id}".`);
-        }
-        const messageIds: string[] = [];
-        for (const target of targets) {
+  private createPeerMessageTools(source: ResolvedMember): Tool<any>[] {
+    return [...source.recipients].map((target) =>
+      defineTool(`send_to_${target}`, {
+        description: `Send a durable asynchronous message to the ${target} fleet agent.`,
+        parameters: z.object({
+          subject: z.string().min(1).optional(),
+          message: z.string().min(1),
+        }),
+        skipPermission: true,
+        defer: "never",
+        handler: async ({ subject, message }) => {
           const id = randomUUID();
           const content = subject ? `Subject: ${subject}\n\n${message}` : message;
-          this.db.enqueueMessage(id, this.requireFleetRunId(), source.id, target, "agent", content);
-          messageIds.push(id);
+          this.db.enqueueMessage(
+            id,
+            this.requireFleetRunId(),
+            source.id,
+            target,
+            "agent",
+            content,
+          );
           this.emit(
             "mailbox.queued",
             { id, source: source.id, target, content },
             { runId: this.requireFleetRunId(), memberId: source.id, target },
           );
           queueMicrotask(() => void this.drainMailbox(target));
-        }
-        return { deliveredToMailbox: targets, messageIds };
-      },
-    });
+          return { deliveredToMailbox: target, messageId: id };
+        },
+      })
+    );
   }
 
   private requireFleetRunId(): string {
@@ -894,7 +1062,7 @@ export class CopilotRuntime {
     if (!member) {
       throw new Error(`Unknown fleet member "${memberId}".`);
     }
-    const tools = [this.createSendMessageTool(this.active.fleet, member)];
+    const tools = this.createPeerMessageTools(member);
     return this.connectSession(
       this.active.runId,
       memberId,
@@ -1003,10 +1171,10 @@ export class CopilotRuntime {
         live.busy = false;
         this.emit("member.state", { state: "idle", ...event.data }, { ...fields, target: "status" });
         if (live.memberId === "standard" && this.pendingFleetStart) {
-          const fleetId = this.pendingFleetStart;
+          const definition = this.pendingFleetStart;
           this.pendingFleetStart = undefined;
           queueMicrotask(() => {
-            void this.startFleet(fleetId).catch((error) => {
+            void this.startFleet(definition).catch((error) => {
               this.emit(
                 "member.error",
                 { message: error instanceof Error ? error.message : String(error) },
@@ -1151,18 +1319,40 @@ export class CopilotRuntime {
     }
   }
 
-  async startFleet(fleetId: string): Promise<void> {
-    const validated = validateFleet(this.config, fleetId, this.workspace);
+  async startFleet(definition: DynamicFleetDefinition): Promise<void> {
+    const validated = validateFleet(definition);
     if (!validated.valid || !validated.fleet) {
       throw new Error(
-        `Fleet "${fleetId}" is invalid:\n${validated.issues
+        `Fleet "${definition.id}" is invalid:\n${validated.issues
           .map((issue) => `${issue.path}: ${issue.message}`)
           .join("\n")}`,
       );
     }
-    await this.stopActive(`Switching to fleet ${fleetId}`);
+    const standard = this.live.get("standard");
+    this.fleetMcpServers = new Set(
+      standard
+          ? (await standard.session.rpc.mcp.list()).servers.map((server) => server.name)
+          : [],
+    );
+    for (const agent of definition.agents) {
+      for (const server of agent.mcpServers ?? []) {
+          if (!this.fleetMcpServers.has(server)) {
+            throw new Error(
+              `Fleet agent "${agent.id}" requested unavailable MCP server "${server}".`,
+            );
+          }
+      }
+    }
+    await this.stopActive(`Switching to fleet ${definition.id}`);
     const runId = randomUUID();
-    this.db.createRun(runId, "fleet", fleetId, this.workspace, process.pid);
+    this.db.createRun(
+      runId,
+      "fleet",
+      definition.id,
+      this.workspace,
+      process.pid,
+      JSON.stringify({ definition, mcpServers: [...this.fleetMcpServers] }),
+    );
     this.active = { kind: "fleet", runId, fleet: validated.fleet };
     this.emitFleetLoading(
       runId,
@@ -1184,6 +1374,7 @@ export class CopilotRuntime {
         this.fleetModePayload(validated.fleet, false),
         { runId },
       );
+      await this.sendUserPrompt(validated.fleet.entryMember, definition.objective);
     } catch (error) {
       await Promise.allSettled(started.map((live) => live.session.disconnect()));
       this.live.clear();
@@ -1197,18 +1388,21 @@ export class CopilotRuntime {
   recoverableFleetRuns(): Array<Record<string, unknown>> {
     return this.db
       .resumableFleetRuns(this.workspace)
-      .filter((run) => {
-        const validation = validateFleet(this.config, run.fleetId, this.workspace);
-        return validation.valid;
-      })
-      .map((run) => ({
-        id: run.id,
-        fleetId: run.fleetId,
-        status: run.status,
-        startedAt: run.startedAt,
-        endedAt: run.endedAt,
-        members: run.sessions.map((session) => session.memberId),
-      }));
+      .flatMap((run) => {
+        if (!run.fleetDefinition) return [];
+        const { definition } = storedDynamicFleet(run.fleetDefinition);
+        const validation = validateFleet(definition);
+        if (!validation.valid) return [];
+        return [{
+          id: run.id,
+          fleetId: run.fleetId,
+          name: definition.name,
+          status: run.status,
+          startedAt: run.startedAt,
+          endedAt: run.endedAt,
+          members: run.sessions.map((session) => session.memberId),
+        }];
+      });
   }
 
   async resumeFleet(runId: string): Promise<void> {
@@ -1219,7 +1413,13 @@ export class CopilotRuntime {
     if (stored.status === "active") {
       throw new Error(`Fleet run "${runId}" is owned by another active Neovim instance.`);
     }
-    const validated = validateFleet(this.config, stored.fleetId, this.workspace);
+    if (!stored.fleetDefinition) {
+      throw new Error(`Fleet run "${runId}" predates dynamic fleet persistence and cannot resume.`);
+    }
+    const recovered = storedDynamicFleet(stored.fleetDefinition);
+    const definition = recovered.definition;
+    this.fleetMcpServers = new Set(recovered.mcpServers);
+    const validated = validateFleet(definition);
     if (!validated.valid || !validated.fleet) {
       throw new Error(`Fleet "${stored.fleetId}" can no longer be resumed with this configuration.`);
     }
@@ -1247,9 +1447,7 @@ export class CopilotRuntime {
               runId,
               member.id,
               sessionId,
-              this.memberConfig(member, [
-                this.createSendMessageTool(validated.fleet, member),
-              ]),
+              this.memberConfig(member, this.createPeerMessageTools(member)),
               true,
             ),
           );
@@ -1278,13 +1476,11 @@ export class CopilotRuntime {
       name: fleet.name,
       recovered,
       entryMember: fleet.entryMember,
-      coordinatorMember: fleet.coordinatorMember,
       members: [...fleet.members.values()].map((member) => ({
         id: member.id,
         displayName: member.displayName,
         description: member.description,
         recipients: [...member.recipients],
-        canBroadcast: member.canBroadcast,
         autoStart: member.autoStart,
         ui: member.ui,
       })),
@@ -1347,7 +1543,7 @@ export class CopilotRuntime {
         `${message.content}\n` +
         "</fleet_message>\n\n" +
         "Process this durable message from another fleet member. Respond or act as appropriate, " +
-        "and use send_message if the sender or another member needs a direct answer.";
+        "and use the relevant send_to_<agent> tool if another member needs a direct answer.";
       try {
         await live.session.send({ prompt, mode: "enqueue" });
         this.db.completeMessage(message.id);

@@ -6,19 +6,13 @@ local M = {}
 local data_root = vim.fn.stdpath('data')
 local default_database = data_root .. '/native-copilot/state.sqlite'
 
-local function client_commands(fleets)
-  local choices = {}
-  for _, fleet in ipairs(fleets or {}) do
-    if fleet.valid then
-      table.insert(choices, { name = fleet.id, description = fleet.description })
-    end
-  end
+local function client_commands()
   return {
     {
       name = 'fleet',
-      description = 'Start or recover a configured multi-session Copilot Fleet',
+      description = 'Ask Standard Copilot to design and start a task-specific Fleet',
       kind = 'client',
-      input = { hint = 'fleet id', choices = choices },
+      input = { hint = 'objective for the dynamic fleet' },
     },
     {
       name = 'tasks',
@@ -63,7 +57,9 @@ end
 
 local defaults = {
   node_command = 'node',
-  runtime_command = vim.env.NVIM_COPILOT_CMD or vim.env.COPILOT_CLI_CMD,
+  runtime_command = vim.g.native_copilot_command
+    or vim.env.NVIM_COPILOT_CMD
+    or vim.env.COPILOT_CLI_CMD,
   config_path = vim.fn.stdpath('config') .. '/copilot/fleets.json',
   database_path = default_database,
   workspace = nil,
@@ -112,7 +108,7 @@ local state = {
   member_order = { 'standard' },
   tasks = {},
   environment = {},
-  fleets = {},
+  fleet_examples = {},
   recoverable_fleets = {},
   overview = false,
   configured_buffers = {},
@@ -363,7 +359,11 @@ local function submit_prompt()
       return
     elseif command.name:lower() == 'fleet' then
       if command.input then
-        M.start_fleet(command.input)
+        send('prompt.send', {
+          target = 'standard',
+          content = 'Design and create a task-specific Copilot fleet for this objective: '
+            .. command.input,
+        })
       else
         M.select_fleet()
       end
@@ -1391,45 +1391,30 @@ end
 function M.select_fleet()
   if not start_host() then return end
   ensure_ui()
-  if vim.tbl_isempty(state.fleets) then
-    send('hello')
-    notify('Fleet profiles are loading.', vim.log.levels.INFO)
-    return
-  end
   local entries = {}
   if state.mode == 'fleet' then
     table.insert(entries, { display = 'Stop Fleet and return to Standard Copilot', kind = 'stop' })
   end
-  for _, fleet in ipairs(state.fleets) do
-    local prefix = fleet.valid and '' or '[INVALID] '
+  for _, run in ipairs(state.recoverable_fleets) do
     table.insert(entries, {
-      display = ('%s%s (%d members) — %s'):format(
-        prefix,
-        fleet.name,
-        fleet.members,
-        fleet.description
+      display = ('Recover %s · %s · %d sessions'):format(
+        run.name or run.fleetId,
+        run.status,
+        #(run.members or {})
       ),
-      kind = 'fleet',
-      fleet = fleet,
+      ordinal = table.concat({
+        'recover',
+        run.name or run.fleetId,
+        run.startedAt or '',
+        run.status or '',
+      }, ' '),
+      kind = 'recover',
+      run = run,
     })
   end
-  for _, run in ipairs(state.recoverable_fleets) do
-    local fleet
-    for _, candidate in ipairs(state.fleets) do
-      if candidate.id == run.fleetId then fleet = candidate break end
-    end
-    if fleet then
-      table.insert(entries, {
-        display = ('Recover %s · %s · %d sessions'):format(
-          fleet.name,
-          run.status,
-          #(run.members or {})
-        ),
-        ordinal = table.concat({ 'recover', fleet.name, run.startedAt or '', run.status or '' }, ' '),
-        kind = 'recover',
-        run = run,
-      })
-    end
+  if vim.tbl_isempty(entries) then
+    notify('Describe the fleet objective in a prompt or use /fleet <objective>.', vim.log.levels.INFO)
+    return
   end
   picker('Copilot Fleets', entries, function(item)
     if item.kind == 'stop' then
@@ -1446,33 +1431,7 @@ function M.select_fleet()
       send('fleet.resume', { runId = item.run.id })
       return
     end
-    if not item.fleet.valid then
-      local diagnostics = {}
-      for _, issue in ipairs(item.fleet.issues or {}) do
-        table.insert(diagnostics, ('%s: %s'):format(issue.path, issue.message))
-      end
-      notify(table.concat(diagnostics, '\n'), vim.log.levels.ERROR)
-      return
-    end
-    send('fleet.start', { fleetId = item.fleet.id })
   end)
-end
-
-function M.start_fleet(fleet_id)
-  if not start_host() then return end
-  local selected
-  for _, fleet in ipairs(state.fleets) do
-    if fleet.id == fleet_id then selected = fleet break end
-  end
-  if not selected then
-    notify(('Unknown Fleet: %s'):format(fleet_id), vim.log.levels.ERROR)
-    return
-  end
-  if not selected.valid then
-    notify(('Fleet %s is invalid.'):format(fleet_id), vim.log.levels.ERROR)
-    return
-  end
-  send('fleet.start', { fleetId = fleet_id })
 end
 
 local function event_member(message)
@@ -1559,7 +1518,7 @@ end
 function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
-    state.fleets = payload.fleets or {}
+    state.fleet_examples = payload.fleetExamples or {}
     state.recoverable_fleets = payload.recoverableFleets or {}
     return
   elseif message.type == 'sessions.list' then
@@ -1597,7 +1556,7 @@ function M._on_event(message)
     return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
-    local available = commands.merge(payload.commands or {}, client_commands(state.fleets))
+    local available = commands.merge(payload.commands or {}, client_commands())
     state.command_requests[target] = nil
     commands.set_catalog(target, available)
     if payload.purpose ~= 'cache' then show_commands(target, available) end
@@ -2098,7 +2057,9 @@ function M._on_event(message)
   elseif message.type == 'member.state' then
     local member_state = payload.state or 'unknown'
     buffers.set_state(member_id, member_state)
-    if member_state == 'idle' then
+    if member_state == 'busy' then
+      buffers.begin_response(member_id, payload.turnId or message.id)
+    elseif member_state == 'idle' then
       buffers.finish_response(member_id)
       local request_id = state.active_prompts[member_id]
       if request_id then state.prompt_calls[request_id] = nil end

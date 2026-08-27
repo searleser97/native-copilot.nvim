@@ -3,11 +3,11 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { argv, env, exit, kill, ppid, stderr } from "node:process";
-import { fleetSummaries, loadConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 import { FleetDatabase } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
 import { CopilotRuntime } from "./runtime.js";
-import { PROTOCOL_VERSION } from "./types.js";
+import { PROTOCOL_VERSION, type DynamicFleetDefinition } from "./types.js";
 
 interface HostOptions {
   configPath: string;
@@ -48,9 +48,7 @@ function hostOptions(): HostOptions {
         resolve(dataRoot, "native-copilot", "state.sqlite"),
     ),
     runtimeCommand:
-      env.NATIVE_COPILOT_RUNTIME_COMMAND ??
-      env.NVIM_COPILOT_CMD ??
-      env.COPILOT_CLI_CMD,
+      env.NATIVE_COPILOT_RUNTIME_COMMAND,
   };
 }
 
@@ -75,7 +73,7 @@ function requiredString(
 
 async function main(): Promise<void> {
   const options = hostOptions();
-  const config = await loadConfig(options.configPath, options.workspace);
+  const config = await loadConfig(options.configPath);
   const db = new FleetDatabase(options.databasePath);
   const interruptedRuns = db.markInterruptedWork(
     "Owning Neovim host is no longer running",
@@ -123,7 +121,7 @@ async function main(): Promise<void> {
             configPath: options.configPath,
             databasePath: options.databasePath,
             interruptedRuns,
-            fleets: fleetSummaries(config, options.workspace),
+            fleetExamples: config.fleetExamples,
             standard: {
               id: config.standard.id,
               displayName: config.standard.displayName,
@@ -271,7 +269,10 @@ async function main(): Promise<void> {
         });
         return;
       case "fleet.start":
-        await runtime.startFleet(requiredString(payload, "fleetId", command.type));
+        if (typeof payload.definition !== "object" || payload.definition === null) {
+          throw new Error(`${command.type} requires payload.definition`);
+        }
+        await runtime.startFleet(payload.definition as DynamicFleetDefinition);
         protocol.send("request.complete", { type: command.type }, {
           requestId: command.id,
           done: true,

@@ -3,13 +3,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  dynamicFleetSchema,
   fleetConfigSchema,
-  fleetSummaries,
   validateConfig,
   validateFleet,
-  validateHostConfig,
 } from "../src/config.js";
-import type { FleetConfig } from "../src/types.js";
+import type { DynamicFleetDefinition, FleetConfig } from "../src/types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -18,97 +17,84 @@ async function exampleConfig(): Promise<FleetConfig> {
   return fleetConfigSchema.parse(JSON.parse(text)) as FleetConfig;
 }
 
-describe("fleet configuration", () => {
-  it("accepts the editable engineering example", async () => {
+describe("dynamic fleet configuration", () => {
+  it("treats configured fleets as examples instead of predefined launch targets", async () => {
     const config = await exampleConfig();
-    expect(validateConfig(config, "C:\\work")).toEqual([]);
-    const result = validateFleet(config, "engineering", "C:\\work");
-    expect(result.valid).toBe(true);
-    expect(result.fleet?.members.get("planner")?.recipients).toContain("coordinator");
-    expect(result.fleet?.members.get("planner")?.reasoningSummary).toBe("detailed");
-    expect(result.fleet?.members.get("planner")?.permission?.commands).toBe(false);
-    expect(result.fleet?.members.get("implementer")?.permission).toBeUndefined();
+    expect(validateConfig(config)).toEqual([]);
+    expect(config.fleetExamples).toHaveLength(1);
+    expect(config).not.toHaveProperty("fleets");
+    expect(config).not.toHaveProperty("agents");
   });
 
-  it("rejects a missing coordinator fallback edge", async () => {
-    const config = await exampleConfig();
-    config.fleets.engineering!.members.planner!.recipients = ["implementer"];
-    const result = validateFleet(config, "engineering", "C:\\work");
-    expect(result.valid).toBe(false);
-    expect(result.issues).toContainEqual({
-      path: "fleets.engineering.members.planner.recipients",
-      message: 'must directly include coordinator "coordinator"',
+  it("resolves runtime-defined agents and peer communication", async () => {
+    const definition = (await exampleConfig()).fleetExamples[0]!;
+    const result = validateFleet(definition);
+
+    expect(result.valid).toBe(true);
+    expect(result.fleet?.entryMember).toBe("planner");
+    expect(result.fleet?.members.get("planner")?.recipients).toEqual(
+      new Set(["implementer", "reviewer"]),
+    );
+    expect(result.fleet?.members.get("implementer")?.permission).toEqual({ mode: "inherit" });
+  });
+
+  it("rejects duplicate runtime agent IDs", async () => {
+    const definition = structuredClone((await exampleConfig()).fleetExamples[0]!);
+    definition.agents[1]!.id = "planner";
+
+    expect(validateFleet(definition).issues).toContainEqual({
+      path: "fleet.agents.1.id",
+      message: 'duplicates agent "planner"',
     });
   });
 
-  it("rejects permission elevation through path overrides", async () => {
-    const config = await exampleConfig();
-    config.fleets.engineering!.members.planner!.permissionNarrowing = {
-      writePaths: ["C:\\outside"],
-    };
-    const result = validateFleet(config, "engineering", "C:\\work");
-    expect(result.valid).toBe(false);
-    expect(result.issues.some((issue) => issue.message.includes("exceeds"))).toBe(true);
+  it("rejects peer tools targeting unknown agents", async () => {
+    const definition = structuredClone((await exampleConfig()).fleetExamples[0]!);
+    definition.agents[0]!.canTalkTo.push("tester");
+
+    expect(validateFleet(definition).issues).toContainEqual({
+      path: "fleet.agents.0.canTalkTo",
+      message: 'references unknown agent "tester"',
+    });
   });
 
-  it("defaults agents without permissions to unrestricted native behavior", async () => {
-    const config = await exampleConfig();
-    delete config.standard.permissions;
-    delete config.agents.implementer!.permissions;
+  it("uses tool-safe agent IDs", async () => {
+    const definition = structuredClone((await exampleConfig()).fleetExamples[0]!);
+    definition.agents[0]!.id = "planning-agent";
 
-    expect(validateConfig(config, "C:\\work")).toEqual([]);
-    expect(
-      validateFleet(config, "engineering", "C:\\work").fleet?.members.get("implementer")
-        ?.permission,
-    ).toBeUndefined();
+    expect(dynamicFleetSchema.safeParse(definition).success).toBe(false);
   });
 
-  it("rejects the removed permission profile schema", async () => {
-    const config = await exampleConfig();
-    const legacy = {
-      ...config,
-      permissionProfiles: {
-        unrestricted: config.agents.planner!.permissions,
-      },
-    };
-
-    expect(fleetConfigSchema.safeParse(legacy).success).toBe(false);
-    expect(
-      fleetConfigSchema.safeParse({
-        ...config,
-        agents: {
-          ...config.agents,
-          implementer: {
-            ...config.agents.implementer!,
-            permissionProfile: "unrestricted",
-          },
+  it("accepts an LLM-generated fleet with explicit permissions and MCP selection", () => {
+    const definition: DynamicFleetDefinition = {
+      id: "focused_test",
+      name: "Focused Test",
+      description: "A generated implementation and test fleet.",
+      objective: "Implement and test the requested change.",
+      entryAgent: "builder",
+      agents: [
+        {
+          id: "builder",
+          displayName: "Builder",
+          description: "Builds the change.",
+          prompt: "Implement the requested change.",
+          permissions: { mode: "approveAll" },
+          mcpServers: ["myado"],
+          canTalkTo: ["tester"],
         },
-      }).success,
-    ).toBe(false);
-  });
+        {
+          id: "tester",
+          displayName: "Tester",
+          description: "Tests the change.",
+          prompt: "Test the implementation.",
+          permissions: { mode: "prompt" },
+          canTalkTo: ["builder"],
+        },
+      ],
+    };
 
-  it("rejects dangling recipients before startup", async () => {
-    const config = await exampleConfig();
-    config.fleets.engineering!.members.reviewer!.recipients.push("ghost");
-    const result = validateFleet(config, "engineering", "C:\\work");
-    expect(result.valid).toBe(false);
-    expect(result.issues.some((issue) => issue.message.includes('unknown member "ghost"'))).toBe(
-      true,
-    );
-  });
-
-  it("keeps the host usable while marking an invalid Fleet", async () => {
-    const config = await exampleConfig();
-    config.fleets.engineering!.members.reviewer!.recipients.push("ghost");
-    expect(validateHostConfig(config)).toEqual([]);
-    expect(fleetSummaries(config, "C:\\work")).toContainEqual(
-      expect.objectContaining({
-        id: "engineering",
-        valid: false,
-        issues: expect.arrayContaining([
-          expect.objectContaining({ message: 'references unknown member "ghost"' }),
-        ]),
-      }),
+    expect(validateFleet(definition)).toEqual(
+      expect.objectContaining({ valid: true, issues: [] }),
     );
   });
 });

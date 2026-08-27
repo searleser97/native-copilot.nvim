@@ -74,7 +74,7 @@ describe("FleetDatabase", () => {
     const schema = database.db.prepare("SELECT version FROM schema_meta").get() as {
       version: number;
     };
-    expect(schema.version).toBe(3);
+    expect(schema.version).toBe(4);
     database.close();
   });
 
@@ -110,6 +110,21 @@ describe("FleetDatabase", () => {
     database.resumeRun("inactive-run", 2001);
     expect(database.fleetRun("inactive-run", "C:\\work")?.status).toBe("active");
     expect(database.resumableFleetRuns("C:\\work")).toEqual([]);
+    database.close();
+  });
+
+  it("persists generated fleet definitions for recovery", () => {
+    const path = resolve(tmpdir(), `native-copilot-db-definition-${process.pid}-${Date.now()}.sqlite`);
+    paths.push(path);
+    const database = new FleetDatabase(path);
+    const definition = JSON.stringify({
+      definition: { id: "generated", agents: [] },
+      mcpServers: ["myado"],
+    });
+    database.createRun("run", "fleet", "generated", "C:\\work", 1001, definition);
+    database.finishRun("run", "stopped");
+
+    expect(database.fleetRun("run", "C:\\work")?.fleetDefinition).toBe(definition);
     database.close();
   });
 
