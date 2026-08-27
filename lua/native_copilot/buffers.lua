@@ -16,6 +16,7 @@ local activity_fold_namespace = vim.api.nvim_create_namespace('native_copilot_ac
 local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_message_heading')
 local header_highlight_namespace =
   vim.api.nvim_create_namespace('native_copilot_header_highlight')
+local user_message_namespace = vim.api.nvim_create_namespace('native_copilot_user_message')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local content_indent = '   '
 local quote_indent = content_indent .. '>'
@@ -47,6 +48,10 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, 'NativeCopilotHeaderMeta', {
     default = true,
     link = 'Comment',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotUserMessage', {
+    default = true,
+    link = 'CursorLine',
   })
 end
 
@@ -361,9 +366,11 @@ function M.append_block(member_id, view_id, heading, content)
   local display_heading
   if view_id == 'conversation' and heading == 'You' then
     display_heading = options.conversation.user_label
+    content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   elseif view_id == 'conversation' and heading == 'Copilot' then
     display_heading = options.conversation.copilot_label
+    content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   else
     local level = view_id == 'conversation' and '#' or '##'
@@ -376,13 +383,25 @@ function M.append_block(member_id, view_id, heading, content)
     local lines = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, -1, false)
     for index, line in ipairs(lines) do
       if line:find(display_heading .. ' · ', 1, true) == 1 then
+        local heading_row = line_count + index - 2
         highlight_header(
           view.buf,
-          line_count + index - 2,
+          heading_row,
           line,
           heading == 'You' and 'NativeCopilotUserHeader'
             or 'NativeCopilotAssistantHeader'
         )
+        if heading == 'You' then
+          vim.api.nvim_buf_set_extmark(view.buf, user_message_namespace, heading_row, 0, {
+            end_row = vim.api.nvim_buf_line_count(view.buf) - 1,
+            end_col = 0,
+            hl_group = 'NativeCopilotUserMessage',
+            hl_eol = true,
+            right_gravity = false,
+            end_right_gravity = false,
+            priority = 100,
+          })
+        end
         break
       end
     end

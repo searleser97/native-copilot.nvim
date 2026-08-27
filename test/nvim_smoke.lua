@@ -104,6 +104,10 @@ assert(vim.api.nvim_get_hl(0, {
   name = 'NativeCopilotHeaderMeta',
   link = true,
 }).link == 'Comment')
+assert(vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotUserMessage',
+  link = true,
+}).link == 'CursorLine')
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
 assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')
@@ -161,12 +165,33 @@ end
 assert(header_groups.NativeCopilotUserHeader)
 assert(header_groups.NativeCopilotAssistantHeader)
 assert(header_groups.NativeCopilotHeaderMeta)
+local user_message_marks = vim.api.nvim_buf_get_extmarks(
+  member.views.conversation.buf,
+  vim.api.nvim_get_namespaces().native_copilot_user_message,
+  0,
+  -1,
+  { details = true }
+)
+assert(#user_message_marks == 1, 'the initial user prompt did not get one background range')
+local user_mark = user_message_marks[1]
+assert(user_mark[4].hl_group == 'NativeCopilotUserMessage')
+assert(user_mark[4].hl_eol == true)
+local user_highlighted = vim.api.nvim_buf_get_lines(
+  member.views.conversation.buf,
+  user_mark[2],
+  user_mark[4].end_row,
+  false
+)
+assert(user_highlighted[1]:find('USER ·', 1, true) == 1)
+assert(table.concat(user_highlighted, '\n'):find('Please review this.', 1, true))
+assert(user_highlighted[#user_highlighted] == '   Please review this.')
 assert(text:find('\n   The implementation looks correct.', 1, true))
 assert(
   text:find('   Checking the implementation.\n\n   The implementation looks correct.', 1, true),
   'assistant response was not separated from reasoning by exactly one blank line'
 )
 assert(not text:match('BOT · %d%d:%d%d:%d%d\n\n\n'))
+assert(not text:find('\n\n\n', 1, true), 'conversation rendered two consecutive empty rows')
 local late_reasoning = text:find('Late but ordered summary.', 1, true)
 local assistant_heading = text:find('BOT ·', 1, true)
 assert(late_reasoning and assistant_heading and late_reasoning > assistant_heading)

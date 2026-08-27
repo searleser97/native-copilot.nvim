@@ -860,6 +860,11 @@ assert(
   )
 )
 assert(not buffer_text(coordinator_buf):find('**Permission**', 1, true))
+local denied_permission_row = assert(line_with(coordinator_buf, 'denied: Remove-Item output.tmp'))
+assert(
+  denied_permission_row - permission_row <= 2,
+  'permission rows were separated by more than one empty row'
+)
 native_picker = nil
 vim.ui.select = function(items, opts, on_choice)
   native_picker = { items = items, opts = opts }
