@@ -211,6 +211,18 @@ buffers.upsert_timeline('reviewer', 'tool:search', {
   status = 'completed',
   detail = 'completed',
 })
+local header_tool_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(
+  header_tool_text:find('BOT · writing.\n\n   > 🟢 **[tool] search**', 1, true),
+  'timeline row after the Copilot heading did not keep exactly one empty row'
+)
+assert(
+  not header_tool_text:find('BOT · writing.\n\n\n', 1, true),
+  'timeline row after the Copilot heading retained two empty rows'
+)
 buffers.append_activity_delta('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
 buffers.complete_activity('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
 buffers.complete_activity('reviewer', 'reasoning-after-tool-2', 'Confirming the result is relevant.')

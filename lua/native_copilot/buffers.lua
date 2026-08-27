@@ -708,7 +708,11 @@ function M.upsert_timeline(member_id, item_id, item)
 
   if not start_row then
     ensure_day_header(view, now)
-    if view.last_block_kind == 'activity' or view.last_block_kind == 'message' then
+    if
+      view.last_block_kind == 'activity'
+      or view.last_block_kind == 'message'
+      or view.last_block_kind == 'header'
+    then
       ensure_trailing_empty_rows(view, 1)
     end
     start_row = vim.api.nvim_buf_line_count(view.buf)
