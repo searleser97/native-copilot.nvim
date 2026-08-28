@@ -4,7 +4,7 @@
 
 ### NC-001: Render background work as correlated actor events
 
-**Status:** In progress
+**Status:** Completed
 
 Tasks and schedules should behave like additional participants in the conversation rather than
 mutable status rows whose original event time and state disappear.
@@ -29,7 +29,7 @@ mutable status rows whose original event time and state disappear.
 
 ### NC-002: Fold consecutive reasoning as one block
 
-**Status:** In progress
+**Status:** Completed
 
 Consecutive reasoning messages in one response must share one fold even when each message is
 streamed and later replaced by its final content.
@@ -43,7 +43,7 @@ streamed and later replaced by its final content.
 
 ### NC-003: Keep startup environment rows together
 
-**Status:** In progress
+**Status:** Completed
 
 Late MCP connection events, including `github-mcp-server`, must remain in the startup environment
 block instead of appearing after the first user message.
