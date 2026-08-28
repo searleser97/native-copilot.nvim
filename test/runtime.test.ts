@@ -93,6 +93,13 @@ function fakeLive(opts: {
     session: {
       sessionId: opts.sessionId,
       send: async () => "sdk-message",
+      rpc: {
+        queue: {
+          hasPending: async () => ({ hasPending: true }),
+          finishDeferredIdleDrain: async () => ({ action: "processQueue", aborted: false }),
+          process: async () => undefined,
+        },
+      },
       on: () => () => undefined,
       disconnect: async () => {
         disconnected.value = true;
@@ -1151,11 +1158,14 @@ describe("foreground idle translation", () => {
 });
 
 describe("interactive prompt delivery", () => {
-  it("interjects only when background work is the remaining session activity", async () => {
+  it("drains the native queue only when background work is the remaining activity", async () => {
     const db = tempRuntimeDatabase();
     db.createRun("run-standard", "standard", null, "E:\\repo", 1001);
     db.upsertSession("run-standard", "standard", "session-standard", "connected");
-    const runtime = new CopilotRuntime("E:\\repo", db, () => undefined);
+    const events: string[] = [];
+    const runtime = new CopilotRuntime("E:\\repo", db, (type) => {
+      events.push(type);
+    });
     const live = fakeLive({
       target: "standard",
       memberId: "standard",
@@ -1164,11 +1174,28 @@ describe("interactive prompt delivery", () => {
       sessionId: "session-standard",
     });
     const modes: string[] = [];
+    let drainCalls = 0;
+    let processCalls = 0;
     (live.session as { send: (message: { mode: string }) => Promise<string> }).send = async (
       message,
     ) => {
       modes.push(message.mode);
       return `sdk-message-${modes.length}`;
+    };
+    const queue = (live.session as {
+      rpc: {
+        queue: {
+          finishDeferredIdleDrain: () => Promise<{ action: string; aborted: boolean }>;
+          process: () => Promise<void>;
+        };
+      };
+    }).rpc.queue;
+    queue.finishDeferredIdleDrain = async () => {
+      drainCalls += 1;
+      return { action: "processQueue", aborted: false };
+    };
+    queue.process = async () => {
+      processCalls += 1;
     };
     (runtime as unknown as { live: Map<string, unknown> }).live.set("standard", live);
 
@@ -1183,7 +1210,9 @@ describe("interactive prompt delivery", () => {
     live.interactiveSendPending = false;
     await runtime.sendUserPrompt("standard", "start from idle");
 
-    expect(modes).toEqual(["immediate", "enqueue", "enqueue"]);
+    expect(modes).toEqual(["enqueue", "enqueue", "enqueue"]);
+    expect(drainCalls).toBe(1);
+    expect(processCalls).toBe(1);
 
     live.busy = true;
     live.foregroundBusy = false;
@@ -1195,6 +1224,19 @@ describe("interactive prompt delivery", () => {
       "send failed",
     );
     expect(live.interactiveSendPending).toBe(false);
+
+    (live.session as { send: () => Promise<string> }).send = async () => "accepted-message";
+    const queueWithFailure = (live.session as {
+      rpc: { queue: { hasPending: () => Promise<{ hasPending: boolean }> } };
+    }).rpc.queue;
+    queueWithFailure.hasPending = async () => {
+      throw new Error("wake failed");
+    };
+    await expect(
+      runtime.sendUserPrompt("standard", "accepted despite wake failure"),
+    ).resolves.toBe("accepted-message");
+    expect(live.interactiveSendPending).toBe(false);
+    expect(events).toContain("activity.event");
     db.close();
   });
 });

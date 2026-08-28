@@ -164,24 +164,57 @@ interface LiveSession {
   unsubscribe: () => void;
 }
 
-function interactiveSendMode(live: LiveSession): "enqueue" | "immediate" {
-  return live.busy && !live.foregroundBusy && !live.interactiveSendPending
-    ? "immediate"
-    : "enqueue";
+interface DeferredQueueRpc {
+  hasPending: () => Promise<{ hasPending: boolean }>;
+  finishDeferredIdleDrain: (params: {
+    activeBackgroundWork: boolean;
+    hasPending: boolean;
+  }) => Promise<{ action: string; aborted: boolean }>;
+  process: () => Promise<void>;
 }
 
-async function sendInteractivePrompt(live: LiveSession, prompt: string): Promise<string> {
-  const mode = interactiveSendMode(live);
-  if (mode === "immediate") {
+interface InteractiveSendResult {
+  messageId: string;
+  wakeError?: Error;
+}
+
+async function sendInteractivePrompt(
+  live: LiveSession,
+  prompt: string,
+): Promise<InteractiveSendResult> {
+  const wakeDeferredQueue = live.busy && !live.foregroundBusy && !live.interactiveSendPending;
+  if (wakeDeferredQueue) {
     live.interactiveSendPending = true;
   }
+  let messageId: string;
   try {
-    return await live.session.send({ prompt, mode });
+    messageId = await live.session.send({ prompt, mode: "enqueue" });
   } catch (error) {
-    if (mode === "immediate") {
+    if (wakeDeferredQueue) {
       live.interactiveSendPending = false;
     }
     throw error;
+  }
+  if (!wakeDeferredQueue) {
+    return { messageId };
+  }
+  try {
+    const queue = live.session.rpc.queue as typeof live.session.rpc.queue & DeferredQueueRpc;
+    const pending = await queue.hasPending();
+    const drain = await queue.finishDeferredIdleDrain({
+      activeBackgroundWork: true,
+      hasPending: pending.hasPending,
+    });
+    if (drain.action === "processQueue") {
+      await queue.process();
+    }
+    return { messageId };
+  } catch (error) {
+    live.interactiveSendPending = false;
+    return {
+      messageId,
+      wakeError: error instanceof Error ? error : new Error(String(error)),
+    };
   }
 }
 
@@ -1141,13 +1174,23 @@ export class CopilotRuntime {
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
     try {
-      const sdkMessageId = await sendInteractivePrompt(live, result.prompt);
+      const { messageId: sdkMessageId, wakeError } = await sendInteractivePrompt(
+        live,
+        result.prompt,
+      );
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
         { id, sdkMessageId, source: "user", target: live.memberId, content: display },
         { runId: live.runId, memberId: live.target, target: "conversation" },
       );
+      if (wakeError) {
+        this.emit(
+          "activity.event",
+          { eventType: "queue.wake_failed", data: { message: wakeError.message } },
+          { runId: live.runId, memberId: live.target, target: "activity", done: true },
+        );
+      }
       return {
         kind: result.kind,
         notice: result.notice,
@@ -3130,13 +3173,20 @@ export class CopilotRuntime {
     const id = randomUUID();
     this.db.enqueueMessage(id, runId, "user", live.memberId, "user", content);
     try {
-      const sdkMessageId = await sendInteractivePrompt(live, content);
+      const { messageId: sdkMessageId, wakeError } = await sendInteractivePrompt(live, content);
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
         { id, sdkMessageId, source: "user", target: live.memberId, content },
         { runId, memberId: live.target, target: "conversation" },
       );
+      if (wakeError) {
+        this.emit(
+          "activity.event",
+          { eventType: "queue.wake_failed", data: { message: wakeError.message } },
+          { runId, memberId: live.target, target: "activity", done: true },
+        );
+      }
       return sdkMessageId;
     } catch (error) {
       this.db.failMessage(id, error instanceof Error ? error.message : String(error), true);
