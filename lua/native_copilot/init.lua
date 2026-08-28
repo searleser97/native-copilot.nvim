@@ -1163,6 +1163,20 @@ function M.show_member(member_id, view_id)
   vim.api.nvim_set_current_win(win)
 end
 
+local function refresh_member(member_id)
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  local current_win = vim.api.nvim_get_current_win()
+  M.show_member(member_id)
+  if
+    vim.api.nvim_tabpage_is_valid(current_tab)
+    and vim.api.nvim_win_is_valid(current_win)
+    and vim.api.nvim_win_get_tabpage(current_win) == current_tab
+  then
+    vim.api.nvim_set_current_tabpage(current_tab)
+    vim.api.nvim_set_current_win(current_win)
+  end
+end
+
 function M.show_overview()
   ensure_ui()
   close_task_detail()
@@ -1657,7 +1671,7 @@ function M._on_event(message)
       end
     end
     if not buffers.get_member(state.selected) then state.selected = 'standard' end
-    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
+    if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   elseif message.type == 'sessions.list' then
     local entries = {}
@@ -2040,7 +2054,7 @@ function M._on_event(message)
     ensure_member('standard', 'Copilot')
     buffers.set_state('standard', 'loading')
     state.selected = 'standard'
-    if is_ui_open() then M.show_member('standard') end
+    if is_ui_open() then refresh_member('standard') end
     return
   elseif message.type == 'fleet.loading' then
     local fleet_id = payload.fleetId
@@ -2071,7 +2085,7 @@ function M._on_event(message)
     end
     if is_ui_open() and not buffers.get_member(state.selected) then
       state.selected = payload.entryMember or state.selected
-      if buffers.get_member(state.selected) then M.show_member(state.selected) end
+      if buffers.get_member(state.selected) then refresh_member(state.selected) end
     end
     return
   elseif message.type == 'fleet.ready' then
@@ -2088,7 +2102,7 @@ function M._on_event(message)
       state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = payload.name }
     end
     state.fleets[fleet_id] = fleet
-    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
+    if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   elseif message.type == 'fleet.updated' then
     local fleet_id = payload.fleetId
@@ -2099,7 +2113,7 @@ function M._on_event(message)
       remove_from_order(member_id)
       if state.selected == member_id then
         state.selected = 'standard'
-        if is_ui_open() and buffers.get_member('standard') then M.show_member('standard') end
+        if is_ui_open() and buffers.get_member('standard') then refresh_member('standard') end
       end
     end
     for _, member_info in ipairs(payload.added or {}) do
@@ -2126,7 +2140,7 @@ function M._on_event(message)
     end
     state.fleets[fleet_id] = nil
     if not buffers.get_member(state.selected) then state.selected = 'standard' end
-    if is_ui_open() and buffers.get_member(state.selected) then M.show_member(state.selected) end
+    if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   elseif message.type == 'fleet.error' then
     buffers.append_activity_block(

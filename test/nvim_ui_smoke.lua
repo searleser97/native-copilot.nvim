@@ -49,6 +49,10 @@ assert(
 local loading_entry = require('native_copilot.buffers').get_member('coordinator')
 assert(loading_entry.state == 'loading', 'Fleet member did not enter loading state')
 assert(
+  vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt == true,
+  'Fleet loading stole focus from the input buffer'
+)
+assert(
   require('native_copilot.buffers').get_member('observer').state == 'standby',
   'lazy Fleet member did not remain in standby'
 )
@@ -76,6 +80,10 @@ fleet._on_event({
 assert(
   require('native_copilot.buffers').get_member('standard'),
   'Standard supervisor was dropped when a Fleet became ready'
+)
+assert(
+  vim.b[vim.api.nvim_get_current_buf()].native_copilot_prompt == true,
+  'Fleet readiness stole focus from the input buffer'
 )
 fleet.show_member('coordinator')
 assert(

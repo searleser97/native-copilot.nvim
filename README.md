@@ -448,7 +448,7 @@ cancelled from its floating detail pane.
 ```lua
 sources = {
   default = function()
-    if vim.b.native_copilot_prompt then return { "native_copilot" } end
+    if vim.b.native_copilot_prompt then return { "native_copilot", "path" } end
     return { "lsp", "buffer", "snippets", "path" }
   end,
   providers = {
