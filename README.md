@@ -456,6 +456,7 @@ sources = {
       name = "Copilot",
       module = "native_copilot.blink",
       enabled = function() return vim.b.native_copilot_prompt == true end,
+      async = true,
       score_offset = 100,
     },
     path = {
