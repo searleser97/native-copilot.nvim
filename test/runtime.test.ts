@@ -11,6 +11,7 @@ import {
   applyNativePolicy,
   configuredRuntimeConnection,
   CopilotRuntime,
+  detachAsyncPowerShellArgs,
   type FleetMoveParticipant,
   instanceSessionId,
   type NativePolicy,
@@ -93,13 +94,6 @@ function fakeLive(opts: {
     session: {
       sessionId: opts.sessionId,
       send: async () => "sdk-message",
-      rpc: {
-        queue: {
-          hasPending: async () => ({ hasPending: true }),
-          finishDeferredIdleDrain: async () => ({ action: "processQueue", aborted: false }),
-          process: async () => undefined,
-        },
-      },
       on: () => () => undefined,
       disconnect: async () => {
         disconnected.value = true;
@@ -116,7 +110,6 @@ function fakeLive(opts: {
     aicUsed: 0,
     busy: false,
     foregroundBusy: false,
-    interactiveSendPending: false,
     foregroundTurnId: undefined,
     foregroundTurnSequence: 0,
     foregroundCompleteTurnId: undefined,
@@ -1157,87 +1150,34 @@ describe("foreground idle translation", () => {
   });
 });
 
-describe("interactive prompt delivery", () => {
-  it("drains the native queue only when background work is the remaining activity", async () => {
-    const db = tempRuntimeDatabase();
-    db.createRun("run-standard", "standard", null, "E:\\repo", 1001);
-    db.upsertSession("run-standard", "standard", "session-standard", "connected");
-    const events: string[] = [];
-    const runtime = new CopilotRuntime("E:\\repo", db, (type) => {
-      events.push(type);
+describe("async PowerShell detachment", () => {
+  it("detaches async commands unless the caller chose explicitly", () => {
+    expect(
+      detachAsyncPowerShellArgs("powershell", {
+        command: "Start-Sleep -Seconds 90",
+        mode: "async",
+      }),
+    ).toEqual({
+      command: "Start-Sleep -Seconds 90",
+      mode: "async",
+      detach: true,
     });
-    const live = fakeLive({
-      target: "standard",
-      memberId: "standard",
-      fleetId: "",
-      runId: "run-standard",
-      sessionId: "session-standard",
+    expect(
+      detachAsyncPowerShellArgs("powershell", {
+        command: "npm test",
+        mode: "async",
+        detach: false,
+      }),
+    ).toEqual({
+      command: "npm test",
+      mode: "async",
+      detach: false,
     });
-    const modes: string[] = [];
-    let drainCalls = 0;
-    let processCalls = 0;
-    (live.session as { send: (message: { mode: string }) => Promise<string> }).send = async (
-      message,
-    ) => {
-      modes.push(message.mode);
-      return `sdk-message-${modes.length}`;
-    };
-    const queue = (live.session as {
-      rpc: {
-        queue: {
-          finishDeferredIdleDrain: () => Promise<{ action: string; aborted: boolean }>;
-          process: () => Promise<void>;
-        };
-      };
-    }).rpc.queue;
-    queue.finishDeferredIdleDrain = async () => {
-      drainCalls += 1;
-      return { action: "processQueue", aborted: false };
-    };
-    queue.process = async () => {
-      processCalls += 1;
-    };
-    (runtime as unknown as { live: Map<string, unknown> }).live.set("standard", live);
-
-    live.busy = true;
-    live.foregroundBusy = false;
-    await runtime.sendUserPrompt("standard", "continue during background work");
-
-    await runtime.sendUserPrompt("standard", "queue while immediate send is pending");
-
-    live.busy = false;
-    live.foregroundBusy = false;
-    live.interactiveSendPending = false;
-    await runtime.sendUserPrompt("standard", "start from idle");
-
-    expect(modes).toEqual(["enqueue", "enqueue", "enqueue"]);
-    expect(drainCalls).toBe(1);
-    expect(processCalls).toBe(1);
-
-    live.busy = true;
-    live.foregroundBusy = false;
-    live.interactiveSendPending = false;
-    (live.session as { send: () => Promise<string> }).send = async () => {
-      throw new Error("send failed");
-    };
-    await expect(runtime.sendUserPrompt("standard", "failed immediate send")).rejects.toThrow(
-      "send failed",
-    );
-    expect(live.interactiveSendPending).toBe(false);
-
-    (live.session as { send: () => Promise<string> }).send = async () => "accepted-message";
-    const queueWithFailure = (live.session as {
-      rpc: { queue: { hasPending: () => Promise<{ hasPending: boolean }> } };
-    }).rpc.queue;
-    queueWithFailure.hasPending = async () => {
-      throw new Error("wake failed");
-    };
-    await expect(
-      runtime.sendUserPrompt("standard", "accepted despite wake failure"),
-    ).resolves.toBe("accepted-message");
-    expect(live.interactiveSendPending).toBe(false);
-    expect(events).toContain("activity.event");
-    db.close();
+    const syncArgs = { command: "git status", mode: "sync" };
+    expect(detachAsyncPowerShellArgs("powershell", syncArgs)).toBe(syncArgs);
+    expect(detachAsyncPowerShellArgs("read_powershell", { shellId: "1" })).toEqual({
+      shellId: "1",
+    });
   });
 });
 

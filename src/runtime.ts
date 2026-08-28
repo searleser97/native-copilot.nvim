@@ -153,7 +153,6 @@ interface LiveSession {
   aicUsed: number;
   busy: boolean;
   foregroundBusy: boolean;
-  interactiveSendPending: boolean;
   foregroundTurnId: string | undefined;
   foregroundTurnSequence: number;
   foregroundCompleteTurnId: string | undefined;
@@ -164,58 +163,20 @@ interface LiveSession {
   unsubscribe: () => void;
 }
 
-interface DeferredQueueRpc {
-  hasPending: () => Promise<{ hasPending: boolean }>;
-  finishDeferredIdleDrain: (params: {
-    activeBackgroundWork: boolean;
-    hasPending: boolean;
-  }) => Promise<{ action: string; aborted: boolean }>;
-  process: () => Promise<void>;
-}
-
-interface InteractiveSendResult {
-  messageId: string;
-  wakeError?: Error;
-}
-
-async function sendInteractivePrompt(
-  live: LiveSession,
-  prompt: string,
-): Promise<InteractiveSendResult> {
-  const wakeDeferredQueue = live.busy && !live.foregroundBusy && !live.interactiveSendPending;
-  if (wakeDeferredQueue) {
-    live.interactiveSendPending = true;
+export function detachAsyncPowerShellArgs(toolName: string, toolArgs: unknown): unknown {
+  if (
+    toolName !== "powershell"
+    || typeof toolArgs !== "object"
+    || toolArgs === null
+    || Array.isArray(toolArgs)
+  ) {
+    return toolArgs;
   }
-  let messageId: string;
-  try {
-    messageId = await live.session.send({ prompt, mode: "enqueue" });
-  } catch (error) {
-    if (wakeDeferredQueue) {
-      live.interactiveSendPending = false;
-    }
-    throw error;
+  const args = toolArgs as Record<string, unknown>;
+  if (args.mode !== "async" || Object.hasOwn(args, "detach")) {
+    return toolArgs;
   }
-  if (!wakeDeferredQueue) {
-    return { messageId };
-  }
-  try {
-    const queue = live.session.rpc.queue as typeof live.session.rpc.queue & DeferredQueueRpc;
-    const pending = await queue.hasPending();
-    const drain = await queue.finishDeferredIdleDrain({
-      activeBackgroundWork: true,
-      hasPending: pending.hasPending,
-    });
-    if (drain.action === "processQueue") {
-      await queue.process();
-    }
-    return { messageId };
-  } catch (error) {
-    live.interactiveSendPending = false;
-    return {
-      messageId,
-      wakeError: error instanceof Error ? error : new Error(String(error)),
-    };
-  }
+  return { ...args, detach: true };
 }
 
 interface EnvironmentProbe {
@@ -1174,23 +1135,13 @@ export class CopilotRuntime {
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
     try {
-      const { messageId: sdkMessageId, wakeError } = await sendInteractivePrompt(
-        live,
-        result.prompt,
-      );
+      const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "enqueue" });
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
         { id, sdkMessageId, source: "user", target: live.memberId, content: display },
         { runId: live.runId, memberId: live.target, target: "conversation" },
       );
-      if (wakeError) {
-        this.emit(
-          "activity.event",
-          { eventType: "queue.wake_failed", data: { message: wakeError.message } },
-          { runId: live.runId, memberId: live.target, target: "activity", done: true },
-        );
-      }
       return {
         kind: result.kind,
         notice: result.notice,
@@ -1302,6 +1253,13 @@ export class CopilotRuntime {
     const config = nativeSessionScaffold(this.policy);
     config.onPermissionRequest = this.permissionHandler(permission, uiTarget);
     config.onMcpAuthRequest = this.mcpAuthHandler(uiTarget);
+    config.hooks = {
+      ...config.hooks,
+      onPreToolUse: (input) => {
+        const modifiedArgs = detachAsyncPowerShellArgs(input.toolName, input.toolArgs);
+        return modifiedArgs === input.toolArgs ? undefined : { modifiedArgs };
+      },
+    };
     return config;
   }
 
@@ -1716,7 +1674,6 @@ export class CopilotRuntime {
       aicUsed: 0,
       busy: false,
       foregroundBusy: false,
-      interactiveSendPending: false,
       foregroundTurnId: undefined,
       foregroundTurnSequence: 0,
       foregroundCompleteTurnId: undefined,
@@ -1925,7 +1882,6 @@ export class CopilotRuntime {
         }
         live.busy = true;
         live.foregroundBusy = true;
-        live.interactiveSendPending = false;
         live.foregroundTurnId = event.data.turnId;
         live.foregroundTurnSequence += 1;
         if (live.foregroundAbortSequence !== live.foregroundTurnSequence) {
@@ -1959,7 +1915,6 @@ export class CopilotRuntime {
           );
           if (foregroundComplete) {
             live.foregroundBusy = false;
-            live.interactiveSendPending = false;
             live.foregroundAbortSequence = undefined;
             this.emit(
               "member.foreground_idle",
@@ -1976,7 +1931,6 @@ export class CopilotRuntime {
           && live.foregroundAbortSequence === live.foregroundTurnSequence
         ) {
           live.foregroundBusy = false;
-          live.interactiveSendPending = false;
           live.foregroundTurnId = undefined;
           live.foregroundCompleteTurnId = undefined;
           live.foregroundTurnHasToolRequests = false;
@@ -1991,7 +1945,6 @@ export class CopilotRuntime {
       case "session.idle":
         live.busy = false;
         live.foregroundBusy = false;
-        live.interactiveSendPending = false;
         live.foregroundTurnId = undefined;
         live.foregroundCompleteTurnId = undefined;
         live.foregroundTurnHasToolRequests = false;
@@ -3173,20 +3126,13 @@ export class CopilotRuntime {
     const id = randomUUID();
     this.db.enqueueMessage(id, runId, "user", live.memberId, "user", content);
     try {
-      const { messageId: sdkMessageId, wakeError } = await sendInteractivePrompt(live, content);
+      const sdkMessageId = await live.session.send({ prompt: content, mode: "enqueue" });
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
         { id, sdkMessageId, source: "user", target: live.memberId, content },
         { runId, memberId: live.target, target: "conversation" },
       );
-      if (wakeError) {
-        this.emit(
-          "activity.event",
-          { eventType: "queue.wake_failed", data: { message: wakeError.message } },
-          { runId, memberId: live.target, target: "activity", done: true },
-        );
-      }
       return sdkMessageId;
     } catch (error) {
       this.db.failMessage(id, error instanceof Error ? error.message : String(error), true);
@@ -3273,7 +3219,7 @@ export class CopilotRuntime {
         memberId: live.memberId,
         fleetId: live.fleetId,
         sessionId: live.session.sessionId,
-        state: live.foregroundBusy || live.interactiveSendPending ? "busy" : "idle",
+        state: live.foregroundBusy ? "busy" : "idle",
       })),
     };
   }
