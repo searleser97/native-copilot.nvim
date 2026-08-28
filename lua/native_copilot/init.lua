@@ -243,19 +243,46 @@ local function schedule_description(schedule)
   return schedule.recurring == false and 'one shot' or 'scheduled'
 end
 
-local function update_schedule(member_id, schedule_id, updates)
+local function short_identifier(prefix, value)
+  local text = tostring(value or '?'):gsub('[^%w_-]', '')
+  if #text > 10 then text = text:sub(1, 10) end
+  return prefix .. '-' .. text
+end
+
+local function concise_detail(value)
+  value = value ~= vim.NIL and value or nil
+  if value == nil then return nil end
+  if type(value) == 'table' then
+    local ok, encoded = pcall(vim.json.encode, value)
+    value = ok and encoded or vim.inspect(value)
+  end
+  local detail = tostring(value):gsub('[\r\n]+', ' ')
+  if #detail > 180 then detail = detail:sub(1, 177) .. '...' end
+  return detail
+end
+
+local function update_schedule(member_id, schedule_id, event, updates, event_id)
   local key = member_id .. ':' .. tostring(schedule_id)
   local schedule = vim.tbl_deep_extend('force', state.schedules[key] or {}, updates or {})
   state.schedules[key] = schedule
-  buffers.upsert_timeline(member_id, 'schedule:' .. tostring(schedule_id), {
+  local status = event == 'cancelled' and 'cancelled'
+    or event == 'failed' and 'failed'
+    or 'completed'
+  buffers.upsert_timeline(
+    member_id,
+    ('schedule:%s:%s:%s'):format(schedule_id, event, event_id or event),
+    {
     kind = 'schedule',
-    label = ('Schedule #%s'):format(schedule_id),
-    status = schedule.status or 'idle',
-    detail = schedule.detail or schedule_description(schedule),
+    identifier = short_identifier('S', schedule_id),
+    event = event,
+    label = schedule_description(schedule),
+    status = status,
+    detail = concise_detail(schedule.detail),
     details = {
       prompt = schedule.displayPrompt or schedule.prompt,
       schedule = schedule_description(schedule),
       nextRunAt = schedule.nextRunAt,
+      event = event,
     },
   })
 end
@@ -561,6 +588,35 @@ local function task_description(task)
   return tostring(detail):gsub('[\r\n]+', ' ')
 end
 
+local function task_terminal_detail(task, status)
+  if status == 'failed' then
+    return concise_detail(task.error) or concise_detail(task.message) or 'failed'
+  elseif status == 'cancelled' then
+    return concise_detail(task.message) or 'cancelled'
+  elseif status == 'completed' then
+    return concise_detail(task.output)
+      or concise_detail(task.summary)
+      or (type(json_value(task.result)) == 'string' and concise_detail(task.result) or nil)
+      or 'completed'
+  end
+end
+
+local function emit_task_event(member_id, task, event)
+  local status = json_value(task.status) or 'idle'
+  buffers.upsert_timeline(member_id, ('task:%s:%s'):format(task.id, event), {
+    kind = 'task',
+    identifier = short_identifier('T', task.id),
+    event = event,
+    label = ('[%s] %s'):format(
+      json_value(task.type) or 'task',
+      task_description(task)
+    ),
+    status = status,
+    detail = task_terminal_detail(task, status),
+    task = vim.deepcopy(task),
+  })
+end
+
 local function task_at_cursor()
   local item, member_id = buffers.timeline_item_at_cursor(
     vim.api.nvim_get_current_buf(),
@@ -680,6 +736,7 @@ local function merge_tasks(member_id, incoming)
       notify('Ignored a malformed task update.', vim.log.levels.WARN)
     else
       local was_known = by_id[task.id] ~= nil
+      local previous_status = was_known and json_value(by_id[task.id].status) or nil
       if was_known then
         local updated = vim.tbl_deep_extend('force', by_id[task.id], task)
         for index, candidate in ipairs(current) do
@@ -695,16 +752,18 @@ local function merge_tasks(member_id, incoming)
       end
       local current_task = by_id[task.id]
       local status = json_value(current_task.status) or 'idle'
-      if was_known or status == 'running' or status == 'idle' or status == 'failed' then
-        buffers.upsert_timeline(member_id, 'task:' .. task.id, {
-          kind = 'task',
-          label = ('[%s] %s'):format(
-            json_value(current_task.type) or 'task',
-            task_description(current_task)
-          ),
-          status = status,
-          task = current_task,
-        })
+      if not was_known then
+        emit_task_event(
+          member_id,
+          current_task,
+          (status == 'running' or status == 'idle') and 'started' or status
+        )
+      elseif status ~= previous_status then
+        if status == 'running' or status == 'idle' then
+          emit_task_event(member_id, current_task, 'started')
+        else
+          emit_task_event(member_id, current_task, status)
+        end
       end
     end
   end
@@ -717,7 +776,7 @@ local function merge_tasks(member_id, incoming)
   end
 end
 
-local function fail_linked_task(member_id, data, tool)
+local function settle_linked_task(member_id, data, tool, status)
   local arguments = tool
       and type(tool.details) == 'table'
       and type(tool.details.arguments) == 'table'
@@ -737,8 +796,11 @@ local function fail_linked_task(member_id, data, tool)
       merge_tasks(member_id, {
         {
           id = task.id,
-          status = 'failed',
-          error = error_message or 'The associated tool execution failed.',
+          status = status,
+          error = status == 'failed'
+              and (error_message or 'The associated tool execution failed.')
+            or nil,
+          result = status == 'completed' and json_value(data.result) or nil,
         },
       })
       return true
@@ -798,6 +860,38 @@ local function render_task_detail()
       table.insert(lines, 'Error:')
       local rendered_error = type(task_error) == 'string' and task_error or vim.inspect(task_error)
       vim.list_extend(lines, vim.split(rendered_error, '\n', { plain = true }))
+      table.insert(lines, '')
+    end
+    local metadata = {
+      { 'Started', json_value(task.startedAt) },
+      { 'Completed', json_value(task.completedAt) },
+      { 'Active time', task.activeTimeMs and (tostring(task.activeTimeMs) .. ' ms') or nil },
+      { 'Model', json_value(task.resolvedModel) or json_value(task.model) },
+    }
+    for _, field in ipairs(metadata) do
+      if field[2] then table.insert(lines, field[1] .. ': ' .. tostring(field[2])) end
+    end
+    if #lines > 4 then table.insert(lines, '') end
+    local result = json_value(task.result)
+    if result then
+      table.insert(lines, 'Result:')
+      vim.list_extend(
+        lines,
+        vim.split(type(result) == 'string' and result or vim.inspect(result), '\n', { plain = true })
+      )
+      table.insert(lines, '')
+    end
+    local latest_response = json_value(task.latestResponse)
+    if latest_response and latest_response ~= result then
+      table.insert(lines, 'Latest response:')
+      vim.list_extend(
+        lines,
+        vim.split(
+          type(latest_response) == 'string' and latest_response or vim.inspect(latest_response),
+          '\n',
+          { plain = true }
+        )
+      )
       table.insert(lines, '')
     end
     if not state.task_progress_loaded then
@@ -1910,8 +2004,12 @@ function M._on_event(message)
       local target = payload.target or event_member(message)
       for _, task in ipairs(state.tasks[target] or {}) do
         if task.id == payload.taskId then
-          task.status = 'cancelled'
-          merge_tasks(target, { task })
+          merge_tasks(target, {
+            {
+              id = task.id,
+              status = 'cancelled',
+            },
+          })
         end
       end
       notify(('Cancelled background task %s.'):format(payload.taskId or ''))
@@ -2172,6 +2270,16 @@ function M._on_event(message)
     for _, event in ipairs(payload.events or {}) do history_event(member_id, event) end
   elseif message.type == 'scheduled.prompt' then
     local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
+    local schedule_id = json_value(payload.scheduleId)
+      or tostring(json_value(payload.source) or ''):match('^schedule%-(.+)$')
+      or '?'
+    update_schedule(
+      member_id,
+      schedule_id,
+      'fired',
+      payload,
+      payload.eventId or message.id
+    )
     buffers.append_block(member_id, 'conversation', 'You', content)
     buffers.begin_response(member_id, 'scheduled:' .. tostring(payload.eventId or message.id))
   elseif message.type == 'prompt.queued' then
@@ -2179,22 +2287,15 @@ function M._on_event(message)
   elseif message.type == 'prompt.failed' then
     fail_prompt(tostring(payload.id or message.id), payload.message)
   elseif message.type == 'schedule.created' then
-    update_schedule(member_id, payload.id, vim.tbl_extend('force', payload, {
-      status = 'idle',
-    }))
+    update_schedule(member_id, payload.id, 'created', payload, message.id)
   elseif message.type == 'schedule.cancelled' then
-    update_schedule(member_id, payload.id, {
-      status = 'cancelled',
-      detail = 'cancelled',
-    })
+    update_schedule(member_id, payload.id, 'cancelled', payload, message.id)
   elseif message.type == 'schedule.rearmed' then
-    update_schedule(member_id, payload.id, {
-      status = 'idle',
-      detail = 'rearmed',
+    update_schedule(member_id, payload.id, 'rearmed', {
       nextRunAt = payload.nextRunAt
         and os.date('%Y-%m-%d %H:%M:%S', math.floor(payload.nextRunAt / 1000))
         or nil,
-    })
+    }, message.id)
   elseif message.type == 'prompt.accepted' then
     -- The user turn is rendered immediately on submission so queued work is visible without delay.
   elseif message.type == 'conversation.delta' then
@@ -2236,10 +2337,13 @@ function M._on_event(message)
           error = json_value(data.error),
         }
       )
-      if data.success ~= true
-        and fail_linked_task(member_id, data, existing)
-        and type(state.task_detail) == 'table'
-      then
+      local linked_task_settled = settle_linked_task(
+        member_id,
+        data,
+        existing,
+        data.success == true and 'completed' or 'failed'
+      )
+      if linked_task_settled and type(state.task_detail) == 'table' then
         render_task_detail()
       end
     else

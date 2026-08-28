@@ -225,6 +225,11 @@ assert(
 )
 buffers.append_activity_delta('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
 buffers.complete_activity('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
+buffers.append_activity_delta(
+  'reviewer',
+  'reasoning-after-tool-2',
+  'Confirming the result is probably relevant.'
+)
 buffers.complete_activity('reviewer', 'reasoning-after-tool-2', 'Confirming the result is relevant.')
 buffers.append_conversation_delta('reviewer', 'tool-final-message', 'Tool-backed answer.')
 buffers.complete_conversation('reviewer', 'tool-final-message', 'Tool-backed answer.')
@@ -276,6 +281,15 @@ for _, fold in ipairs(joined_folds) do
   end
 end
 assert(joined_fold_found, 'joined reasoning messages did not share one complete fold')
+vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
+buffers.on_shown(member.views.conversation.buf)
+vim.api.nvim_win_set_cursor(0, { #reasoning_after_tool_row, 0 })
+vim.cmd('normal! zc')
+assert(
+  vim.fn.foldclosedend(#reasoning_after_tool_row) >= #adjacent_reasoning_row,
+  'closing joined reasoning did not hide every consecutive message'
+)
+vim.cmd('normal! zo')
 
 buffers.append_block('reviewer', 'conversation', 'You', 'Show code.')
 buffers.begin_response('reviewer', 'code-turn')
@@ -500,6 +514,47 @@ for index, line in ipairs(ordering_lines) do
   end
 end
 assert(tool_index and task_index and tool_index < task_index, 'timeline timestamps contradict row order')
+
+local startup = buffers.ensure_member('startup-order', 'Startup order')
+buffers.upsert_timeline('startup-order', 'environment:Tools', {
+  kind = 'environment',
+  label = 'Tools',
+  status = 'completed',
+  detail = 'loaded',
+})
+buffers.append_block('startup-order', 'conversation', 'You', 'First prompt.')
+buffers.begin_response('startup-order', 'startup-response')
+buffers.append_activity_delta('startup-order', 'startup-reasoning', 'Initial reasoning.')
+buffers.upsert_timeline('startup-order', 'environment:MCP github-mcp-server', {
+  kind = 'environment',
+  label = 'MCP github-mcp-server',
+  status = 'completed',
+  detail = 'connected',
+})
+buffers.complete_activity(
+  'startup-order',
+  'startup-reasoning',
+  'Initial reasoning with final details.'
+)
+buffers.append_conversation_delta('startup-order', 'startup-answer', 'Final answer.')
+buffers.complete_conversation('startup-order', 'startup-answer', 'Final answer.')
+local startup_text = table.concat(
+  vim.api.nvim_buf_get_lines(startup.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+local tools_position = assert(startup_text:find('[environment] Tools', 1, true))
+local github_position =
+  assert(startup_text:find('[environment] MCP github-mcp-server', 1, true))
+local prompt_position = assert(startup_text:find('USER ·', 1, true))
+assert(tools_position < github_position, 'late GitHub MCP row preceded earlier environment rows')
+assert(github_position < prompt_position, 'late GitHub MCP row appeared after the first user turn')
+local startup_reasoning_position =
+  assert(startup_text:find('Initial reasoning with final details.', 1, true))
+local startup_answer_position = assert(startup_text:find('Final answer.', 1, true))
+assert(
+  startup_reasoning_position < startup_answer_position,
+  'late environment insertion corrupted active reasoning order'
+)
 
 local mcp_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do

@@ -2,38 +2,54 @@
 
 ## Timeline and task presentation
 
-### NC-001: Show meaningful task lifecycle states
+### NC-001: Render background work as correlated actor events
 
-**Status:** Proposed
+**Status:** In progress
 
-Task rows currently tend to remain yellow, which makes completed work look permanently active and
-duplicates information already represented by related tool rows.
+Tasks and schedules should behave like additional participants in the conversation rather than
+mutable status rows whose original event time and state disappear.
 
-**Proposed behavior**
+**Target behavior**
 
-- Keep one stable timeline row per task ID.
-- Show queued and running tasks in yellow.
-- Update the same row to green when completed, red when failed, and gray when cancelled.
-- Do not append a second completion row; completion details belong in the task detail view.
-- Delay the initial yellow row briefly, approximately 300-500 ms.
-  - If the task is still active after the delay, show the yellow row.
-  - If it finishes before the delay, insert only its final green or red state to avoid a yellow flash.
-- Keep the row at its original chronological position and retain its creation timestamp.
-- Show elapsed duration or a concise terminal detail on completion when available.
-
-**Investigation**
-
-- Confirm which terminal task states the Copilot SDK emits.
-- Determine whether completed tasks receive an explicit update or simply disappear from task snapshots.
-- Define how a disappeared running task should be reconciled without falsely reporting success.
-- Confirm whether task and tool IDs can be linked reliably enough to avoid redundant adjacent rows.
+- Emit a separate row for each meaningful lifecycle event: started, completed, failed, or cancelled.
+- Prefix task events with `🧑‍💻` and schedule events with `⏰`.
+- Include the same short identifier on every event for one task or schedule.
+- Keep start rows concise and place output/error summaries on terminal rows.
+- Preserve the full event payload in the detail view.
+- Link successful and failed shell tool completions back to their background task when a task ID is
+  available.
 
 **Acceptance criteria**
 
-- A task that remains active visibly transitions from yellow to its terminal color in place.
-- A fast task appears only once in its terminal state.
-- Failed and cancelled tasks are visually distinct from completed tasks.
-- Task timestamps never contradict their position in the timeline.
-- Opening the row still exposes full task output, errors, start time, and completion time when available.
-- Automated tests cover running-to-completed, running-to-failed, cancellation, fast completion, and
-  task disappearance from a snapshot.
+- Start and terminal events occupy separate chronological rows.
+- Related rows expose the same visible identifier.
+- Completed, failed, and cancelled events are visually distinct.
+- Opening a terminal row exposes full output or error details when available.
+- Automated and real UI tests cover task and schedule lifecycle events.
+
+### NC-002: Fold consecutive reasoning as one block
+
+**Status:** In progress
+
+Consecutive reasoning messages in one response must share one fold even when each message is
+streamed and later replaced by its final content.
+
+**Acceptance criteria**
+
+- Adjacent reasoning messages produce one fold start.
+- Closing that fold hides every consecutive reasoning message.
+- Opening it restores all messages in their original order.
+- Replacing streamed content does not move the fold start to the latest message.
+
+### NC-003: Keep startup environment rows together
+
+**Status:** In progress
+
+Late MCP connection events, including `github-mcp-server`, must remain in the startup environment
+block instead of appearing after the first user message.
+
+**Acceptance criteria**
+
+- Every startup environment row appears before the first user heading.
+- A late MCP connection is inserted after the existing environment rows.
+- Updating an existing environment component does not duplicate or move its row.

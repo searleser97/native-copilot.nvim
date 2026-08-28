@@ -128,6 +128,7 @@ fleet._on_event({
         type = 'shell',
         status = 'completed',
         command = 'npm test',
+        result = 'All tests passed.',
       },
       {
         id = 'agent-failed',
@@ -206,12 +207,28 @@ assert(
 assert(runtime_turn_text:find('Before the tool.', 1, true))
 assert(runtime_turn_text:find('After the tool.', 1, true))
 local timeline_text = buffer_text(coordinator_buf)
-assert(timeline_text:find('🟡 **[task] [agent] Review implementation**', 1, true))
 assert(
-  not timeline_text:find('🟢 **[task] [shell] npm test**', 1, true),
-  'an already-completed task was appended during a later task refresh'
+  timeline_text:find(
+    '🧑‍💻 🟡 **[task #T-agent-runn] started · [agent] Review implementation**',
+    1,
+    true
+  )
 )
-assert(timeline_text:find('🔴 **[task] [agent] Validate deployment**', 1, true))
+assert(
+  timeline_text:find(
+    '🧑‍💻 🟢 **[task #T-shell-comp] completed · [shell] npm test** — All tests passed.',
+    1,
+    true
+  ),
+  'a completed task did not render its terminal event'
+)
+assert(
+  timeline_text:find(
+    '🧑‍💻 🔴 **[task #T-agent-fail] failed · [agent] Validate deployment**',
+    1,
+    true
+  )
+)
 local coordinator_win = vim.fn.win_findbuf(coordinator_buf)[1]
 vim.api.nvim_set_current_win(coordinator_win)
 vim.api.nvim_win_set_cursor(coordinator_win, {
@@ -267,12 +284,21 @@ fleet._on_event({
   },
 })
 assert(
-  line_with(coordinator_buf, '[agent] Review implementation') == running_task_row,
-  'failed task moved instead of updating its existing row'
+  line_count_with(coordinator_buf, '[agent] Review implementation') == 2,
+  'task start and failure did not render as separate events'
 )
+local failed_task_row
+for index, line in ipairs(vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false)) do
+  if line:find('[task #T-agent-runn] failed', 1, true) then failed_task_row = index end
+end
+assert(failed_task_row and failed_task_row > running_task_row, 'task failure was not chronological')
 assert(
-  buffer_text(coordinator_buf):find('🔴 **[task] [agent] Review implementation**', 1, true),
-  'failed task kept its running indicator'
+  buffer_text(coordinator_buf):find(
+    '🧑‍💻 🔴 **[task #T-agent-runn] failed · [agent] Review implementation**',
+    1,
+    true
+  ),
+  'failed task event did not use the terminal indicator'
 )
 assert(buffer_text(task_detail_buf):find('Status: failed', 1, true))
 assert(buffer_text(task_detail_buf):find('Reviewer process exited with code 1', 1, true))
@@ -676,16 +702,28 @@ fleet._on_event({
     prompt = 'Check deployment health',
   },
 })
-local schedule_row = assert(line_with(coordinator_buf, '[schedule] Schedule #7'))
-assert(buffer_text(coordinator_buf):find('🟡 **[schedule] Schedule #7** — every 300s', 1, true))
+local schedule_row = assert(line_with(coordinator_buf, '[schedule #S-7] created'))
+assert(
+  buffer_text(coordinator_buf):find(
+    '⏰ 🟢 **[schedule #S-7] created · every 300s**',
+    1,
+    true
+  )
+)
 fleet._on_event({
   v = 1,
   type = 'schedule.rearmed',
   memberId = 'coordinator',
   payload = { id = 7, nextRunAt = 1787701200000 },
 })
-assert(buffer_text(coordinator_buf):find('🟡 **[schedule] Schedule #7** — rearmed', 1, true))
-assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
+assert(
+  buffer_text(coordinator_buf):find(
+    '⏰ 🟢 **[schedule #S-7] rearmed · every 300s**',
+    1,
+    true
+  )
+)
+assert(line_count_with(coordinator_buf, '[schedule #S-7]') == 2)
 vim.api.nvim_set_current_win(coordinator_win)
 vim.api.nvim_win_set_cursor(coordinator_win, { schedule_row, 0 })
 conversation_maps.details.callback()
@@ -702,7 +740,7 @@ fleet._on_event({
   payload = {
     eventId = 'scheduled-run-7',
     content = 'Check deployment health',
-    source = 'scheduled-prompt',
+    source = 'schedule-7',
     delivery = 'queued',
   },
 })
@@ -710,14 +748,27 @@ assert(buffer_text(coordinator_buf):match(
   '👨 You · %d%d:%d%d:%d%d\n\n   Check deployment health'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
+assert(
+  buffer_text(coordinator_buf):find(
+    '⏰ 🟢 **[schedule #S-7] fired · every 300s**',
+    1,
+    true
+  )
+)
 fleet._on_event({
   v = 1,
   type = 'schedule.cancelled',
   memberId = 'coordinator',
   payload = { id = 7 },
 })
-assert(buffer_text(coordinator_buf):find('⚪ **[schedule] Schedule #7** — cancelled', 1, true))
-assert(line_with(coordinator_buf, '[schedule] Schedule #7') == schedule_row)
+assert(
+  buffer_text(coordinator_buf):find(
+    '⏰ ⚪ **[schedule #S-7] cancelled · every 300s**',
+    1,
+    true
+  )
+)
+assert(line_count_with(coordinator_buf, '[schedule #S-7]') == 4)
 local native_picker
 original_select = vim.ui.select
 vim.ui.select = function(items, opts, on_choice)
@@ -1086,11 +1137,15 @@ assert(
 )
 assert(
   buffer_text(observer_buf):find(
-    '🔴 **[task] [shell] Parse PR JSON details using python**',
+    '🧑‍💻 🔴 **[task #T-shell-42] failed · [shell] Parse PR JSON details using python**',
     1,
     true
   ),
-  'task linked to a failed tool kept its running indicator'
+  'task linked to a failed tool did not emit a terminal event'
+)
+assert(
+  line_count_with(observer_buf, '[shell] Parse PR JSON details using python') == 2,
+  'linked shell task did not retain separate start and failure events'
 )
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
 local failed_tool_row = assert(line_with(observer_buf, '[tool] powershell'))

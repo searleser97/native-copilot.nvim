@@ -10,6 +10,10 @@ local status_symbols = {
   denied = '🚫',
   unknown = '❓',
 }
+local actor_symbols = {
+  task = '🧑‍💻',
+  schedule = '⏰',
+}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local activity_body_namespace = vim.api.nvim_create_namespace('native_copilot_activity_body')
 local activity_fold_namespace = vim.api.nvim_create_namespace('native_copilot_activity_fold')
@@ -503,6 +507,16 @@ local function replace_activity_content(view, activity, content)
     { details = true }
   )
   if #position == 0 then return false end
+  local fold_start_row = activity.fold_start_row
+  if activity.fold_extmark then
+    local fold_position = vim.api.nvim_buf_get_extmark_by_id(
+      view.buf,
+      activity_fold_namespace,
+      activity.fold_extmark,
+      {}
+    )
+    if #fold_position > 0 then fold_start_row = fold_position[1] end
+  end
   local lines = {}
   local line_prefix = activity.plain and content_indent or (quote_indent .. ' ')
   for _, line in ipairs(vim.split(content:gsub('\r\n', '\n'):gsub('\r', '\n'), '\n', { plain = true })) do
@@ -535,7 +549,7 @@ local function replace_activity_content(view, activity, content)
     activity.fold_extmark = vim.api.nvim_buf_set_extmark(
       view.buf,
       activity_fold_namespace,
-      position[1],
+      fold_start_row,
       0,
       {
         id = activity.fold_extmark,
@@ -545,6 +559,7 @@ local function replace_activity_content(view, activity, content)
         end_right_gravity = false,
       }
     )
+    activity.fold_start_row = fold_start_row
   end
   return true
 end
@@ -600,22 +615,63 @@ function M.append_activity_block(member_id, heading, content)
   if not view.streaming then finalize_render(view) end
 end
 
-local function timeline_lines(kind, label, status, detail, now)
+local function timeline_lines(item, now)
+  local kind = item.kind
+  local label = item.label
+  local status = item.status
+  local detail = item.detail
   kind = tostring(kind or 'activity'):gsub('[\r\n]+', ' ')
   label = tostring(label or ''):gsub('[\r\n]+', ' ')
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   local prefix = kind == 'environment' and '>' or quote_indent
+  local actor = item.actor or actor_symbols[kind]
+  local actor_prefix = actor and (actor .. ' ') or ''
+  local identifier = item.identifier and (' #' .. tostring(item.identifier)) or ''
+  local event = item.event and (tostring(item.event) .. ' · ') or ''
   return {
-    ('%s %s **[%s] %s**%s · %s'):format(
+    ('%s %s%s **[%s%s] %s%s**%s · %s'):format(
       prefix,
+      actor_prefix,
       status_symbols[status] or status_symbols.unknown,
       kind,
+      identifier,
+      event,
       label,
       suffix,
       timestamp(now)
     ),
   }
+end
+
+local function environment_insert_row(view)
+  local lines = vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)
+  local last_environment
+  for index, line in ipairs(lines) do
+    if line:find('**[environment] ', 1, true) then
+      last_environment = index - 1
+    end
+  end
+  return last_environment and (last_environment + 1) or nil
+end
+
+local function shift_tracked_rows(view, start_row, count)
+  local function shift(record, field)
+    if record and record[field] and record[field] >= start_row then
+      record[field] = record[field] + count
+    end
+  end
+  for _, activity in pairs(view.activity_records) do
+    shift(activity, 'start_row')
+    shift(activity, 'body_start_row')
+    shift(activity, 'fold_start_row')
+  end
+  shift(view.last_activity, 'start_row')
+  shift(view.last_activity, 'body_start_row')
+  shift(view.last_activity, 'fold_start_row')
+  for _, timeline in pairs(view.timeline) do
+    shift(timeline, 'start_row')
+  end
 end
 
 function M.status_symbol(status)
@@ -685,7 +741,7 @@ function M.upsert_timeline(member_id, item_id, item)
     end
   end
   local now = record and record.created_at or options.now()
-  local lines = timeline_lines(item.kind, item.label, item.status, item.detail, now)
+  local lines = timeline_lines(item, now)
   if start_row then
     with_modifiable(view.buf, function()
       vim.api.nvim_buf_set_lines(view.buf, start_row, start_row + 1, false, lines)
@@ -708,21 +764,29 @@ function M.upsert_timeline(member_id, item_id, item)
 
   if not start_row then
     ensure_day_header(view, now)
-    if
-      view.last_block_kind == 'activity'
-      or view.last_block_kind == 'message'
-      or view.last_block_kind == 'header'
-    then
-      ensure_trailing_empty_rows(view, 1)
+    start_row = item.kind == 'environment' and environment_insert_row(view) or nil
+    if start_row then
+      shift_tracked_rows(view, start_row, #lines)
+      with_modifiable(view.buf, function()
+        vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
+      end)
+    else
+      if
+        view.last_block_kind == 'activity'
+        or view.last_block_kind == 'message'
+        or view.last_block_kind == 'header'
+      then
+        ensure_trailing_empty_rows(view, 1)
+      end
+      start_row = vim.api.nvim_buf_line_count(view.buf)
+      with_modifiable(view.buf, function()
+        vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
+      end)
+      view.last_block_kind = nil
+      view.last_block_kind = 'timeline'
     end
-    start_row = vim.api.nvim_buf_line_count(view.buf)
-    with_modifiable(view.buf, function()
-      vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
-    end)
-    view.last_block_kind = nil
     record = {}
     view.timeline[item_id] = record
-    view.last_block_kind = 'timeline'
   end
 
   record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
@@ -797,10 +861,12 @@ function M.timeline_item_at_cursor(buf, row)
       local nearest_distance
       for _, record in pairs(view.timeline) do
         local item = record.item
-        local marker = item
-            and ('**[%s] %s**'):format(item.kind or 'activity', item.label or '')
-          or nil
-        if marker and line:find(marker, 1, true) then
+        local marker = item and tostring(item.label or '') or nil
+        if marker
+          and marker ~= ''
+          and line:find(marker, 1, true)
+          and line:find('[' .. tostring(item.kind or 'activity'), 1, true)
+        then
           local distance = math.abs((record.start_row or zero_row) - zero_row)
           if not nearest_distance or distance < nearest_distance then
             nearest = item
