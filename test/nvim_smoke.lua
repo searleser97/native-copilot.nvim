@@ -466,6 +466,41 @@ for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 
   end
 end
 assert(stable_row_after_refresh == stable_row, 'unchanged task refresh changed its timestamp')
+
+local ordering = buffers.ensure_member('ordering', 'Ordering')
+fake_now = os.time({ year = 2026, month = 8, day = 27, hour = 19, min = 44, sec = 30 })
+buffers.upsert_timeline('ordering', 'tool:powershell', {
+  kind = 'tool',
+  label = 'powershell',
+  status = 'running',
+})
+fake_now = fake_now + 1
+buffers.upsert_timeline('ordering', 'task:shell', {
+  kind = 'task',
+  label = '[shell] Check dependencies',
+  status = 'running',
+})
+fake_now = fake_now + 3
+buffers.upsert_timeline('ordering', 'tool:powershell', {
+  kind = 'tool',
+  label = 'powershell',
+  status = 'completed',
+})
+local ordering_lines =
+  vim.api.nvim_buf_get_lines(ordering.views.conversation.buf, 0, -1, false)
+local tool_index
+local task_index
+for index, line in ipairs(ordering_lines) do
+  if line:find('[tool] powershell', 1, true) then
+    tool_index = index
+    assert(line:find('19:44:30', 1, true), 'tool completion replaced its start timestamp')
+  elseif line:find('[task] [shell] Check dependencies', 1, true) then
+    task_index = index
+    assert(line:find('19:44:31', 1, true), 'task timestamp did not reflect insertion time')
+  end
+end
+assert(tool_index and task_index and tool_index < task_index, 'timeline timestamps contradict row order')
+
 local mcp_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line:find('[environment] MCP myenghub', 1, true) then

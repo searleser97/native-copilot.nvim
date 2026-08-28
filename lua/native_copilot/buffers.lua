@@ -684,7 +684,7 @@ function M.upsert_timeline(member_id, item_id, item)
       return
     end
   end
-  local now = options.now()
+  local now = record and record.created_at or options.now()
   local lines = timeline_lines(item.kind, item.label, item.status, item.detail, now)
   if start_row then
     with_modifiable(view.buf, function()
@@ -734,6 +734,7 @@ function M.upsert_timeline(member_id, item_id, item)
   })
   record.line_count = #lines
   record.start_row = start_row
+  record.created_at = record.created_at or now
   record.item = vim.deepcopy(item)
   record.item.id = item_id
   follow_bottom(view)
