@@ -153,6 +153,7 @@ interface LiveSession {
   aicUsed: number;
   busy: boolean;
   foregroundBusy: boolean;
+  interactiveSendPending: boolean;
   foregroundTurnId: string | undefined;
   foregroundTurnSequence: number;
   foregroundCompleteTurnId: string | undefined;
@@ -161,6 +162,27 @@ interface LiveSession {
   sequence: number;
   taskRefresh: number;
   unsubscribe: () => void;
+}
+
+function interactiveSendMode(live: LiveSession): "enqueue" | "immediate" {
+  return live.busy && !live.foregroundBusy && !live.interactiveSendPending
+    ? "immediate"
+    : "enqueue";
+}
+
+async function sendInteractivePrompt(live: LiveSession, prompt: string): Promise<string> {
+  const mode = interactiveSendMode(live);
+  if (mode === "immediate") {
+    live.interactiveSendPending = true;
+  }
+  try {
+    return await live.session.send({ prompt, mode });
+  } catch (error) {
+    if (mode === "immediate") {
+      live.interactiveSendPending = false;
+    }
+    throw error;
+  }
 }
 
 interface EnvironmentProbe {
@@ -1119,7 +1141,7 @@ export class CopilotRuntime {
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
     try {
-      const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "enqueue" });
+      const sdkMessageId = await sendInteractivePrompt(live, result.prompt);
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
@@ -1651,6 +1673,7 @@ export class CopilotRuntime {
       aicUsed: 0,
       busy: false,
       foregroundBusy: false,
+      interactiveSendPending: false,
       foregroundTurnId: undefined,
       foregroundTurnSequence: 0,
       foregroundCompleteTurnId: undefined,
@@ -1859,6 +1882,7 @@ export class CopilotRuntime {
         }
         live.busy = true;
         live.foregroundBusy = true;
+        live.interactiveSendPending = false;
         live.foregroundTurnId = event.data.turnId;
         live.foregroundTurnSequence += 1;
         if (live.foregroundAbortSequence !== live.foregroundTurnSequence) {
@@ -1892,6 +1916,7 @@ export class CopilotRuntime {
           );
           if (foregroundComplete) {
             live.foregroundBusy = false;
+            live.interactiveSendPending = false;
             live.foregroundAbortSequence = undefined;
             this.emit(
               "member.foreground_idle",
@@ -1908,6 +1933,7 @@ export class CopilotRuntime {
           && live.foregroundAbortSequence === live.foregroundTurnSequence
         ) {
           live.foregroundBusy = false;
+          live.interactiveSendPending = false;
           live.foregroundTurnId = undefined;
           live.foregroundCompleteTurnId = undefined;
           live.foregroundTurnHasToolRequests = false;
@@ -1922,6 +1948,7 @@ export class CopilotRuntime {
       case "session.idle":
         live.busy = false;
         live.foregroundBusy = false;
+        live.interactiveSendPending = false;
         live.foregroundTurnId = undefined;
         live.foregroundCompleteTurnId = undefined;
         live.foregroundTurnHasToolRequests = false;
@@ -3103,7 +3130,7 @@ export class CopilotRuntime {
     const id = randomUUID();
     this.db.enqueueMessage(id, runId, "user", live.memberId, "user", content);
     try {
-      const sdkMessageId = await live.session.send({ prompt: content, mode: "enqueue" });
+      const sdkMessageId = await sendInteractivePrompt(live, content);
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
@@ -3196,7 +3223,7 @@ export class CopilotRuntime {
         memberId: live.memberId,
         fleetId: live.fleetId,
         sessionId: live.session.sessionId,
-        state: live.foregroundBusy ? "busy" : "idle",
+        state: live.foregroundBusy || live.interactiveSendPending ? "busy" : "idle",
       })),
     };
   }

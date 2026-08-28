@@ -92,6 +92,7 @@ function fakeLive(opts: {
   return {
     session: {
       sessionId: opts.sessionId,
+      send: async () => "sdk-message",
       on: () => () => undefined,
       disconnect: async () => {
         disconnected.value = true;
@@ -108,6 +109,7 @@ function fakeLive(opts: {
     aicUsed: 0,
     busy: false,
     foregroundBusy: false,
+    interactiveSendPending: false,
     foregroundTurnId: undefined,
     foregroundTurnSequence: 0,
     foregroundCompleteTurnId: undefined,
@@ -1144,6 +1146,55 @@ describe("foreground idle translation", () => {
     expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(2);
     expect(live.foregroundBusy).toBe(true);
     expect(live.foregroundTurnId).toBe("root-newer-turn");
+    db.close();
+  });
+});
+
+describe("interactive prompt delivery", () => {
+  it("interjects only when background work is the remaining session activity", async () => {
+    const db = tempRuntimeDatabase();
+    db.createRun("run-standard", "standard", null, "E:\\repo", 1001);
+    db.upsertSession("run-standard", "standard", "session-standard", "connected");
+    const runtime = new CopilotRuntime("E:\\repo", db, () => undefined);
+    const live = fakeLive({
+      target: "standard",
+      memberId: "standard",
+      fleetId: "",
+      runId: "run-standard",
+      sessionId: "session-standard",
+    });
+    const modes: string[] = [];
+    (live.session as { send: (message: { mode: string }) => Promise<string> }).send = async (
+      message,
+    ) => {
+      modes.push(message.mode);
+      return `sdk-message-${modes.length}`;
+    };
+    (runtime as unknown as { live: Map<string, unknown> }).live.set("standard", live);
+
+    live.busy = true;
+    live.foregroundBusy = false;
+    await runtime.sendUserPrompt("standard", "continue during background work");
+
+    await runtime.sendUserPrompt("standard", "queue while immediate send is pending");
+
+    live.busy = false;
+    live.foregroundBusy = false;
+    live.interactiveSendPending = false;
+    await runtime.sendUserPrompt("standard", "start from idle");
+
+    expect(modes).toEqual(["immediate", "enqueue", "enqueue"]);
+
+    live.busy = true;
+    live.foregroundBusy = false;
+    live.interactiveSendPending = false;
+    (live.session as { send: () => Promise<string> }).send = async () => {
+      throw new Error("send failed");
+    };
+    await expect(runtime.sendUserPrompt("standard", "failed immediate send")).rejects.toThrow(
+      "send failed",
+    );
+    expect(live.interactiveSendPending).toBe(false);
     db.close();
   });
 });
