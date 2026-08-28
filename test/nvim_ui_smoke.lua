@@ -1147,6 +1147,54 @@ assert(
   line_count_with(observer_buf, '[shell] Parse PR JSON details using python') == 2,
   'linked shell task did not retain separate start and failure events'
 )
+fleet._on_event({
+  v = 1,
+  id = 'shell-task-still-running',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  payload = {
+    tasks = {
+      {
+        id = 'shell-43',
+        type = 'shell',
+        status = 'running',
+        description = 'Monitor the asynchronous command',
+      },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'read-shell-success',
+  type = 'activity.event',
+  memberId = 'observer',
+  payload = {
+    eventType = 'tool.execution_start',
+    data = {
+      toolCallId = 'read-shell-tool',
+      toolName = 'read_powershell',
+      arguments = { shellId = 'shell-43' },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'read-shell-success-complete',
+  type = 'activity.event',
+  memberId = 'observer',
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'read-shell-tool',
+      success = true,
+      result = { status = 'running' },
+    },
+  },
+})
+assert(
+  line_count_with(observer_buf, '[shell] Monitor the asynchronous command') == 1,
+  'successful helper tool falsely emitted task completion'
+)
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
 local failed_tool_row = assert(line_with(observer_buf, '[tool] powershell'))
 vim.api.nvim_win_set_cursor(0, { failed_tool_row, 0 })

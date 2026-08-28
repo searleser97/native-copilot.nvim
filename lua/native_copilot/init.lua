@@ -2337,12 +2337,9 @@ function M._on_event(message)
           error = json_value(data.error),
         }
       )
-      local linked_task_settled = settle_linked_task(
-        member_id,
-        data,
-        existing,
-        data.success == true and 'completed' or 'failed'
-      )
+      local linked_task_settled = data.success ~= true
+        and settle_linked_task(member_id, data, existing, 'failed')
+        or false
       if linked_task_settled and type(state.task_detail) == 'table' then
         render_task_detail()
       end

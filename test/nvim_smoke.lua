@@ -556,6 +556,24 @@ assert(
   'late environment insertion corrupted active reasoning order'
 )
 
+local empty_startup = buffers.ensure_member('empty-startup-order', 'Empty startup order')
+buffers.append_block('empty-startup-order', 'conversation', 'You', 'Prompt before environment.')
+buffers.upsert_timeline('empty-startup-order', 'environment:MCP first-server', {
+  kind = 'environment',
+  label = 'MCP first-server',
+  status = 'completed',
+  detail = 'connected',
+})
+local empty_startup_text = table.concat(
+  vim.api.nvim_buf_get_lines(empty_startup.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(
+  assert(empty_startup_text:find('[environment] MCP first-server', 1, true))
+    < assert(empty_startup_text:find('USER ·', 1, true)),
+  'first late environment row appeared after the user turn'
+)
+
 local mcp_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false)) do
   if line:find('[environment] MCP myenghub', 1, true) then

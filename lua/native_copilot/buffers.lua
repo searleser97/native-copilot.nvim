@@ -652,7 +652,15 @@ local function environment_insert_row(view)
       last_environment = index - 1
     end
   end
-  return last_environment and (last_environment + 1) or nil
+  if last_environment then return last_environment + 1 end
+  for index, line in ipairs(lines) do
+    if line:find(options.conversation.user_label .. ' · ', 1, true) == 1
+      or line:find(options.conversation.copilot_label .. ' · ', 1, true) == 1
+    then
+      return math.max(1, index - 2)
+    end
+  end
+  return nil
 end
 
 local function shift_tracked_rows(view, start_row, count)
