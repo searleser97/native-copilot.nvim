@@ -458,6 +458,14 @@ sources = {
       enabled = function() return vim.b.native_copilot_prompt == true end,
       score_offset = 100,
     },
+    path = {
+      opts = {
+        get_cwd = function(context)
+          if vim.b[context.bufnr].native_copilot_prompt then return vim.uv.cwd() end
+          return vim.fn.expand(("#%d:p:h"):format(context.bufnr))
+        end,
+      },
+    },
   },
 }
 ```
