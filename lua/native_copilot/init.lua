@@ -332,6 +332,15 @@ dispatch_next_prompt = function(member_id)
   return false
 end
 
+local function finish_foreground_turn(member_id)
+  buffers.finish_response(member_id)
+  local request_id = state.active_prompts[member_id]
+  if request_id then state.prompt_calls[request_id] = nil end
+  state.active_prompts[member_id] = nil
+  buffers.set_state(member_id, 'idle')
+  dispatch_next_prompt(member_id)
+end
+
 local function submit_prompt()
   local content = vim.trim(table.concat(prompt_lines(), '\n'))
   if content == '' then
@@ -2352,22 +2361,19 @@ function M._on_event(message)
   elseif message.type == 'member.error' then
     buffers.append_activity_block(member_id, 'Error', payload.message or vim.inspect(payload))
     buffers.set_state(member_id, 'error')
+  elseif message.type == 'member.foreground_idle' then
+    finish_foreground_turn(member_id)
   elseif message.type == 'member.state' then
     local member_state = payload.state or 'unknown'
     buffers.set_state(member_id, member_state)
     if member_state == 'busy' then
       buffers.begin_response(member_id, payload.turnId or message.id)
     elseif member_state == 'idle' then
-      buffers.finish_response(member_id)
-      local request_id = state.active_prompts[member_id]
-      if request_id then state.prompt_calls[request_id] = nil end
-      state.active_prompts[member_id] = nil
       local environment = state.environment[member_id]
       local startup = environment and environment.components['Copilot environment']
       if startup and startup.status == 'running' then
         update_environment(member_id, 'Copilot environment', 'completed', 'ready')
       end
-      dispatch_next_prompt(member_id)
     end
   elseif message.type == 'mailbox.queued' or message.type == 'mailbox.delivered' then
     buffers.append_block(

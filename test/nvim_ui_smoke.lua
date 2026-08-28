@@ -657,7 +657,14 @@ assert(buffer_text(prompt_queue_buf):find('Queued prompts — FIFO', 1, true))
 assert(#prompt_sends == 0, 'resuming a busy queue dispatched out of turn')
 fleet._on_event({
   v = 1,
-  type = 'member.state',
+  type = 'member.turn_end',
+  memberId = 'coordinator',
+  payload = { state = 'finishing' },
+})
+assert(#prompt_sends == 0, 'turn_end released a foreground prompt before assistant.idle')
+fleet._on_event({
+  v = 1,
+  type = 'member.foreground_idle',
   memberId = 'coordinator',
   payload = { state = 'idle' },
 })
@@ -672,6 +679,84 @@ assert(buffer_text(coordinator_buf):match(
   '🤖 Copilot · writing%.'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
+fleet._on_event({
+  v = 1,
+  id = 'background-shell-running',
+  type = 'tasks.changed',
+  memberId = 'coordinator',
+  payload = {
+    tasks = {
+      {
+        id = 'background-shell-90',
+        type = 'shell',
+        status = 'running',
+        description = 'Wait 90 seconds',
+      },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'foreground-turn-ended',
+  type = 'member.foreground_idle',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, {
+  'Continue while the background shell is still running',
+})
+prompt_submit.callback()
+assert(
+  #prompt_sends == 2,
+  'foreground idle did not release prompt dispatch while a background task was running'
+)
+assert(
+  prompt_sends[2].payload.content == 'Continue while the background shell is still running',
+  'post-background prompt was not dispatched immediately'
+)
+assert(
+  not buffer_text(prompt_queue_buf):find('Continue while the background shell', 1, true),
+  'post-background prompt was incorrectly added to the local FIFO'
+)
+fleet._on_event({
+  v = 1,
+  id = 'delayed-prior-idle',
+  type = 'member.state',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, {
+  'Third prompt while the second foreground turn is active',
+})
+prompt_submit.callback()
+assert(
+  #prompt_sends == 2,
+  'a delayed idle event cleared the newer foreground prompt marker'
+)
+assert(
+  buffer_text(prompt_queue_buf):find(
+    'Third prompt while the second foreground turn is active',
+    1,
+    true
+  ),
+  'active newer foreground prompt did not retain FIFO protection'
+)
+fleet._on_event({
+  v = 1,
+  id = 'second-foreground-ended',
+  type = 'member.foreground_idle',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+assert(#prompt_sends == 3, 'queued third prompt did not dispatch after the newer turn ended')
+fleet._on_event({
+  v = 1,
+  id = 'third-foreground-ended',
+  type = 'member.foreground_idle',
+  memberId = 'coordinator',
+  payload = { state = 'idle' },
+})
+assert(#vim.fn.win_findbuf(prompt_queue_buf) == 0, 'FIFO test left its queue pane open')
 fleet._on_event({
   v = 1,
   id = 'steering-scheduled-run',

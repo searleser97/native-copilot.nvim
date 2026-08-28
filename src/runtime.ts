@@ -152,6 +152,7 @@ interface LiveSession {
   modelId: string | undefined;
   aicUsed: number;
   busy: boolean;
+  foregroundBusy: boolean;
   sequence: number;
   taskRefresh: number;
   unsubscribe: () => void;
@@ -1644,6 +1645,7 @@ export class CopilotRuntime {
       modelId: config.model,
       aicUsed: 0,
       busy: false,
+      foregroundBusy: false,
       sequence: 0,
       taskRefresh: 0,
       unsubscribe: () => undefined,
@@ -1831,18 +1833,37 @@ export class CopilotRuntime {
         );
         break;
       case "assistant.turn_start":
+        if (event.agentId !== undefined) {
+          break;
+        }
         live.busy = true;
+        live.foregroundBusy = true;
         this.emit("member.state", { state: "busy", ...event.data }, { ...fields, target: "status" });
         break;
       case "assistant.turn_end":
+        if (event.agentId !== undefined) {
+          break;
+        }
         this.emit(
           "member.turn_end",
           { state: "finishing", ...event.data },
           { ...fields, target: "status", done: true },
         );
         break;
+      case "assistant.idle":
+        if (event.agentId !== undefined) {
+          break;
+        }
+        live.foregroundBusy = false;
+        this.emit(
+          "member.foreground_idle",
+          { state: "idle", ...event.data },
+          { ...fields, target: "status", done: true },
+        );
+        break;
       case "session.idle":
         live.busy = false;
+        live.foregroundBusy = false;
         this.emit("member.state", { state: "idle", ...event.data }, { ...fields, target: "status" });
         if (live.fleetId === undefined) {
           queueMicrotask(() => void this.drainPendingFleets());
@@ -3107,7 +3128,7 @@ export class CopilotRuntime {
         memberId: live.memberId,
         fleetId: live.fleetId,
         sessionId: live.session.sessionId,
-        state: live.busy ? "busy" : "idle",
+        state: live.foregroundBusy ? "busy" : "idle",
       })),
     };
   }

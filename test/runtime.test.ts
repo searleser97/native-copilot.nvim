@@ -107,6 +107,7 @@ function fakeLive(opts: {
     modelId: undefined,
     aicUsed: 0,
     busy: false,
+    foregroundBusy: false,
     sequence: 0,
     taskRefresh: 0,
     unsubscribe: () => undefined,
@@ -944,6 +945,68 @@ describe("delayed task refresh", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("foreground idle translation", () => {
+  it("emits foreground idle only for the root assistant loop", () => {
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const db = tempRuntimeDatabase();
+    const runtime = new CopilotRuntime("E:\\repo", db, (type, payload) => {
+      events.push({ type, payload });
+    });
+    db.createRun("run-standard", "standard", null, "E:\\repo", 1001);
+    db.upsertSession("run-standard", "standard", "session-standard", "connected");
+    const live = fakeLive({
+      target: "standard",
+      memberId: "standard",
+      fleetId: "",
+      runId: "run-standard",
+      sessionId: "session-standard",
+    });
+    live.busy = true;
+    live.foregroundBusy = true;
+    (runtime as unknown as { live: Map<string, unknown> }).live.set("standard", live);
+    const handle = (runtime as unknown as {
+      handleSessionEvent: (live: unknown, event: unknown) => void;
+    }).handleSessionEvent.bind(runtime);
+
+    handle(live, {
+      id: "root-idle",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.idle",
+      ephemeral: true,
+      data: {},
+    });
+    handle(live, {
+      id: "subagent-idle",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.idle",
+      agentId: "background-agent",
+      ephemeral: true,
+      data: {},
+    });
+    handle(live, {
+      id: "subagent-turn-start",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_start",
+      agentId: "background-agent",
+      data: { turnId: "subagent-turn" },
+    });
+
+    expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(1);
+    expect(events.some((event) => event.type === "member.state")).toBe(false);
+    expect(live.busy).toBe(true);
+    expect(live.foregroundBusy).toBe(false);
+    expect(
+      (runtime.status() as { members: Array<{ id: string; state: string }> }).members.find(
+        (member) => member.id === "standard",
+      )?.state,
+    ).toBe("idle");
+    db.close();
   });
 });
 
