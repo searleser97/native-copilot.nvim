@@ -6,14 +6,15 @@
 
 **Status:** Completed
 
-Tasks and schedules should behave like additional participants in the conversation rather than
-mutable status rows whose original event time and state disappear.
+Tasks, schedules, and asynchronous tool completions should behave like additional participants in
+the conversation rather than mutable status rows whose original event time and state disappear.
 
 **Target behavior**
 
 - Emit a separate row for each meaningful lifecycle event: started, completed, failed, or cancelled.
 - Prefix task events with `🧑‍💻` and schedule events with `⏰`.
-- Include the same short identifier on every event for one task or schedule.
+- Render asynchronous tool completions under a `🛠️ Tool` actor while keeping calls compact.
+- Include the same short identifier on every event for one task, schedule, or asynchronous tool.
 - Keep start rows concise and place output/error summaries on terminal rows.
 - Preserve the full event payload in the detail view.
 - Link successful and failed shell tool completions back to their background task when a task ID is
@@ -25,7 +26,7 @@ mutable status rows whose original event time and state disappear.
 - Related rows expose the same visible identifier.
 - Completed, failed, and cancelled events are visually distinct.
 - Opening a terminal row exposes full output or error details when available.
-- Automated and real UI tests cover task and schedule lifecycle events.
+- Automated and real UI tests cover task, schedule, and asynchronous tool lifecycle events.
 
 ### NC-002: Fold consecutive reasoning as one block
 

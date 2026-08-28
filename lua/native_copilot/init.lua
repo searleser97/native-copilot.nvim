@@ -278,6 +278,7 @@ local function update_schedule(member_id, schedule_id, event, updates, event_id)
     label = schedule_description(schedule),
     status = status,
     detail = concise_detail(schedule.detail),
+    actor_message = event == 'fired' or event == 'failed',
     details = {
       prompt = schedule.displayPrompt or schedule.prompt,
       schedule = schedule_description(schedule),
@@ -622,6 +623,7 @@ local function emit_task_event(member_id, task, event)
     ),
     status = status,
     detail = task_terminal_detail(task, status),
+    actor_message = event ~= 'started',
     task = vim.deepcopy(task),
   })
 end
@@ -685,17 +687,40 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   item.name = tool_name or item.name
   item.status = status
   item.details = vim.tbl_deep_extend('force', item.details or {}, details or {})
-  buffers.upsert_timeline(member_id, 'tool:' .. call_id, {
+  local arguments = item.details.arguments
+  local async_mode = type(arguments) == 'table'
+    and (
+      json_value(arguments.mode) == 'async'
+      or json_value(arguments.mode) == 'background'
+      or json_value(arguments.detach) == true
+    )
+  item.async = item.async or async_mode
+  local terminal = status ~= 'running'
+  local timeline_id = item.async
+      and ('tool:%s:%s'):format(call_id, terminal and status or 'started')
+    or 'tool:' .. call_id
+  buffers.upsert_timeline(member_id, timeline_id, {
     kind = 'tool',
+    identifier = item.async and short_identifier('C', call_id) or nil,
     label = item.name,
     status = status,
     detail = tool_timeline_detail(item.name, item.details.arguments, status),
+    actor_message = item.async and terminal,
     details = item.details,
   })
 
   while #activity.order > 20 do
-    local oldest = table.remove(activity.order, 1)
-    activity.items[oldest] = nil
+    local evict_index
+    for index, candidate_id in ipairs(activity.order) do
+      local candidate = activity.items[candidate_id]
+      if candidate and candidate.status ~= 'running' then
+        evict_index = index
+        break
+      end
+    end
+    if not evict_index then break end
+    local evicted = table.remove(activity.order, evict_index)
+    activity.items[evicted] = nil
   end
 end
 

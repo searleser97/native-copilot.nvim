@@ -14,6 +14,11 @@ local actor_symbols = {
   task = '🧑‍💻',
   schedule = '⏰',
 }
+local actor_labels = {
+  task = 'Task',
+  schedule = 'Scheduler',
+  tool = 'Tool',
+}
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local activity_body_namespace = vim.api.nvim_create_namespace('native_copilot_activity_body')
 local activity_fold_namespace = vim.api.nvim_create_namespace('native_copilot_activity_fold')
@@ -48,6 +53,10 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, 'NativeCopilotAssistantHeader', {
     default = true,
     link = 'Special',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotActorHeader', {
+    default = true,
+    link = 'Identifier',
   })
   vim.api.nvim_set_hl(0, 'NativeCopilotHeaderMeta', {
     default = true,
@@ -625,10 +634,27 @@ local function timeline_lines(item, now)
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   local prefix = kind == 'environment' and '>' or quote_indent
-  local actor = item.actor or actor_symbols[kind]
-  local actor_prefix = actor and (actor .. ' ') or ''
   local identifier = item.identifier and (' #' .. tostring(item.identifier)) or ''
   local event = item.event and (tostring(item.event) .. ' · ') or ''
+  if item.actor_message then
+    local actor = item.actor or (kind == 'tool' and '🛠️' or actor_symbols[kind]) or '💬'
+    local actor_label = item.actor_label or actor_labels[kind] or kind
+    return {
+      ('%s %s · %s'):format(actor, actor_label, timestamp(now)),
+      '',
+      ('%s%s **[%s%s] %s%s**%s'):format(
+        content_indent,
+        status_symbols[status] or status_symbols.unknown,
+        kind,
+        identifier,
+        event,
+        label,
+        suffix
+      ),
+    }
+  end
+  local actor = item.actor or actor_symbols[kind]
+  local actor_prefix = actor and (actor .. ' ') or ''
   return {
     ('%s %s%s **[%s%s] %s%s**%s · %s'):format(
       prefix,
@@ -780,7 +806,8 @@ function M.upsert_timeline(member_id, item_id, item)
       end)
     else
       if
-        view.last_block_kind == 'activity'
+        item.actor_message
+        or view.last_block_kind == 'activity'
         or view.last_block_kind == 'message'
         or view.last_block_kind == 'header'
       then
@@ -809,6 +836,9 @@ function M.upsert_timeline(member_id, item_id, item)
   record.created_at = record.created_at or now
   record.item = vim.deepcopy(item)
   record.item.id = item_id
+  if item.actor_message then
+    highlight_header(view.buf, start_row, lines[1], 'NativeCopilotActorHeader')
+  end
   follow_bottom(view)
   if not view.streaming and not view.activity_streaming then finalize_render(view) end
 end

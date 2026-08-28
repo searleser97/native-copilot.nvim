@@ -139,7 +139,8 @@ fleet._on_event({
     },
   },
 })
-local coordinator_buf = require('native_copilot.buffers').buffer('coordinator', 'conversation')
+local buffers = require('native_copilot.buffers')
+local coordinator_buf = buffers.buffer('coordinator', 'conversation')
 assert(vim.fn.bufnr('native-copilot://tasks') == -1, 'legacy task buffer was created')
 local function buffer_text(buf)
   return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
@@ -216,15 +217,20 @@ assert(
 )
 assert(
   timeline_text:find(
-    '🧑‍💻 🟢 **[task #T-shell-comp] completed · [shell] npm test** — All tests passed.',
+    '🧑‍💻 Task · ',
     1,
     true
-  ),
+  )
+    and timeline_text:find(
+      '   🟢 **[task #T-shell-comp] completed · [shell] npm test** — All tests passed.',
+      1,
+      true
+    ),
   'a completed task did not render its terminal event'
 )
 assert(
   timeline_text:find(
-    '🧑‍💻 🔴 **[task #T-agent-fail] failed · [agent] Validate deployment**',
+    '   🔴 **[task #T-agent-fail] failed · [agent] Validate deployment**',
     1,
     true
   )
@@ -294,7 +300,36 @@ end
 assert(failed_task_row and failed_task_row > running_task_row, 'task failure was not chronological')
 assert(
   buffer_text(coordinator_buf):find(
-    '🧑‍💻 🔴 **[task #T-agent-runn] failed · [agent] Review implementation**',
+    '🧑‍💻 Task · ',
+    1,
+    true
+  )
+    and buffer_text(coordinator_buf):find(
+      '   🔴 **[task #T-agent-runn] failed · [agent] Review implementation**',
+      1,
+      true
+    ),
+  'failed task event did not use the terminal indicator'
+)
+assert(
+  buffer_text(coordinator_buf):match(
+    '🧑‍💻 Task · %d%d:%d%d:%d%d\n\n'
+      .. '   🔴 %*%*%[task #T%-agent%-runn%] failed · %[agent%] Review implementation%*%*'
+  ),
+  'failed task actor message did not use one blank line after its header'
+)
+local failed_task_header = failed_task_row - 2
+assert(
+  buffers.timeline_item_at_cursor(coordinator_buf, failed_task_header).status == 'failed',
+  'task details were not available from the actor header'
+)
+assert(
+  buffers.timeline_item_at_cursor(coordinator_buf, failed_task_row).status == 'failed',
+  'task details were not available from the actor message'
+)
+assert(
+  buffer_text(coordinator_buf):find(
+    '   🔴 **[task #T-agent-runn] failed · [agent] Review implementation**',
     1,
     true
   ),
@@ -835,7 +870,35 @@ assert(buffer_text(coordinator_buf):match(
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 assert(
   buffer_text(coordinator_buf):find(
-    '⏰ 🟢 **[schedule #S-7] fired · every 300s**',
+    '⏰ Scheduler · ',
+    1,
+    true
+  )
+    and buffer_text(coordinator_buf):find(
+      '   🟢 **[schedule #S-7] fired · every 300s**',
+      1,
+      true
+    )
+)
+assert(
+  buffer_text(coordinator_buf):match(
+    '⏰ Scheduler · %d%d:%d%d:%d%d\n\n'
+      .. '   🟢 %*%*%[schedule #S%-7%] fired · every 300s%*%*'
+  ),
+  'schedule actor message did not use one blank line after its header'
+)
+local fired_schedule_row = assert(line_with(coordinator_buf, '[schedule #S-7] fired'))
+assert(
+  buffers.timeline_item_at_cursor(coordinator_buf, fired_schedule_row - 2).event == 'fired',
+  'schedule details were not available from the actor header'
+)
+assert(
+  buffers.timeline_item_at_cursor(coordinator_buf, fired_schedule_row).event == 'fired',
+  'schedule details were not available from the actor message'
+)
+assert(
+  buffer_text(coordinator_buf):find(
+    '   🟢 **[schedule #S-7] fired · every 300s**',
     1,
     true
   )
@@ -1075,7 +1138,6 @@ fleet._on_event({
     content = table.concat(hidden_lines, '\n'),
   },
 })
-local buffers = require('native_copilot.buffers')
 assert(buffers.get_member('observer').unread == 1)
 local observer_buf = buffers.buffer('observer', 'conversation')
 local text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
@@ -1167,6 +1229,125 @@ vim.api.nvim_buf_call(tool_detail_buf, function()
 end)
 fleet._on_event({
   v = 1,
+  id = 'async-tool-start',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = false,
+  payload = {
+    eventType = 'tool.execution_start',
+    data = {
+      toolCallId = 'async-tool',
+      toolName = 'powershell',
+      arguments = {
+        command = 'Start-Sleep -Seconds 90',
+        mode = 'async',
+        detach = true,
+      },
+    },
+  },
+})
+local async_tool_start_row = assert(line_with(observer_buf, '[tool #C-async-tool] powershell'))
+assert(
+  buffer_text(observer_buf):find(
+    '> 🟡 **[tool #C-async-tool] powershell** — processing…',
+    1,
+    true
+  ),
+  'async tool start was not rendered as a compact correlated row'
+)
+for index = 1, 21 do
+  local call_id = ('intervening-tool-%d'):format(index)
+  fleet._on_event({
+    v = 1,
+    id = call_id .. '-start',
+    type = 'activity.event',
+    memberId = 'observer',
+    target = 'activity',
+    done = false,
+    payload = {
+      eventType = 'tool.execution_start',
+      data = {
+        toolCallId = call_id,
+        toolName = 'rg',
+        arguments = { pattern = 'actor-message' },
+      },
+    },
+  })
+  fleet._on_event({
+    v = 1,
+    id = call_id .. '-complete',
+    type = 'activity.event',
+    memberId = 'observer',
+    target = 'activity',
+    done = true,
+    payload = {
+      eventType = 'tool.execution_complete',
+      data = {
+        toolCallId = call_id,
+        success = true,
+        result = { content = 'match' },
+      },
+    },
+  })
+end
+fleet._on_event({
+  v = 1,
+  id = 'async-tool-complete',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'async-tool',
+      success = true,
+      result = { content = 'background command completed' },
+    },
+  },
+})
+local async_tool_complete_row
+for index, line in ipairs(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false)) do
+  if line:find('🟢 **[tool #C-async-tool] powershell**', 1, true) then
+    async_tool_complete_row = index
+  end
+end
+assert(
+  async_tool_complete_row and async_tool_complete_row > async_tool_start_row,
+  'async tool completion was not appended after its start row'
+)
+assert(
+  line_count_with(observer_buf, '[tool #C-async-tool] powershell') == 2,
+  'async tool start and completion did not retain the same identifier'
+)
+assert(
+  buffer_text(observer_buf):match(
+    '🛠️ Tool · %d%d:%d%d:%d%d\n\n'
+      .. '   🟢 %*%*%[tool #C%-async%-tool%] powershell%*%* — completed'
+  ),
+  'async tool completion did not render as a properly spaced actor message'
+)
+assert(
+  buffers.timeline_item_at_cursor(observer_buf, async_tool_complete_row - 2).status == 'completed',
+  'async tool details were not available from the actor header'
+)
+assert(
+  buffers.timeline_item_at_cursor(observer_buf, async_tool_complete_row).status == 'completed',
+  'async tool details were not available from the actor message'
+)
+vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
+vim.api.nvim_win_set_cursor(0, { async_tool_complete_row - 2, 0 })
+observer_enter.callback()
+local async_tool_detail_buf = vim.api.nvim_get_current_buf()
+local async_tool_detail_text = buffer_text(async_tool_detail_buf)
+assert(async_tool_detail_text:find('Status: completed', 1, true))
+assert(async_tool_detail_text:find('background command completed', 1, true))
+vim.api.nvim_buf_call(async_tool_detail_buf, function()
+  vim.fn.maparg('q', 'n', false, true).callback()
+end)
+fleet._on_event({
+  v = 1,
   id = 'shell-task-running',
   type = 'tasks.changed',
   memberId = 'observer',
@@ -1222,7 +1403,7 @@ assert(
 )
 assert(
   buffer_text(observer_buf):find(
-    '🧑‍💻 🔴 **[task #T-shell-42] failed · [shell] Parse PR JSON details using python**',
+    '   🔴 **[task #T-shell-42] failed · [shell] Parse PR JSON details using python**',
     1,
     true
   ),
