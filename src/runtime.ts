@@ -153,6 +153,11 @@ interface LiveSession {
   aicUsed: number;
   busy: boolean;
   foregroundBusy: boolean;
+  foregroundTurnId: string | undefined;
+  foregroundTurnSequence: number;
+  foregroundCompleteTurnId: string | undefined;
+  foregroundTurnHasToolRequests: boolean;
+  foregroundAbortSequence: number | undefined;
   sequence: number;
   taskRefresh: number;
   unsubscribe: () => void;
@@ -1646,6 +1651,11 @@ export class CopilotRuntime {
       aicUsed: 0,
       busy: false,
       foregroundBusy: false,
+      foregroundTurnId: undefined,
+      foregroundTurnSequence: 0,
+      foregroundCompleteTurnId: undefined,
+      foregroundTurnHasToolRequests: false,
+      foregroundAbortSequence: undefined,
       sequence: 0,
       taskRefresh: 0,
       unsubscribe: () => undefined,
@@ -1803,6 +1813,17 @@ export class CopilotRuntime {
         );
         break;
       case "assistant.message":
+        if (event.agentId === undefined) {
+          const turnId = event.data.turnId ?? live.foregroundTurnId;
+          if (turnId === live.foregroundTurnId) {
+            if ((event.data.toolRequests?.length ?? 0) > 0) {
+              live.foregroundTurnHasToolRequests = true;
+              live.foregroundCompleteTurnId = undefined;
+            } else if (turnId !== undefined && !live.foregroundTurnHasToolRequests) {
+              live.foregroundCompleteTurnId = turnId;
+            }
+          }
+        }
         this.emit(
           "conversation.message",
           event.data,
@@ -1838,32 +1859,73 @@ export class CopilotRuntime {
         }
         live.busy = true;
         live.foregroundBusy = true;
+        live.foregroundTurnId = event.data.turnId;
+        live.foregroundTurnSequence += 1;
+        if (live.foregroundAbortSequence !== live.foregroundTurnSequence) {
+          live.foregroundAbortSequence = undefined;
+        }
+        live.foregroundCompleteTurnId = undefined;
+        live.foregroundTurnHasToolRequests = false;
         this.emit("member.state", { state: "busy", ...event.data }, { ...fields, target: "status" });
         break;
       case "assistant.turn_end":
         if (event.agentId !== undefined) {
           break;
         }
-        this.emit(
-          "member.turn_end",
-          { state: "finishing", ...event.data },
-          { ...fields, target: "status", done: true },
-        );
-        break;
-      case "assistant.idle":
-        if (event.agentId !== undefined) {
+        if (event.data.turnId !== live.foregroundTurnId) {
+          this.emit(
+            "member.turn_end",
+            { state: "finishing", ...event.data },
+            { ...fields, target: "status", done: true },
+          );
           break;
         }
-        live.foregroundBusy = false;
-        this.emit(
-          "member.foreground_idle",
-          { state: "idle", ...event.data },
-          { ...fields, target: "status", done: true },
-        );
+        {
+          const foregroundComplete = live.foregroundCompleteTurnId === event.data.turnId;
+          live.foregroundTurnId = undefined;
+          live.foregroundCompleteTurnId = undefined;
+          live.foregroundTurnHasToolRequests = false;
+          this.emit(
+            "member.turn_end",
+            { state: "finishing", ...event.data },
+            { ...fields, target: "status", done: true },
+          );
+          if (foregroundComplete) {
+            live.foregroundBusy = false;
+            live.foregroundAbortSequence = undefined;
+            this.emit(
+              "member.foreground_idle",
+              { state: "idle", turnId: event.data.turnId },
+              { ...fields, target: "status", done: true },
+            );
+          }
+        }
+        break;
+      case "assistant.idle":
+        if (
+          event.agentId === undefined
+          && event.data.aborted === true
+          && live.foregroundAbortSequence === live.foregroundTurnSequence
+        ) {
+          live.foregroundBusy = false;
+          live.foregroundTurnId = undefined;
+          live.foregroundCompleteTurnId = undefined;
+          live.foregroundTurnHasToolRequests = false;
+          live.foregroundAbortSequence = undefined;
+          this.emit(
+            "member.foreground_idle",
+            { state: "idle", aborted: true },
+            { ...fields, target: "status", done: true },
+          );
+        }
         break;
       case "session.idle":
         live.busy = false;
         live.foregroundBusy = false;
+        live.foregroundTurnId = undefined;
+        live.foregroundCompleteTurnId = undefined;
+        live.foregroundTurnHasToolRequests = false;
+        live.foregroundAbortSequence = undefined;
         this.emit("member.state", { state: "idle", ...event.data }, { ...fields, target: "status" });
         if (live.fleetId === undefined) {
           queueMicrotask(() => void this.drainPendingFleets());
@@ -3105,7 +3167,13 @@ export class CopilotRuntime {
     if (!live) {
       throw new Error(`Target "${target}" has no live session.`);
     }
-    await live.session.abort();
+    live.foregroundAbortSequence = live.foregroundTurnSequence;
+    try {
+      await live.session.abort();
+    } catch (error) {
+      live.foregroundAbortSequence = undefined;
+      throw error;
+    }
   }
 
   status(): unknown {

@@ -108,6 +108,11 @@ function fakeLive(opts: {
     aicUsed: 0,
     busy: false,
     foregroundBusy: false,
+    foregroundTurnId: undefined,
+    foregroundTurnSequence: 0,
+    foregroundCompleteTurnId: undefined,
+    foregroundTurnHasToolRequests: false,
+    foregroundAbortSequence: undefined,
     sequence: 0,
     taskRefresh: 0,
     unsubscribe: () => undefined,
@@ -949,7 +954,7 @@ describe("delayed task refresh", () => {
 });
 
 describe("foreground idle translation", () => {
-  it("emits foreground idle only for the root assistant loop", () => {
+  it("releases only after a root turn with no tool requests", async () => {
     const events: Array<{ type: string; payload: unknown }> = [];
     const db = tempRuntimeDatabase();
     const runtime = new CopilotRuntime("E:\\repo", db, (type, payload) => {
@@ -972,33 +977,112 @@ describe("foreground idle translation", () => {
     }).handleSessionEvent.bind(runtime);
 
     handle(live, {
-      id: "root-idle",
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      type: "assistant.idle",
-      ephemeral: true,
-      data: {},
-    });
-    handle(live, {
-      id: "subagent-idle",
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      type: "assistant.idle",
-      agentId: "background-agent",
-      ephemeral: true,
-      data: {},
-    });
-    handle(live, {
-      id: "subagent-turn-start",
+      id: "root-tool-turn-start",
       parentId: null,
       timestamp: new Date().toISOString(),
       type: "assistant.turn_start",
+      data: { turnId: "root-tool-turn" },
+    });
+    handle(live, {
+      id: "root-tool-commentary",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.message",
+      data: {
+        turnId: "root-tool-turn",
+        messageId: "root-tool-commentary",
+        content: "I will run the tool.",
+        toolRequests: [],
+      },
+    });
+    handle(live, {
+      id: "root-tool-message",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.message",
+      data: {
+        messageId: "root-tool-message",
+        content: "",
+        toolRequests: [{ toolCallId: "tool-1", name: "powershell", arguments: {} }],
+      },
+    });
+    handle(live, {
+      id: "root-tool-turn-end",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_end",
+      data: { turnId: "root-tool-turn" },
+    });
+    expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(0);
+
+    handle(live, {
+      id: "root-final-turn-start",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_start",
+      data: { turnId: "root-final-turn" },
+    });
+    handle(live, {
+      id: "stale-root-tool-message",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.message",
+      data: {
+        turnId: "root-tool-turn",
+        messageId: "stale-root-tool-message",
+        content: "",
+        toolRequests: [{ toolCallId: "stale-tool", name: "powershell", arguments: {} }],
+      },
+    });
+    handle(live, {
+      id: "stale-root-turn-end",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_end",
+      data: { turnId: "root-tool-turn" },
+    });
+    expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(0);
+    expect(live.foregroundTurnId).toBe("root-final-turn");
+
+    handle(live, {
+      id: "root-final-message",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.message",
+      data: {
+        messageId: "root-final-message",
+        content: "Done",
+        toolRequests: [],
+      },
+    });
+    handle(live, {
+      id: "subagent-turn-end",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_end",
       agentId: "background-agent",
-      data: { turnId: "subagent-turn" },
+      data: { turnId: "root-final-turn" },
+    });
+    expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(0);
+
+    handle(live, {
+      id: "root-final-turn-end",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_end",
+      data: { turnId: "root-final-turn" },
+    });
+    handle(live, {
+      id: "delayed-root-idle",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.idle",
+      ephemeral: true,
+      data: {},
     });
 
     expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(1);
-    expect(events.some((event) => event.type === "member.state")).toBe(false);
+    expect(events.filter((event) => event.type === "member.state")).toHaveLength(2);
     expect(live.busy).toBe(true);
     expect(live.foregroundBusy).toBe(false);
     expect(
@@ -1006,6 +1090,60 @@ describe("foreground idle translation", () => {
         (member) => member.id === "standard",
       )?.state,
     ).toBe("idle");
+
+    handle(live, {
+      id: "root-aborted-turn-start",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_start",
+      data: { turnId: "root-aborted-turn" },
+    });
+    await runtime.abort("standard");
+    handle(live, {
+      id: "root-aborted-idle",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.idle",
+      ephemeral: true,
+      data: { aborted: true },
+    });
+    handle(live, {
+      id: "root-delayed-idle",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.idle",
+      ephemeral: true,
+      data: {},
+    });
+    expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(2);
+    expect(live.foregroundBusy).toBe(false);
+
+    handle(live, {
+      id: "root-stale-abort-turn-start",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_start",
+      data: { turnId: "root-stale-abort-turn" },
+    });
+    await runtime.abort("standard");
+    handle(live, {
+      id: "root-newer-turn-start",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.turn_start",
+      data: { turnId: "root-newer-turn" },
+    });
+    handle(live, {
+      id: "root-delayed-aborted-idle",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      type: "assistant.idle",
+      ephemeral: true,
+      data: { aborted: true },
+    });
+    expect(events.filter((event) => event.type === "member.foreground_idle")).toHaveLength(2);
+    expect(live.foregroundBusy).toBe(true);
+    expect(live.foregroundTurnId).toBe("root-newer-turn");
     db.close();
   });
 });
