@@ -807,6 +807,7 @@ function M.upsert_timeline(member_id, item_id, item)
     else
       if
         item.actor_message
+        or view.last_block_kind == 'actor_message'
         or view.last_block_kind == 'activity'
         or view.last_block_kind == 'message'
         or view.last_block_kind == 'header'
@@ -817,8 +818,7 @@ function M.upsert_timeline(member_id, item_id, item)
       with_modifiable(view.buf, function()
         vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
       end)
-      view.last_block_kind = nil
-      view.last_block_kind = 'timeline'
+      view.last_block_kind = item.actor_message and 'actor_message' or 'timeline'
     end
     record = {}
     view.timeline[item_id] = record

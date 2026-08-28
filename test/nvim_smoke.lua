@@ -223,6 +223,43 @@ assert(
   not header_tool_text:find('BOT · writing.\n\n\n', 1, true),
   'timeline row after the Copilot heading retained two empty rows'
 )
+local actor_spacing = buffers.ensure_member('actor-spacing', 'Actor spacing')
+buffers.upsert_timeline('actor-spacing', 'task:completed', {
+  kind = 'task',
+  identifier = 'T-spacing',
+  event = 'completed',
+  label = '[agent] Review spacing',
+  status = 'completed',
+  actor_message = true,
+})
+buffers.upsert_timeline('actor-spacing', 'schedule:created', {
+  kind = 'schedule',
+  identifier = 'S-spacing',
+  event = 'created',
+  label = 'every 600s',
+  status = 'completed',
+})
+local actor_spacing_text = table.concat(
+  vim.api.nvim_buf_get_lines(actor_spacing.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(
+  actor_spacing_text:find(
+    '   🟢 **[task #T-spacing] completed · [agent] Review spacing**\n\n'
+      .. '   > ⏰ 🟢 **[schedule #S-spacing] created · every 600s**',
+    1,
+    true
+  ),
+  'compact timeline row was not separated from the preceding actor message'
+)
+assert(
+  not actor_spacing_text:find(
+    '   🟢 **[task #T-spacing] completed · [agent] Review spacing**\n\n\n',
+    1,
+    true
+  ),
+  'actor message retained more than one empty row before the next event'
+)
 buffers.append_activity_delta('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
 buffers.complete_activity('reviewer', 'reasoning-after-tool', 'Checking the tool result.')
 buffers.append_activity_delta(
