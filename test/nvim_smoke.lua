@@ -319,7 +319,9 @@ for _, fold in ipairs(joined_folds) do
 end
 assert(joined_fold_found, 'joined reasoning messages did not share one complete fold')
 vim.api.nvim_win_set_buf(0, member.views.conversation.buf)
+vim.wo.cursorline = true
 buffers.on_shown(member.views.conversation.buf)
+assert(vim.wo.cursorline == false, 'conversation view retained the cursor line background')
 vim.api.nvim_win_set_cursor(0, { #reasoning_after_tool_row, 0 })
 vim.cmd('normal! zc')
 assert(

@@ -1181,7 +1181,12 @@ function M.on_shown(buf)
   for _, entry in pairs(registry) do
     for _, view in pairs(entry.views) do
       if view.buf == buf then
-        if view.id == 'conversation' then entry.unread = 0 end
+        if view.id == 'conversation' then
+          entry.unread = 0
+          for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+            if vim.api.nvim_win_is_valid(win) then vim.wo[win].cursorline = false end
+          end
+        end
         configure_folds(view)
         follow_bottom(view)
         return
