@@ -152,6 +152,56 @@ export class ScriptedRuntime implements RuntimeAdapter {
     this.emitIdle(target);
   }
 
+  private async reasoningFolds(target: string): Promise<void> {
+    this.emitBusy(target, "e2e-reasoning-turn");
+    this.emit("activity.delta", {
+      reasoningId: "e2e-reasoning-one",
+      content: "REASONING-ONE-BEGIN\nREASONING-ONE-DETAIL",
+    }, this.fields(target));
+    await delay(120);
+    this.emit("activity.reasoning", {
+      reasoningId: "e2e-reasoning-one",
+      content: "REASONING-ONE-BEGIN\nREASONING-ONE-DETAIL",
+    }, this.fields(target, true));
+    this.emit("activity.delta", {
+      reasoningId: "e2e-reasoning-two",
+      content: "REASONING-TWO-BEGIN\nREASONING-TWO-DETAIL",
+    }, this.fields(target));
+    await delay(40);
+    this.emit("activity.event", {
+      eventType: "tool.execution_start",
+      data: {
+        toolCallId: "e2e-reasoning-tool",
+        toolName: "reasoning_tool",
+        arguments: { query: "mock reasoning lookup" },
+      },
+    }, this.fields(target));
+    this.emit("activity.event", {
+      eventType: "tool.execution_complete",
+      data: {
+        toolCallId: "e2e-reasoning-tool",
+        success: true,
+        result: { output: "mock reasoning result" },
+      },
+    }, this.fields(target, true));
+    this.emit("tasks.changed", {
+      tasks: [{
+        id: "e2e-reasoning-task",
+        type: "shell",
+        status: "completed",
+        description: "Reasoning background task",
+        result: "reasoning task completed",
+      }],
+    }, { memberId: target, target: "status", done: true });
+    await delay(40);
+    this.emit("activity.reasoning", {
+      reasoningId: "e2e-reasoning-two",
+      content: "REASONING-TWO-BEGIN\nREASONING-TWO-DETAIL",
+    }, this.fields(target, true));
+    this.emitMessage(target, "e2e-reasoning-message", "REASONING-FINAL-RESPONSE");
+    this.emitIdle(target);
+  }
+
   private permission(target: string): void {
     const requestId = "e2e-permission-request";
     this.pendingPermissions.set(requestId, { target });
@@ -216,6 +266,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
       void this.taskDeferral(target);
     } else if (content.includes("E2E_TOOL_AUTHORSHIP")) {
       void this.toolAuthorship(target);
+    } else if (content.includes("E2E_REASONING_FOLDS")) {
+      void this.reasoningFolds(target);
     } else if (content.includes("E2E_PERMISSION")) {
       this.permission(target);
     } else {

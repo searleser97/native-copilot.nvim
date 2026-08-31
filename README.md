@@ -520,7 +520,8 @@ npm run test:e2e:manual-permissions
 Each profile opens an independent visible window, drives prompts through the real prompt mapping,
 writes assertions and conversation snapshots under `.e2e-artifacts\`, and closes immediately when
 the scenario finishes. `allow-all` omits MCP servers, `allow-all-mcp` renders connected and failed
-mock servers, and `manual-permissions` exercises the interactive approval picker.
+mock servers, and `manual-permissions` exercises the interactive approval picker. Shared scenarios
+cover streamed reasoning folds, fold open/close behavior, Tool ownership, and Task deferral.
 
 `npm run check` remains available for a TypeScript-only compile check, and `npm run build` emits the
 Node host required by the visible suite. Neither command replaces the visible E2E matrix.

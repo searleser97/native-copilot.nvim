@@ -812,6 +812,16 @@ end
 function M.upsert_timeline(member_id, item_id, item)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  if
+    view.active_activity
+    and not item.actor_message
+    and (item.kind == 'task' or item.kind == 'tool')
+  then
+    view.pending = view.pending .. '\n'
+    flush(view)
+    view.active_activity = nil
+    view.activity_streaming = false
+  end
   flush(view)
   if item.actor_message
     and (item.kind == 'task' or item.kind == 'tool')

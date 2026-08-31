@@ -74,6 +74,12 @@ local function text(buf)
   return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
 end
 
+local function line_with(buf, needle)
+  for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find(needle, 1, true) then return row end
+  end
+end
+
 local function pass(label)
   results[#results + 1] = 'PASS ' .. label
 end
@@ -214,6 +220,105 @@ tick = function()
       reply < task_header and task_header < prior_task,
       'background task remained deferred until the foreground reply completed'
     ) then
+      return
+    end
+    submit('E2E_REASONING_FOLDS')
+    phase = 'reasoning-stream'
+    schedule_tick()
+  elseif phase == 'reasoning-stream' then
+    local first_reasoning = content:find('REASONING-ONE-BEGIN', 1, true)
+    if not first_reasoning then
+      schedule_tick()
+      return
+    end
+    if not check(
+      not content:find('REASONING-FINAL-RESPONSE', first_reasoning, true),
+      'reasoning stream became visible before the final response'
+    ) then
+      return
+    end
+    phase = 'reasoning-complete'
+    schedule_tick()
+  elseif phase == 'reasoning-complete' then
+    local first_reasoning = content:find('REASONING-ONE-BEGIN', 1, true)
+    local second_reasoning = content:find('REASONING-TWO-BEGIN', first_reasoning or 1, true)
+    local tool_row = second_reasoning
+      and content:find('[tool][e2e-reasoning-tool] reasoning_tool', second_reasoning, true)
+    local final_response = tool_row
+      and content:find('REASONING-FINAL-RESPONSE', tool_row, true)
+    local task_header = final_response and content:find('📝 · ', final_response, true)
+    local task_row = task_header
+      and content:find('[task][e2e-reasoning-task] completed', task_header, true)
+    if not (first_reasoning and second_reasoning and tool_row and final_response and task_row) then
+      schedule_tick()
+      return
+    end
+    if not check(
+      select(2, content:gsub('REASONING%-ONE%-BEGIN', '')) == 1
+        and select(2, content:gsub('REASONING%-TWO%-BEGIN', '')) == 1,
+      'consecutive reasoning summaries rendered once'
+    ) then
+      return
+    end
+    if not check(
+      first_reasoning < second_reasoning
+        and second_reasoning < tool_row
+        and tool_row < final_response
+        and final_response < task_row,
+      'reasoning, Tool, final response, and deferred Task kept event order'
+    ) then
+      return
+    end
+    local first_row = line_with(buf, 'REASONING-ONE-BEGIN')
+    local second_row = line_with(buf, 'REASONING-TWO-BEGIN')
+    local tool_line = line_with(buf, '[tool][e2e-reasoning-tool] reasoning_tool')
+    local final_row = line_with(buf, 'REASONING-FINAL-RESPONSE')
+    local windows = vim.fn.win_findbuf(buf)
+    local fold
+    if first_row and second_row and tool_line and final_row and #windows > 0 then
+      fold = vim.api.nvim_win_call(windows[1], function()
+        vim.cmd('normal! zx')
+        vim.cmd('normal! zM')
+        local first_start = vim.fn.foldclosed(first_row)
+        local second_start = vim.fn.foldclosed(second_row)
+        local fold_end = vim.fn.foldclosedend(first_row)
+        local tool_start = vim.fn.foldclosed(tool_line)
+        local final_start = vim.fn.foldclosed(final_row)
+        vim.cmd('normal! zR')
+        return {
+          first_start = first_start,
+          second_start = second_start,
+          fold_end = fold_end,
+          tool_start = tool_start,
+          final_start = final_start,
+          reopened = vim.fn.foldclosed(first_row),
+        }
+      end)
+    end
+    if fold then
+      append_trace({
+        ('fold first=%s second=%s end=%s tool=%s final=%s reopened=%s'):format(
+          fold.first_start,
+          fold.second_start,
+          fold.fold_end,
+          fold.tool_start,
+          fold.final_start,
+          fold.reopened
+        ),
+      })
+    end
+    if not check(
+      fold
+        and fold.first_start > 0
+        and fold.first_start == fold.second_start
+        and fold.fold_end < tool_line
+        and fold.tool_start == -1
+        and fold.final_start == -1,
+      'consecutive reasoning summaries share a fold that excludes Tool and response rows'
+    ) then
+      return
+    end
+    if not check(fold.reopened == -1, 'reasoning fold opens and closes through native fold commands') then
       return
     end
     if profile == 'manual-permissions' then
