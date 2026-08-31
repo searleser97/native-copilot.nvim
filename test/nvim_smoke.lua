@@ -110,20 +110,28 @@ assert(vim.api.nvim_get_hl(0, {
 }).link == 'CursorLine')
 local initial_task_message_highlight = vim.api.nvim_get_hl(0, {
   name = 'NativeCopilotTaskMessage',
-  link = true,
+  link = false,
 })
-assert(
-  initial_task_message_highlight.bg ~= nil
-    or initial_task_message_highlight.link == 'CursorLine'
-)
+assert(initial_task_message_highlight.bg ~= nil)
 vim.api.nvim_set_hl(0, 'Identifier', { fg = 0x6699cc })
 vim.api.nvim_set_hl(0, 'Normal', { fg = 0xeeeeee, bg = 0x101010 })
+vim.api.nvim_set_hl(0, 'CursorLine', { bg = 0x202020 })
 vim.cmd('doautocmd ColorScheme')
 local task_message_highlight = vim.api.nvim_get_hl(0, {
   name = 'NativeCopilotTaskMessage',
   link = false,
 })
-assert(task_message_highlight.bg == 0x1f2932)
+assert(task_message_highlight.bg == 0x3e2555)
+assert(task_message_highlight.bg ~= 0x202020)
+vim.api.nvim_set_hl(0, 'Normal', { fg = 0x101010, bg = 0xf4f4f4 })
+vim.api.nvim_set_hl(0, 'CursorLine', { bg = 0xe8e8e8 })
+vim.cmd('doautocmd ColorScheme')
+local light_task_message_highlight = vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotTaskMessage',
+  link = false,
+})
+assert(light_task_message_highlight.bg == 0xdccff3)
+assert(light_task_message_highlight.bg ~= 0xe8e8e8)
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
 assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')

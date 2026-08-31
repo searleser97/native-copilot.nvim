@@ -58,6 +58,13 @@ local function blend_color(base, accent, accent_ratio)
   return red * 0x10000 + green * 0x100 + blue
 end
 
+local function color_luminance(color)
+  local red = math.floor(color / 0x10000) % 0x100
+  local green = math.floor(color / 0x100) % 0x100
+  local blue = color % 0x100
+  return (red * 299 + green * 587 + blue * 114) / 1000
+end
+
 local function setup_highlights()
   vim.api.nvim_set_hl(0, 'NativeCopilotUserHeader', {
     default = true,
@@ -79,23 +86,18 @@ local function setup_highlights()
     default = true,
     link = 'CursorLine',
   })
-  local actor = vim.api.nvim_get_hl(0, {
-    name = 'NativeCopilotActorHeader',
-    link = false,
-  })
   local normal = vim.api.nvim_get_hl(0, {
     name = 'Normal',
     link = false,
   })
-  if actor.fg and normal.bg then
-    vim.api.nvim_set_hl(0, 'NativeCopilotTaskMessage', {
-      bg = blend_color(normal.bg, actor.fg, 0.18),
-    })
-  else
-    vim.api.nvim_set_hl(0, 'NativeCopilotTaskMessage', {
-      link = 'CursorLine',
-    })
-  end
+  local fallback_background = vim.o.background == 'light' and 0xffffff or 0x000000
+  local background = normal.bg or fallback_background
+  local light_background = color_luminance(background) >= 128
+  local purple = light_background and 0x7c3aed or 0xa855f7
+  local ratio = light_background and 0.20 or 0.30
+  vim.api.nvim_set_hl(0, 'NativeCopilotTaskMessage', {
+    bg = blend_color(background, purple, ratio),
+  })
 end
 
 setup_highlights()
