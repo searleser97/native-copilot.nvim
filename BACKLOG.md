@@ -160,7 +160,7 @@ because they can introduce a new scheduled user turn.
 
 ### NC-010: Use a distinct purple Task message background
 
-**Status:** Pending
+**Status:** Completed
 
 Replace the current Task participant background with a clearly purple treatment that remains
 distinct from the user-message background while adapting to light and dark color schemes.
