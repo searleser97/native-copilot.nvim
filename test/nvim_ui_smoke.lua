@@ -210,7 +210,7 @@ assert(runtime_turn_text:find('After the tool.', 1, true))
 local timeline_text = buffer_text(coordinator_buf)
 assert(
   timeline_text:find(
-    '> 🟢 [task][agent-running] started · [agent] Review implementation',
+    '   🟢 [task][agent-running] started · [agent] Review implementation',
     1,
     true
   )
@@ -1251,7 +1251,7 @@ fleet._on_event({
 local async_tool_start_row = assert(line_with(observer_buf, '[task] starting'))
 assert(
   buffer_text(observer_buf):find(
-    '> 🟡 [task] starting · [shell] Sleep for 90 seconds',
+    '   🟡 [task] starting · [shell] Sleep for 90 seconds',
     1,
     true
   ),
@@ -1339,7 +1339,7 @@ local async_task_started_row = assert(line_with(observer_buf, '[task][async-shel
 assert(async_task_started_row == async_tool_start_row, 'task start did not update the launch row')
 assert(
   buffer_text(observer_buf):find(
-    '> 🟢 [task][async-shell] started · [shell] Sleep for 90 seconds',
+    '   🟢 [task][async-shell] started · [shell] Sleep for 90 seconds',
     1,
     true
   ),

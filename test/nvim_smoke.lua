@@ -216,9 +216,30 @@ local header_tool_text = table.concat(
   '\n'
 )
 assert(
-  header_tool_text:find('BOT · writing.\n\n   > 🟢 [tool] search', 1, true),
+  header_tool_text:find('BOT · writing.\n\n   🟢 [tool] search', 1, true),
   'timeline row after the Copilot heading did not keep exactly one empty row'
 )
+local compact_tool_highlighted = false
+for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+  member.views.conversation.buf,
+  vim.api.nvim_get_namespaces().native_copilot_timeline,
+  0,
+  -1,
+  { details = true }
+)) do
+  local line = vim.api.nvim_buf_get_lines(
+    member.views.conversation.buf,
+    mark[2],
+    mark[2] + 1,
+    false
+  )[1] or ''
+  if line:find('[tool] search', 1, true) then
+    assert(mark[4].hl_group == 'NativeCopilotActorHeader')
+    assert(mark[4].hl_eol == true)
+    compact_tool_highlighted = true
+  end
+end
+assert(compact_tool_highlighted, 'compact tool row did not use the Task header color')
 assert(
   not header_tool_text:find('BOT · writing.\n\n\n', 1, true),
   'timeline row after the Copilot heading retained two empty rows'

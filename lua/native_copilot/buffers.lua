@@ -633,7 +633,10 @@ local function timeline_lines(item, now)
   label = tostring(label or ''):gsub('[\r\n]+', ' ')
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
-  local prefix = kind == 'environment' and '>' or quote_indent
+  local compact_lifecycle = not item.actor_message and (kind == 'task' or kind == 'tool')
+  local prefix = kind == 'environment' and '> '
+    or compact_lifecycle and content_indent
+    or (quote_indent .. ' ')
   local identity = item.identifier ~= nil
       and ('[%s][%s]'):format(kind, tostring(item.identifier):gsub('[\r\n]+', ' '))
     or ('[%s]'):format(kind)
@@ -657,7 +660,7 @@ local function timeline_lines(item, now)
   local actor = item.actor or (kind ~= 'task' and actor_symbols[kind] or nil)
   local actor_prefix = actor and (actor .. ' ') or ''
   return {
-    ('%s %s%s %s %s%s%s · %s'):format(
+    ('%s%s%s %s %s%s%s · %s'):format(
       prefix,
       actor_prefix,
       status_symbols[status] or status_symbols.unknown,
@@ -837,6 +840,10 @@ function M.upsert_timeline(member_id, item_id, item)
     id = record.extmark,
     end_row = start_row + #lines,
     end_col = 0,
+    hl_group = not item.actor_message and (item.kind == 'task' or item.kind == 'tool')
+        and 'NativeCopilotActorHeader'
+      or nil,
+    hl_eol = not item.actor_message and (item.kind == 'task' or item.kind == 'tool'),
     right_gravity = true,
     end_right_gravity = false,
   })
