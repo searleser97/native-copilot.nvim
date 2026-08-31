@@ -197,6 +197,11 @@ local function create_buffer(name, member_id, view_id)
     last_activity = nil,
     activity_records = {},
     timeline = {},
+    deferred_timeline = {
+      order = {},
+      items = {},
+    },
+    timeline_time_overrides = {},
   }
 end
 
@@ -796,6 +801,20 @@ function M.upsert_timeline(member_id, item_id, item)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   flush(view)
+  if item.actor_message
+    and (item.kind == 'task' or item.kind == 'tool')
+    and (view.streaming or view.active_message or view.awaiting_response)
+  then
+    local deferred = view.deferred_timeline
+    local queued = deferred.items[item_id]
+    if not queued then
+      table.insert(deferred.order, item_id)
+      queued = { created_at = options.now() }
+      deferred.items[item_id] = queued
+    end
+    queued.item = vim.deepcopy(item)
+    return
+  end
   local record = view.timeline[item_id]
   local start_row = reconcile_environment_rows(view, item)
   if record
@@ -817,7 +836,9 @@ function M.upsert_timeline(member_id, item_id, item)
       return
     end
   end
-  local now = record and record.created_at or options.now()
+  local overridden_time = view.timeline_time_overrides[item_id]
+  view.timeline_time_overrides[item_id] = nil
+  local now = record and record.created_at or overridden_time or options.now()
   local lines = timeline_lines(item, now)
   if start_row then
     with_modifiable(view.buf, function()
@@ -899,9 +920,28 @@ function M.upsert_timeline(member_id, item_id, item)
   if not view.streaming and not view.activity_streaming then finalize_render(view) end
 end
 
+local function flush_deferred_timeline(member_id, view)
+  local deferred = view.deferred_timeline
+  if #deferred.order == 0 then return end
+  view.deferred_timeline = {
+    order = {},
+    items = {},
+  }
+  for _, item_id in ipairs(deferred.order) do
+    local queued = deferred.items[item_id]
+    if queued then
+      view.timeline_time_overrides[item_id] = queued.created_at
+      M.upsert_timeline(member_id, item_id, queued.item)
+    end
+  end
+end
+
 function M.remove_timeline(member_id, item_id)
   local entry = registry[member_id]
   local view = entry and entry.views.conversation
+  if not view then return end
+  view.deferred_timeline.items[item_id] = nil
+  view.timeline_time_overrides[item_id] = nil
   local record = view and view.timeline[item_id]
   if not record then return end
   local position = vim.api.nvim_buf_get_extmark_by_id(
@@ -1175,6 +1215,7 @@ function M.fail_response(member_id, detail)
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.streaming = false
+  flush_deferred_timeline(member_id, view)
   finalize_render(view)
 end
 
@@ -1201,6 +1242,7 @@ function M.complete_conversation(member_id, message_id, content)
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.last_block_kind = 'message'
+  flush_deferred_timeline(member_id, view)
 end
 
 function M.finish_response(member_id)
@@ -1223,6 +1265,7 @@ function M.finish_response(member_id)
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.streaming = false
+  flush_deferred_timeline(member_id, view)
   finalize_render(view)
 end
 

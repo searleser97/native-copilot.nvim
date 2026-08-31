@@ -257,6 +257,7 @@ for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
 end
 assert(compact_tool_highlighted, 'compact tool row did not use the Task header color')
 buffers.append_conversation_delta('reviewer', 'interleaved-message', 'Before task.')
+local deferred_timestamp = os.date('%H:%M:%S', fake_now)
 buffers.upsert_timeline('reviewer', 'task:interleaved-completed', {
   kind = 'task',
   identifier = 'interleaved',
@@ -283,6 +284,41 @@ buffers.upsert_timeline('reviewer', 'task:interleaved-cancelled', {
   status = 'cancelled',
   actor_message = true,
 })
+buffers.upsert_timeline('reviewer', 'tool:interleaved-updated', {
+  kind = 'tool',
+  identifier = 'interleaved-updated',
+  event = 'completed',
+  label = 'Initial tool result',
+  status = 'completed',
+  actor_message = true,
+})
+buffers.upsert_timeline('reviewer', 'tool:interleaved-updated', {
+  kind = 'tool',
+  identifier = 'interleaved-updated',
+  event = 'failed',
+  label = 'Updated tool result',
+  status = 'failed',
+  detail = 'Final tool failure',
+  actor_message = true,
+})
+buffers.upsert_timeline('reviewer', 'task:interleaved-removed', {
+  kind = 'task',
+  identifier = 'interleaved-removed',
+  event = 'completed',
+  label = '[agent] Removed before replay',
+  status = 'completed',
+  actor_message = true,
+})
+buffers.remove_timeline('reviewer', 'task:interleaved-removed')
+local deferred_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(not deferred_text:find('[task][interleaved] completed', 1, true))
+assert(not deferred_text:find('[task][interleaved-failed] failed', 1, true))
+assert(not deferred_text:find('[task][interleaved-cancelled] cancelled', 1, true))
+assert(not deferred_text:find('[tool][interleaved-updated]', 1, true))
+fake_now = fake_now + 60
 buffers.append_conversation_delta('reviewer', 'interleaved-message', ' After task.')
 buffers.complete_conversation('reviewer', 'interleaved-message', 'Before task.After task.')
 local interleaved_text = table.concat(
@@ -295,14 +331,23 @@ local task_failed = assert(interleaved_text:find('[task][interleaved-failed] fai
 local task_cancelled = assert(
   interleaved_text:find('[task][interleaved-cancelled] cancelled', 1, true)
 )
-local after_task = assert(interleaved_text:find('After task.', task_cancelled, true))
-assert(before_task < task_completed)
+local tool_updated = assert(
+  interleaved_text:find('[tool][interleaved-updated] failed · Updated tool result', 1, true)
+)
+local after_task = assert(interleaved_text:find('After task.', before_task, true))
+assert(before_task < after_task)
+assert(after_task < task_completed)
 assert(task_completed < task_failed)
 assert(task_failed < task_cancelled)
-assert(task_cancelled < after_task)
+assert(task_cancelled < tool_updated)
 assert(not interleaved_text:find('Task resultAfter task.', 1, true))
-assert(interleaved_text:find('\n   After task.', task_cancelled, true))
-assert(not interleaved_text:find('\n    After task.', task_cancelled, true))
+assert(interleaved_text:find('Before task. After task.', before_task, true))
+assert(not interleaved_text:find('Initial tool result', 1, true))
+assert(not interleaved_text:find('[task][interleaved-removed]', 1, true))
+local deferred_task_header = assert(
+  interleaved_text:find('🧑‍💻 Task · ' .. deferred_timestamp, after_task, true)
+)
+assert(deferred_task_header < task_completed)
 local task_message_marks = vim.api.nvim_buf_get_extmarks(
   member.views.conversation.buf,
   vim.api.nvim_get_namespaces().native_copilot_timeline,

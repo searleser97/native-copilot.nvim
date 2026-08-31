@@ -134,3 +134,53 @@ become absorbed into the active Copilot message.
 - Multiple task messages can arrive during one streamed response without duplication.
 - Automated tests cover task completion, failure, and cancellation during streaming.
 - A real configured `ai` test confirms the visible interleaving behavior.
+
+### NC-009: Defer terminal actor messages until Copilot finishes
+
+**Status:** In progress
+
+Do not insert full Task or Tool participant messages into the middle of an actively streaming
+Copilot response. Queue those asynchronous terminal messages and render them immediately after the
+current Copilot message completes. Scheduler events retain their immediate delivery behavior
+because they can introduce a new scheduled user turn.
+
+**Acceptance criteria**
+
+- A terminal actor event received during streaming is retained without appearing inside the
+  partial Copilot text.
+- Copilot finishes its response without a task message splitting a sentence, word, list item, or
+  Markdown block.
+- Deferred actor messages render immediately after response completion in their original arrival
+  order and retain their original event timestamps.
+- Multiple completion, failure, and cancellation events are not duplicated or lost.
+- Events received while no Copilot response is active continue to render immediately.
+- Automated and real configured `ai` tests cover the deferred rendering behavior.
+
+### NC-010: Use a distinct purple Task message background
+
+**Status:** Pending
+
+Replace the current Task participant background with a clearly purple treatment that remains
+distinct from the user-message background while adapting to light and dark color schemes.
+
+**Acceptance criteria**
+
+- Task participant messages are visibly purple rather than resembling the user-message background.
+- The Task header, status row, timestamp, and result text remain readable.
+- The treatment remains distinct in both light and dark themes.
+- User, Copilot, and Task message backgrounds cannot be confused at a glance.
+- Automated and visible UI tests cover the resulting colors.
+
+### NC-011: Evaluate emoji-only participant headers
+
+**Status:** Pending
+
+Consider removing the `You`, `Copilot`, and `Task` text labels from conversation headers because
+the existing `👨`, `🤖`, and `🧑‍💻` emojis may already identify each participant clearly.
+
+**Acceptance criteria**
+
+- Compare emoji-only headers against the current emoji-plus-label format.
+- Preserve timestamps, accessibility, scanability, and unambiguous actor identity.
+- Ensure Scheduler and Tool participant headers remain coherent with the chosen format.
+- Update all rendering and tests only after the preferred design is confirmed.
