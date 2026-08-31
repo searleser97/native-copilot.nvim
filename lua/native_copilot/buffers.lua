@@ -193,6 +193,7 @@ local function create_buffer(name, member_id, view_id)
     response_active = false,
     response_line_start = true,
     response_resume_after_actor = false,
+    response_has_owned_timeline = false,
     awaiting_response = nil,
     message_heading = nil,
     writing_generation = 0,
@@ -924,6 +925,9 @@ function M.upsert_timeline(member_id, item_id, item)
   record.created_at = record.created_at or now
   record.item = vim.deepcopy(item)
   record.item.id = item_id
+  if item.copilot_owned and view.response_active then
+    view.response_has_owned_timeline = true
+  end
   if item.actor_message then
     highlight_header(view.buf, start_row, lines[1], 'NativeCopilotActorHeader')
   end
@@ -1172,7 +1176,7 @@ end
 
 function M.begin_response(member_id, response_id)
   local view = M.ensure_member(member_id).views.conversation
-  if view.awaiting_response or view.active_message then return end
+  if view.response_active or view.awaiting_response or view.active_message then return end
   begin_response(view, response_id)
 end
 
@@ -1225,6 +1229,7 @@ function M.fail_response(member_id, detail)
   view.response_active = false
   view.response_line_start = true
   view.response_resume_after_actor = false
+  view.response_has_owned_timeline = false
   view.streaming = false
   flush_deferred_timeline(member_id, view)
   finalize_render(view)
@@ -1252,6 +1257,7 @@ function M.complete_conversation(member_id, message_id, content)
   view.active_message = nil
   view.response_line_start = true
   view.response_resume_after_actor = false
+  view.response_has_owned_timeline = false
   view.last_block_kind = 'message'
   flush_deferred_timeline(member_id, view)
 end
@@ -1265,7 +1271,10 @@ function M.finish_response(member_id)
     return
   end
   flush(view)
-  if view.awaiting_response and not view.active_message then
+  if view.awaiting_response
+    and not view.active_message
+    and not view.response_has_owned_timeline
+  then
     remove_message_heading(view)
   else
     touch_message_heading(view, 'completed')
@@ -1275,6 +1284,7 @@ function M.finish_response(member_id)
   view.response_active = false
   view.response_line_start = true
   view.response_resume_after_actor = false
+  view.response_has_owned_timeline = false
   view.streaming = false
   flush_deferred_timeline(member_id, view)
   finalize_render(view)

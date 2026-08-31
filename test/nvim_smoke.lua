@@ -223,6 +223,7 @@ local _, count = text:gsub('The implementation looks correct%.', '')
 assert(count == 1, 'stream final message was duplicated')
 local _, reasoning_count = text:gsub('Checking the implementation%.', '')
 assert(reasoning_count == 1, 'stream final reasoning was duplicated')
+buffers.finish_response('reviewer')
 
 fake_now = os.time({ year = 2026, month = 8, day = 27, hour = 0, min = 0, sec = 5 })
 local _, headings_before_tool_turn = text:gsub('BOT ·', '')

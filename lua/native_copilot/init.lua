@@ -742,6 +742,9 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       })
     end
   else
+    if not item.async then
+      buffers.begin_response(member_id, 'tool:' .. tostring(call_id))
+    end
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
       identifier = call_id,
@@ -749,6 +752,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       status = status,
       detail = tool_timeline_detail(item.name, item.details.arguments, status),
       actor_message = item.async and terminal,
+      copilot_owned = not item.async,
       details = item.details,
     })
   end

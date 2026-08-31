@@ -207,6 +207,75 @@ assert(
 )
 assert(runtime_turn_text:find('Before the tool.', 1, true))
 assert(runtime_turn_text:find('After the tool.', 1, true))
+buffers.upsert_timeline('orphan-tool', 'task:completed', {
+  kind = 'task',
+  identifier = '3',
+  event = 'completed',
+  label = '[shell] Wait 5 seconds in background',
+  status = 'completed',
+  detail = 'completed',
+  actor_message = true,
+})
+fleet._on_event({
+  v = 1,
+  id = 'orphan-tool-start',
+  type = 'activity.event',
+  memberId = 'orphan-tool',
+  payload = {
+    eventType = 'tool.execution_start',
+    data = {
+      toolCallId = 'orphan-read',
+      toolName = 'read_powershell',
+      arguments = { shellId = '3' },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'orphan-tool-complete',
+  type = 'activity.event',
+  memberId = 'orphan-tool',
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = { toolCallId = 'orphan-read', success = true },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'orphan-tool-busy',
+  type = 'member.state',
+  memberId = 'orphan-tool',
+  payload = { state = 'busy', turnId = 'orphan-tool-turn' },
+})
+fleet._on_event({
+  v = 1,
+  id = 'orphan-tool-message',
+  type = 'conversation.message',
+  memberId = 'orphan-tool',
+  payload = { messageId = 'orphan-tool-message', content = 'Timer complete.' },
+})
+fleet._on_event({
+  v = 1,
+  id = 'orphan-tool-idle',
+  type = 'member.foreground_idle',
+  memberId = 'orphan-tool',
+  payload = {},
+})
+local orphan_tool_buf = buffers.buffer('orphan-tool', 'conversation')
+local orphan_tool_text = buffer_text(orphan_tool_buf)
+local orphan_task_header = assert(orphan_tool_text:find('📝 · ', 1, true))
+local orphan_copilot_header = assert(orphan_tool_text:find('🤖 · ', orphan_task_header, true))
+local orphan_tool_row = assert(
+  orphan_tool_text:find('[tool][orphan-read] read_powershell', orphan_copilot_header, true)
+)
+local orphan_reply = assert(orphan_tool_text:find('Timer complete.', orphan_tool_row, true))
+assert(orphan_task_header < orphan_copilot_header)
+assert(orphan_copilot_header < orphan_tool_row)
+assert(orphan_tool_row < orphan_reply)
+assert(
+  line_count_with(orphan_tool_buf, '🤖 ·') == 1,
+  'foreground Tool event created duplicate Copilot headings'
+)
 local timeline_text = buffer_text(coordinator_buf)
 assert(
   timeline_text:find(
@@ -1308,6 +1377,13 @@ fleet._on_event({
     },
   },
 })
+fleet._on_event({
+  v = 1,
+  id = 'intervening-tools-idle',
+  type = 'member.foreground_idle',
+  memberId = 'observer',
+  payload = {},
+})
 assert(
   line_with(observer_buf, '[task] starting') == async_tool_start_row,
   'successful async shell launch created a separate completion row'
@@ -1609,6 +1685,13 @@ fleet._on_event({
       error = { message = 'Command exited with code 1' },
     },
   },
+})
+fleet._on_event({
+  v = 1,
+  id = 'tool-failed-idle',
+  type = 'member.foreground_idle',
+  memberId = 'observer',
+  payload = {},
 })
 assert(
   buffer_text(observer_buf):find('🔴 [tool][tool-call-2] powershell — failed', 1, true),
