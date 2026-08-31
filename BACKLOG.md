@@ -124,6 +124,8 @@ Validate and, if necessary, fix task participant messages that arrive while Copi
 streaming a response. The asynchronous event must not corrupt, split incorrectly, reorder, or
 become absorbed into the active Copilot message.
 
+This immediate-interleaving behavior was later superseded by NC-009.
+
 **Acceptance criteria**
 
 - A task terminal message arriving during an active Copilot response is rendered immediately and
@@ -137,7 +139,7 @@ become absorbed into the active Copilot message.
 
 ### NC-009: Defer terminal actor messages until Copilot finishes
 
-**Status:** In progress
+**Status:** Completed
 
 Do not insert full Task or Tool participant messages into the middle of an actively streaming
 Copilot response. Queue those asynchronous terminal messages and render them immediately after the
