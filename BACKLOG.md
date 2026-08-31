@@ -54,3 +54,16 @@ block instead of appearing after the first user message.
 - Every startup environment row appears before the first user heading.
 - A late MCP connection is inserted after the existing environment rows.
 - Updating an existing environment component does not duplicate or move its row.
+
+### NC-004: Remove actor emoji from compact task rows
+
+**Status:** Pending
+
+Compact task rows should use their status indicator and `[task #T-...]` identifier without also
+displaying the actor emoji. Keep the emoji on full `Task` participant headers.
+
+**Acceptance criteria**
+
+- Compact task start rows do not include the actor emoji.
+- Full task completion, failure, and cancellation participant headers retain the Task actor emoji.
+- Task status indicators and correlation identifiers remain unchanged.
