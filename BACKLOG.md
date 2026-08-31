@@ -85,3 +85,52 @@ event labels with Markdown `**` markers.
 - Lifecycle event labels are not wrapped in Markdown bold markers.
 - Start and terminal events display the same runtime identifier.
 - Detail lookup and lifecycle correlation continue to work for every supported event type.
+
+### NC-006: Distinguish compact lifecycle rows without blockquotes
+
+**Status:** Completed
+
+Remove the `>` blockquote marker from compact tool and task lifecycle rows. Highlight the complete
+row with the same foreground color used by the `Task` participant header instead.
+
+**Acceptance criteria**
+
+- Compact task and tool rows retain their existing indentation without a `>` marker.
+- The complete compact row uses `NativeCopilotActorHeader`, including the end of the line.
+- Environment, permission, and schedule row presentation remains unchanged.
+
+### NC-007: Add Task-colored backgrounds to task participant messages
+
+**Status:** Pending
+
+Give full `Task` participant messages a background derived from the current foreground color of the
+Task header. The background should visually group the header, lifecycle row, and task result while
+remaining readable across color schemes.
+
+**Acceptance criteria**
+
+- Resolve the active `NativeCopilotActorHeader` color after setup and every `ColorScheme` change.
+- Derive a readable background rather than hard-coding a theme-specific color.
+- Apply the background to the complete Task participant message without affecting adjacent chat
+  content.
+- Preserve readable status indicators, task output, and timestamps in light and dark themes.
+- Add automated and visible UI coverage.
+
+### NC-008: Safely interleave task messages with streaming Copilot responses
+
+**Status:** Pending
+
+Validate and, if necessary, fix task participant messages that arrive while Copilot is still
+streaming a response. The asynchronous event must not corrupt, split incorrectly, reorder, or
+become absorbed into the active Copilot message.
+
+**Acceptance criteria**
+
+- A task terminal message arriving during an active Copilot response is rendered immediately and
+  remains a separate participant message.
+- Subsequent Copilot deltas continue in the correct response block without overwriting or moving
+  the task message.
+- Finalizing the Copilot response preserves chronological event order and spacing.
+- Multiple task messages can arrive during one streamed response without duplication.
+- Automated tests cover task completion, failure, and cancellation during streaming.
+- A real configured `ai` test confirms the visible interleaving behavior.
