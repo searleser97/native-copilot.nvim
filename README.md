@@ -489,13 +489,41 @@ The native source remains the default and does not load blink. With the blink fr
 
 stdin closure, parent-process loss, `SIGINT`, and `SIGTERM` trigger the same bounded cleanup. If graceful SDK shutdown exceeds four seconds, the host calls `forceStop()`.
 
-## Development
+## Testing
+
+The supported test workflow is visible UI E2E. It launches a maximized WezTerm window with a real
+Neovim instance, plugin Lua, Node host, NDJSON protocol, SQLite database, prompt buffer, and
+conversation rendering. Copilot replies, MCP initialization, permissions, Tasks, and Tool events
+are scripted at the runtime boundary so scenarios remain fast and deterministic.
+
+Prerequisites:
+
+- Node.js matching `package.json`
+- PowerShell 7 (`pwsh`)
+- WezTerm
+- Neovim available as `nvim`
+
+Run the complete visible matrix:
 
 ```powershell
-npm run check
 npm test
-npm run build
 ```
+
+Run one launch profile while developing:
+
+```powershell
+npm run test:e2e:allow-all
+npm run test:e2e:allow-all-mcp
+npm run test:e2e:manual-permissions
+```
+
+Each profile opens an independent visible window, drives prompts through the real prompt mapping,
+writes assertions and conversation snapshots under `.e2e-artifacts\`, and closes immediately when
+the scenario finishes. `allow-all` omits MCP servers, `allow-all-mcp` renders connected and failed
+mock servers, and `manual-permissions` exercises the interactive approval picker.
+
+`npm run check` remains available for a TypeScript-only compile check, and `npm run build` emits the
+Node host required by the visible suite. Neither command replaces the visible E2E matrix.
 
 The host’s stdout is protocol-only NDJSON. Diagnostics are written to stderr; Neovim appends them to:
 

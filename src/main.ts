@@ -6,11 +6,14 @@ import { argv, env, exit, kill, ppid, stderr } from "node:process";
 import { FleetDatabase } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
 import { CopilotRuntime, resolveRuntimeCommand } from "./runtime.js";
+import type { RuntimeAdapter } from "./runtime-adapter.js";
+import { ScriptedRuntime } from "./scripted-runtime.js";
 import { PROTOCOL_VERSION, type DynamicAgentDefinition, type DynamicFleetDefinition } from "./types.js";
 
 interface HostOptions {
   databasePath: string;
   runtimeCommandResolver: string | undefined;
+  scriptedProfile: string | undefined;
   workspace: string;
 }
 
@@ -36,6 +39,7 @@ function hostOptions(): HostOptions {
         resolve(dataRoot, "native-copilot", "state.sqlite"),
     ),
     runtimeCommandResolver: env.NATIVE_COPILOT_RUNTIME_COMMAND_RESOLVER,
+    scriptedProfile: env.NATIVE_COPILOT_E2E_PROFILE,
   };
 }
 
@@ -60,10 +64,9 @@ function requiredString(
 
 async function main(): Promise<void> {
   const options = hostOptions();
-  const runtimeCommand = await resolveRuntimeCommand(
-    options.runtimeCommandResolver,
-    options.workspace,
-  );
+  const runtimeCommand = options.scriptedProfile
+    ? undefined
+    : await resolveRuntimeCommand(options.runtimeCommandResolver, options.workspace);
   const db = new FleetDatabase(options.databasePath);
   const interruptedRuns = db.markInterruptedWork(
     "Owning Neovim host is no longer running",
@@ -76,7 +79,7 @@ async function main(): Promise<void> {
       }
     },
   );
-  let runtime: CopilotRuntime;
+  let runtime: RuntimeAdapter;
   let protocol: Protocol;
   let closing: Promise<void> | undefined;
 
@@ -430,14 +433,19 @@ async function main(): Promise<void> {
     await close("stdin closed");
     exit(0);
   });
-  runtime = new CopilotRuntime(
-    options.workspace,
-    db,
-    (type, payload, fields) => {
-      protocol.send(type, payload, fields);
-    },
-    runtimeCommand,
-  );
+  const emit = (type: string, payload?: unknown, fields?: {
+    requestId?: string;
+    runId?: string;
+    memberId?: string;
+    target?: string;
+    sequence?: number;
+    done?: boolean;
+  }) => {
+    protocol.send(type, payload, fields);
+  };
+  runtime = options.scriptedProfile
+    ? new ScriptedRuntime(options.workspace, db, emit, options.scriptedProfile)
+    : new CopilotRuntime(options.workspace, db, emit, runtimeCommand);
 
   const parentMonitor = setInterval(() => {
     try {

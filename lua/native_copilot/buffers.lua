@@ -1241,6 +1241,13 @@ function M.complete_conversation(member_id, message_id, content)
   if view.awaiting_response and content == '' then
     return
   elseif view.awaiting_response then
+    if
+      view.last_block_kind == 'activity'
+      or view.last_block_kind == 'timeline'
+      or view.last_block_kind == 'actor_message'
+    then
+      prepare_pending_block(view, 1)
+    end
     append(view, indent_response_delta(view, content) .. '\n', true)
     view.awaiting_response = nil
     touch_message_heading(view, 'completed')

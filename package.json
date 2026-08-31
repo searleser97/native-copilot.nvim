@@ -10,10 +10,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "smoke:sdk": "node scripts/sdk-smoke.mjs",
-    "test": "vitest run",
-    "test:nvim": "node scripts/nvim-smoke.mjs",
-    "test:watch": "vitest"
+    "test": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1",
+    "test:e2e": "npm run test",
+    "test:e2e:allow-all": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all",
+    "test:e2e:allow-all-mcp": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all-mcp",
+    "test:e2e:manual-permissions": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile manual-permissions"
   },
   "dependencies": {
     "@github/copilot-sdk": "1.0.11",
@@ -21,7 +22,6 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.16"
+    "typescript": "^5.9.3"
   }
 }

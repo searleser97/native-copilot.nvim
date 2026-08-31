@@ -1320,12 +1320,12 @@ local function close_non_prompt_windows()
   return keep
 end
 
-local function ensure_ui()
+local function ensure_ui(reuse_current_tab)
   if is_ui_open() then
     vim.api.nvim_set_current_tabpage(state.tab)
     return
   end
-  vim.cmd('tabnew')
+  if not reuse_current_tab then vim.cmd('tabnew') end
   state.tab = vim.api.nvim_get_current_tabpage()
   state.main_win = vim.api.nvim_get_current_win()
   local entry = ensure_member(state.selected, state.selected == 'standard' and 'Copilot' or nil)
@@ -1350,9 +1350,9 @@ local function start_host()
   }, M._on_event)
 end
 
-function M.open()
+function M.open(open_options)
   if not start_host() then return end
-  ensure_ui()
+  ensure_ui(type(open_options) == 'table' and open_options.reuse_current_tab == true)
   send('hello')
   if state.mode == 'stopped' then send('mode.standard') end
 end
