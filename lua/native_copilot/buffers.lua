@@ -11,7 +11,7 @@ local status_symbols = {
   unknown = '❓',
 }
 local actor_symbols = {
-  task = '🧑‍💻',
+  task = '📝',
   schedule = '⏰',
 }
 local actor_option_names = {
@@ -37,7 +37,7 @@ local options = {
   conversation = {
     user_label = '👨',
     copilot_label = '🤖',
-    task_label = '🧑‍💻',
+    task_label = '📝',
     tool_label = '🛠️ Tool',
     scheduler_label = '⏰ Scheduler',
     day_header_format = '%A, %B %d',

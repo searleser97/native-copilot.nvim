@@ -217,7 +217,7 @@ assert(
 )
 assert(
   timeline_text:find(
-    '🧑‍💻 · ',
+    '📝 · ',
     1,
     true
   )
@@ -300,7 +300,7 @@ end
 assert(failed_task_row and failed_task_row > running_task_row, 'task failure was not chronological')
 assert(
   buffer_text(coordinator_buf):find(
-    '🧑‍💻 · ',
+    '📝 · ',
     1,
     true
   )
@@ -313,7 +313,7 @@ assert(
 )
 assert(
   buffer_text(coordinator_buf):match(
-    '🧑‍💻 · %d%d:%d%d:%d%d\n\n'
+    '📝 · %d%d:%d%d:%d%d\n\n'
       .. '   🔴 %[task%]%[agent%-running%] failed · %[agent%] Review implementation'
   ),
   'failed task actor message did not use one blank line after its header'
@@ -1384,7 +1384,7 @@ assert(async_task_complete_row > async_task_started_row, 'task completion was no
 assert(line_count_with(observer_buf, '[task][async-shell]') == 2)
 assert(
   buffer_text(observer_buf):match(
-    '🧑‍💻 · %d%d:%d%d:%d%d\n\n'
+    '📝 · %d%d:%d%d:%d%d\n\n'
       .. '   🟢 %[task%]%[async%-shell%] completed · %[shell%] Sleep for 90 seconds'
   ),
   'async task completion did not render as a participant message'

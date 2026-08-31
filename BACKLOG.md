@@ -12,7 +12,7 @@ the conversation rather than mutable status rows whose original event time and s
 **Target behavior**
 
 - Emit a separate row for each meaningful lifecycle event: started, completed, failed, or cancelled.
-- Prefix full task participant messages with `🧑‍💻` and schedule messages with `⏰`.
+- Prefix full task participant messages with `📝` and schedule messages with `⏰`.
 - Represent asynchronous shell launches as task lifecycle rows instead of redundant tool
   completion messages.
 - Include the same short identifier on every event for one task, schedule, or asynchronous tool.
@@ -178,7 +178,7 @@ distinct from the user-message background while adapting to light and dark color
 **Status:** Completed
 
 Consider removing the `You`, `Copilot`, and `Task` text labels from conversation headers because
-the existing `👨`, `🤖`, and `🧑‍💻` emojis may already identify each participant clearly.
+the existing `👨`, `🤖`, and `📝` emojis may already identify each participant clearly.
 
 The selected design uses emoji-only defaults for You, Copilot, and Task. Tool and Scheduler retain
 text labels for operational clarity, and every participant heading remains configurable.

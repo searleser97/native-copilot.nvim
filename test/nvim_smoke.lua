@@ -353,7 +353,7 @@ assert(interleaved_text:find('Before task. After task.', before_task, true))
 assert(not interleaved_text:find('Initial tool result', 1, true))
 assert(not interleaved_text:find('[task][interleaved-removed]', 1, true))
 local deferred_task_header = assert(
-  interleaved_text:find('🧑‍💻 · ' .. deferred_timestamp, after_task, true)
+  interleaved_text:find('📝 · ' .. deferred_timestamp, after_task, true)
 )
 assert(deferred_task_header < task_completed)
 local task_message_marks = vim.api.nvim_buf_get_extmarks(

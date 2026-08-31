@@ -52,7 +52,7 @@ require("native_copilot").setup({
   conversation = {
     user_label = '👨',
     copilot_label = '🤖',
-    task_label = '🧑‍💻',
+    task_label = '📝',
     tool_label = '🛠️ Tool',
     scheduler_label = '⏰ Scheduler',
     day_header_format = '%A, %B %d',
@@ -341,7 +341,7 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 ## Rendering and observability
 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
-renderer dependency. User, Copilot, and Task turns default to emoji-only `👨`, `🤖`, and `🧑‍💻`
+renderer dependency. User, Copilot, and Task turns default to emoji-only `👨`, `🤖`, and `📝`
 headers, without a redundant document title. Their labels, along with Tool and Scheduler headings,
 are configurable through `conversation` setup options. Inline
 reasoning remains part of each conversation buffer as unlabeled text using Neovim's `Comment`
