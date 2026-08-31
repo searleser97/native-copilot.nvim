@@ -187,6 +187,7 @@ local function create_buffer(name, member_id, view_id)
     active_message = nil,
     response_active = false,
     response_line_start = true,
+    response_resume_after_actor = false,
     awaiting_response = nil,
     message_heading = nil,
     writing_generation = 0,
@@ -862,6 +863,8 @@ function M.upsert_timeline(member_id, item_id, item)
       end)
       view.last_block_kind = item.actor_message and 'actor_message' or 'timeline'
       if item.actor_message and view.response_active then
+        view.response_resume_after_actor =
+          view.response_resume_after_actor or not view.response_line_start
         view.response_line_start = true
       end
     end
@@ -1067,6 +1070,7 @@ local function begin_response(view, response_id)
   stop_writing_animation(view)
   view.writing_step = 1
   view.response_line_start = true
+  view.response_resume_after_actor = false
   append(
     view,
     ('%s · writing.\n\n'):format(
@@ -1152,6 +1156,10 @@ function M.append_conversation_delta(member_id, message_id, content)
   then
     prepare_pending_block(view, 1)
   end
+  if view.response_resume_after_actor then
+    content = content:gsub('^[ \t]+', '')
+    if content ~= '' then view.response_resume_after_actor = false end
+  end
   append(view, indent_response_delta(view, content), false)
   view.last_block_kind = 'message'
 end
@@ -1165,6 +1173,7 @@ function M.fail_response(member_id, detail)
   view.active_message = nil
   view.response_active = false
   view.response_line_start = true
+  view.response_resume_after_actor = false
   view.streaming = false
   finalize_render(view)
 end
@@ -1190,6 +1199,7 @@ function M.complete_conversation(member_id, message_id, content)
   end
   view.active_message = nil
   view.response_line_start = true
+  view.response_resume_after_actor = false
   view.last_block_kind = 'message'
 end
 
@@ -1211,6 +1221,7 @@ function M.finish_response(member_id)
   view.active_message = nil
   view.response_active = false
   view.response_line_start = true
+  view.response_resume_after_actor = false
   view.streaming = false
   finalize_render(view)
 end

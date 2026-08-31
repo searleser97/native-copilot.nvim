@@ -283,7 +283,7 @@ buffers.upsert_timeline('reviewer', 'task:interleaved-cancelled', {
   status = 'cancelled',
   actor_message = true,
 })
-buffers.append_conversation_delta('reviewer', 'interleaved-message', 'After task.')
+buffers.append_conversation_delta('reviewer', 'interleaved-message', ' After task.')
 buffers.complete_conversation('reviewer', 'interleaved-message', 'Before task.After task.')
 local interleaved_text = table.concat(
   vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
@@ -301,6 +301,8 @@ assert(task_completed < task_failed)
 assert(task_failed < task_cancelled)
 assert(task_cancelled < after_task)
 assert(not interleaved_text:find('Task resultAfter task.', 1, true))
+assert(interleaved_text:find('\n   After task.', task_cancelled, true))
+assert(not interleaved_text:find('\n    After task.', task_cancelled, true))
 local task_message_marks = vim.api.nvim_buf_get_extmarks(
   member.views.conversation.buf,
   vim.api.nvim_get_namespaces().native_copilot_timeline,
