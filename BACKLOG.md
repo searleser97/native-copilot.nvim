@@ -175,10 +175,13 @@ distinct from the user-message background while adapting to light and dark color
 
 ### NC-011: Evaluate emoji-only participant headers
 
-**Status:** Pending
+**Status:** Completed
 
 Consider removing the `You`, `Copilot`, and `Task` text labels from conversation headers because
 the existing `👨`, `🤖`, and `🧑‍💻` emojis may already identify each participant clearly.
+
+The selected design uses emoji-only defaults for You, Copilot, and Task. Tool and Scheduler retain
+text labels for operational clarity, and every participant heading remains configurable.
 
 **Acceptance criteria**
 
