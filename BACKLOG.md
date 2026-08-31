@@ -67,3 +67,17 @@ displaying the actor emoji. Keep the emoji on full `Task` participant headers.
 - Compact task start rows do not include the actor emoji.
 - Full task completion, failure, and cancellation participant headers retain the Task actor emoji.
 - Task status indicators and correlation identifiers remain unchanged.
+
+### NC-005: Simplify task correlation labels
+
+**Status:** Pending
+
+Render task correlation as `[task][<task-id>]` instead of embedding a shortened, prefixed
+identifier such as `[task #T-0]`. Use the runtime task ID directly.
+
+**Acceptance criteria**
+
+- Task rows render identifiers in the form `[task][0]`.
+- The synthetic `#T-` prefix is removed.
+- Start and terminal events for one task display the same runtime task ID.
+- Task detail lookup and lifecycle correlation continue to work.
