@@ -634,7 +634,9 @@ local function timeline_lines(item, now)
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   local prefix = kind == 'environment' and '>' or quote_indent
-  local identifier = item.identifier and (' #' .. tostring(item.identifier)) or ''
+  local identity = item.identifier ~= nil
+      and ('[%s][%s]'):format(kind, tostring(item.identifier):gsub('[\r\n]+', ' '))
+    or ('[%s]'):format(kind)
   local event = item.event and (tostring(item.event) .. ' · ') or ''
   if item.actor_message then
     local actor = item.actor or (kind == 'tool' and '🛠️' or actor_symbols[kind]) or '💬'
@@ -642,26 +644,24 @@ local function timeline_lines(item, now)
     return {
       ('%s %s · %s'):format(actor, actor_label, timestamp(now)),
       '',
-      ('%s%s **[%s%s] %s%s**%s'):format(
+      ('%s%s %s %s%s%s'):format(
         content_indent,
         status_symbols[status] or status_symbols.unknown,
-        kind,
-        identifier,
+        identity,
         event,
         label,
         suffix
       ),
     }
   end
-  local actor = item.actor or actor_symbols[kind]
+  local actor = item.actor or (kind ~= 'task' and actor_symbols[kind] or nil)
   local actor_prefix = actor and (actor .. ' ') or ''
   return {
-    ('%s %s%s **[%s%s] %s%s**%s · %s'):format(
+    ('%s %s%s %s %s%s%s · %s'):format(
       prefix,
       actor_prefix,
       status_symbols[status] or status_symbols.unknown,
-      kind,
-      identifier,
+      identity,
       event,
       label,
       suffix,
@@ -670,11 +670,19 @@ local function timeline_lines(item, now)
   }
 end
 
+local function line_has_timeline_label(line, kind, label)
+  local marker = ('[%s] %s'):format(kind, label)
+  local start = line:find(marker, 1, true)
+  if not start then return false end
+  local suffix = line:sub(start + #marker)
+  return suffix == '' or suffix:find(' —', 1, true) == 1 or suffix:find(' ·', 1, true) == 1
+end
+
 local function environment_insert_row(view)
   local lines = vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)
   local last_environment
   for index, line in ipairs(lines) do
-    if line:find('**[environment] ', 1, true) then
+    if line:find('[environment] ', 1, true) then
       last_environment = index - 1
     end
   end
@@ -733,10 +741,11 @@ end
 
 local function reconcile_environment_rows(view, item)
   if item.kind ~= 'environment' then return nil end
-  local marker = ('**[environment] %s**'):format(item.label)
   local rows = {}
   for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
-    if line:find(marker, 1, true) then table.insert(rows, index - 1) end
+    if line_has_timeline_label(line, 'environment', item.label) then
+      table.insert(rows, index - 1)
+    end
   end
   if #rows == 0 then return nil end
 
@@ -855,10 +864,11 @@ function M.remove_timeline(member_id, item_id)
     { details = true }
   )
   if record.item and record.item.kind == 'environment' then
-    local marker = ('**[environment] %s**'):format(record.item.label)
     local rows = {}
     for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
-      if line:find(marker, 1, true) then table.insert(rows, index - 1) end
+      if line_has_timeline_label(line, 'environment', record.item.label) then
+        table.insert(rows, index - 1)
+      end
     end
     for index = #rows, 1, -1 do
       with_modifiable(view.buf, function()

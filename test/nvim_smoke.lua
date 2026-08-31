@@ -216,7 +216,7 @@ local header_tool_text = table.concat(
   '\n'
 )
 assert(
-  header_tool_text:find('BOT · writing.\n\n   > 🟢 **[tool] search**', 1, true),
+  header_tool_text:find('BOT · writing.\n\n   > 🟢 [tool] search', 1, true),
   'timeline row after the Copilot heading did not keep exactly one empty row'
 )
 assert(
@@ -226,7 +226,7 @@ assert(
 local actor_spacing = buffers.ensure_member('actor-spacing', 'Actor spacing')
 buffers.upsert_timeline('actor-spacing', 'task:completed', {
   kind = 'task',
-  identifier = 'T-spacing',
+  identifier = 'spacing',
   event = 'completed',
   label = '[agent] Review spacing',
   status = 'completed',
@@ -234,7 +234,7 @@ buffers.upsert_timeline('actor-spacing', 'task:completed', {
 })
 buffers.upsert_timeline('actor-spacing', 'schedule:created', {
   kind = 'schedule',
-  identifier = 'S-spacing',
+  identifier = 'spacing',
   event = 'created',
   label = 'every 600s',
   status = 'completed',
@@ -245,8 +245,8 @@ local actor_spacing_text = table.concat(
 )
 assert(
   actor_spacing_text:find(
-    '   🟢 **[task #T-spacing] completed · [agent] Review spacing**\n\n'
-      .. '   > ⏰ 🟢 **[schedule #S-spacing] created · every 600s**',
+    '   🟢 [task][spacing] completed · [agent] Review spacing\n\n'
+      .. '   > ⏰ 🟢 [schedule][spacing] created · every 600s',
     1,
     true
   ),
@@ -254,7 +254,7 @@ assert(
 )
 assert(
   not actor_spacing_text:find(
-    '   🟢 **[task #T-spacing] completed · [agent] Review spacing**\n\n\n',
+    '   🟢 [task][spacing] completed · [agent] Review spacing\n\n\n',
     1,
     true
   ),
@@ -489,8 +489,39 @@ local mcp_text = table.concat(
   '\n'
 )
 assert(mcp_text:match(
-  '> 🟢 %*%*%[environment%] MCP myenghub%*%* — connected · %d%d:%d%d:%d%d'
+  '> 🟢 %[environment%] MCP myenghub — connected · %d%d:%d%d:%d%d'
 ))
+buffers.upsert_timeline('reviewer', 'environment:MCP git', {
+  kind = 'environment',
+  label = 'MCP git',
+  status = 'running',
+  detail = 'pending',
+})
+buffers.upsert_timeline('reviewer', 'environment:MCP github', {
+  kind = 'environment',
+  label = 'MCP github',
+  status = 'completed',
+  detail = 'connected',
+})
+buffers.upsert_timeline('reviewer', 'environment:MCP git', {
+  kind = 'environment',
+  label = 'MCP git',
+  status = 'failed',
+  detail = 'failed',
+})
+local prefix_environment_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(prefix_environment_text:find('[environment] MCP git — failed', 1, true))
+assert(prefix_environment_text:find('[environment] MCP github — connected', 1, true))
+buffers.remove_timeline('reviewer', 'environment:MCP git')
+prefix_environment_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(not prefix_environment_text:find('[environment] MCP git — failed', 1, true))
+assert(prefix_environment_text:find('[environment] MCP github — connected', 1, true))
 buffers.upsert_timeline('reviewer', 'task:stable', {
   kind = 'task',
   label = '[shell] Wait 2 minutes',
@@ -627,7 +658,7 @@ vim.api.nvim_buf_set_lines(
   mcp_row + 1,
   mcp_row + 1,
   false,
-  { '> 🟡 **[environment] MCP myenghub** — orphaned pending' }
+  { '> 🟡 [environment] MCP myenghub — orphaned pending' }
 )
 vim.bo[member.views.conversation.buf].modifiable = false
 buffers.upsert_timeline('reviewer', 'environment:MCP myenghub', {

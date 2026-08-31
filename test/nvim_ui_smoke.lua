@@ -210,7 +210,7 @@ assert(runtime_turn_text:find('After the tool.', 1, true))
 local timeline_text = buffer_text(coordinator_buf)
 assert(
   timeline_text:find(
-    '🧑‍💻 🟡 **[task #T-agent-runn] started · [agent] Review implementation**',
+    '> 🟢 [task][agent-running] started · [agent] Review implementation',
     1,
     true
   )
@@ -222,7 +222,7 @@ assert(
     true
   )
     and timeline_text:find(
-      '   🟢 **[task #T-shell-comp] completed · [shell] npm test** — All tests passed.',
+      '   🟢 [task][shell-complete] completed · [shell] npm test — All tests passed.',
       1,
       true
     ),
@@ -230,7 +230,7 @@ assert(
 )
 assert(
   timeline_text:find(
-    '   🔴 **[task #T-agent-fail] failed · [agent] Validate deployment**',
+    '   🔴 [task][agent-failed] failed · [agent] Validate deployment',
     1,
     true
   )
@@ -295,7 +295,7 @@ assert(
 )
 local failed_task_row
 for index, line in ipairs(vim.api.nvim_buf_get_lines(coordinator_buf, 0, -1, false)) do
-  if line:find('[task #T-agent-runn] failed', 1, true) then failed_task_row = index end
+  if line:find('[task][agent-running] failed', 1, true) then failed_task_row = index end
 end
 assert(failed_task_row and failed_task_row > running_task_row, 'task failure was not chronological')
 assert(
@@ -305,7 +305,7 @@ assert(
     true
   )
     and buffer_text(coordinator_buf):find(
-      '   🔴 **[task #T-agent-runn] failed · [agent] Review implementation**',
+      '   🔴 [task][agent-running] failed · [agent] Review implementation',
       1,
       true
     ),
@@ -314,7 +314,7 @@ assert(
 assert(
   buffer_text(coordinator_buf):match(
     '🧑‍💻 Task · %d%d:%d%d:%d%d\n\n'
-      .. '   🔴 %*%*%[task #T%-agent%-runn%] failed · %[agent%] Review implementation%*%*'
+      .. '   🔴 %[task%]%[agent%-running%] failed · %[agent%] Review implementation'
   ),
   'failed task actor message did not use one blank line after its header'
 )
@@ -329,7 +329,7 @@ assert(
 )
 assert(
   buffer_text(coordinator_buf):find(
-    '   🔴 **[task #T-agent-runn] failed · [agent] Review implementation**',
+    '   🔴 [task][agent-running] failed · [agent] Review implementation',
     1,
     true
   ),
@@ -377,7 +377,7 @@ fleet._on_event({
 timeline_text = buffer_text(coordinator_buf)
 assert(
   timeline_text:find(
-    '🟡 **[environment] Copilot environment** — Starting runtime and discovering configuration',
+    '🟡 [environment] Copilot environment — Starting runtime and discovering configuration',
     1,
     true
   ),
@@ -402,10 +402,10 @@ local environment_text = table.concat(
   '\n'
 )
 assert(
-  environment_text:find('🟢 **[environment] MCP github** — connected', 1, true)
+  environment_text:find('🟢 [environment] MCP github — connected', 1, true)
 )
 assert(
-  environment_text:find('🔴 **[environment] MCP local** — failed', 1, true)
+  environment_text:find('🔴 [environment] MCP local — failed', 1, true)
 )
 assert(
   environment_text:find('Copilot environment', 1, true),
@@ -422,7 +422,7 @@ fleet._on_event({
 })
 assert(
   buffer_text(coordinator_buf):find(
-    '🟢 **[environment] Copilot environment** — ready',
+    '🟢 [environment] Copilot environment — ready',
     1,
     true
   ),
@@ -434,7 +434,7 @@ vim.api.nvim_buf_set_lines(
   github_mcp_row,
   github_mcp_row,
   false,
-  { '> 🟡 **[environment] MCP github** — orphaned pending' }
+  { '> 🟡 [environment] MCP github — orphaned pending' }
 )
 vim.bo[coordinator_buf].modifiable = false
 assert(line_count_with(coordinator_buf, '[environment] MCP github') == 2)
@@ -447,7 +447,7 @@ fleet._on_event({
     status = 'pending',
   },
 })
-assert(buffer_text(coordinator_buf):find('🟡 **[environment] MCP github** — pending', 1, true))
+assert(buffer_text(coordinator_buf):find('🟡 [environment] MCP github — pending', 1, true))
 assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
 assert(line_count_with(coordinator_buf, '[environment] MCP github') == 1)
 fleet._on_event({
@@ -459,7 +459,7 @@ fleet._on_event({
     status = 'connected',
   },
 })
-assert(buffer_text(coordinator_buf):find('🟢 **[environment] MCP github** — connected', 1, true))
+assert(buffer_text(coordinator_buf):find('🟢 [environment] MCP github — connected', 1, true))
 assert(line_with(coordinator_buf, '[environment] MCP github') == github_mcp_row)
 assert(line_count_with(coordinator_buf, '[environment] MCP github') == 1)
 local task_action_sent = false
@@ -491,7 +491,7 @@ environment_text = table.concat(
   '\n'
 )
 assert(
-  environment_text:find('🔴 **[environment] Skills** — Invalid skill metadata', 1, true),
+  environment_text:find('🔴 [environment] Skills — Invalid skill metadata', 1, true),
   'environment failure is absent from conversation'
 )
 local prompt_buf = vim.fn.bufnr('AI Prompt')
@@ -822,10 +822,10 @@ fleet._on_event({
     prompt = 'Check deployment health',
   },
 })
-local schedule_row = assert(line_with(coordinator_buf, '[schedule #S-7] created'))
+local schedule_row = assert(line_with(coordinator_buf, '[schedule][7] created'))
 assert(
   buffer_text(coordinator_buf):find(
-    '⏰ 🟢 **[schedule #S-7] created · every 300s**',
+    '⏰ 🟢 [schedule][7] created · every 300s',
     1,
     true
   )
@@ -838,12 +838,12 @@ fleet._on_event({
 })
 assert(
   buffer_text(coordinator_buf):find(
-    '⏰ 🟢 **[schedule #S-7] rearmed · every 300s**',
+    '⏰ 🟢 [schedule][7] rearmed · every 300s',
     1,
     true
   )
 )
-assert(line_count_with(coordinator_buf, '[schedule #S-7]') == 2)
+assert(line_count_with(coordinator_buf, '[schedule][7]') == 2)
 vim.api.nvim_set_current_win(coordinator_win)
 vim.api.nvim_win_set_cursor(coordinator_win, { schedule_row, 0 })
 conversation_maps.details.callback()
@@ -875,7 +875,7 @@ assert(
     true
   )
     and buffer_text(coordinator_buf):find(
-      '   🟢 **[schedule #S-7] fired · every 300s**',
+      '   🟢 [schedule][7] fired · every 300s',
       1,
       true
     )
@@ -883,11 +883,11 @@ assert(
 assert(
   buffer_text(coordinator_buf):match(
     '⏰ Scheduler · %d%d:%d%d:%d%d\n\n'
-      .. '   🟢 %*%*%[schedule #S%-7%] fired · every 300s%*%*'
+      .. '   🟢 %[schedule%]%[7%] fired · every 300s'
   ),
   'schedule actor message did not use one blank line after its header'
 )
-local fired_schedule_row = assert(line_with(coordinator_buf, '[schedule #S-7] fired'))
+local fired_schedule_row = assert(line_with(coordinator_buf, '[schedule][7] fired'))
 assert(
   buffers.timeline_item_at_cursor(coordinator_buf, fired_schedule_row - 2).event == 'fired',
   'schedule details were not available from the actor header'
@@ -898,7 +898,7 @@ assert(
 )
 assert(
   buffer_text(coordinator_buf):find(
-    '   🟢 **[schedule #S-7] fired · every 300s**',
+    '   🟢 [schedule][7] fired · every 300s',
     1,
     true
   )
@@ -911,12 +911,12 @@ fleet._on_event({
 })
 assert(
   buffer_text(coordinator_buf):find(
-    '⏰ ⚪ **[schedule #S-7] cancelled · every 300s**',
+    '⏰ ⚪ [schedule][7] cancelled · every 300s',
     1,
     true
   )
 )
-assert(line_count_with(coordinator_buf, '[schedule #S-7]') == 4)
+assert(line_count_with(coordinator_buf, '[schedule][7]') == 4)
 local native_picker
 original_select = vim.ui.select
 vim.ui.select = function(items, opts, on_choice)
@@ -1014,7 +1014,7 @@ fleet._on_event({
 local permission_row = assert(line_with(coordinator_buf, '[permission] shell'))
 assert(
   vim.api.nvim_buf_get_lines(coordinator_buf, permission_row - 1, permission_row, false)[1]
-    :find('   > 🟡 **[permission] shell** — approval required: npm test', 1, true) == 1
+    :find('   > 🟡 [permission] shell — approval required: npm test', 1, true) == 1
 )
 assert(not buffer_text(coordinator_buf):find('**Permission**', 1, true))
 native_picker.on_choice(native_picker.items[1])
@@ -1026,7 +1026,7 @@ assert(permission_response.approved == true)
 assert(line_with(coordinator_buf, '[permission] shell') == permission_row)
 assert(
   buffer_text(coordinator_buf):find(
-    '   > 🟢 **[permission] shell** — approved once: npm test',
+    '   > 🟢 [permission] shell — approved once: npm test',
     1,
     true
   )
@@ -1061,7 +1061,7 @@ assert(permission_response.requestId == 'denied-permission')
 assert(permission_response.approved == false)
 assert(
   buffer_text(coordinator_buf):find(
-    '   > 🚫 **[permission] shell** — denied: Remove-Item output.tmp',
+    '   > 🚫 [permission] shell — denied: Remove-Item output.tmp',
     1,
     true
   )
@@ -1193,8 +1193,8 @@ fleet._on_event({
   },
 })
 conversation_text = buffer_text(observer_buf)
-assert(conversation_text:find('🟡 **[tool] view** — nested/CLAUDE.md', 1, true))
-local tool_row = assert(line_with(observer_buf, '[tool] view'))
+assert(conversation_text:find('🟡 [tool][tool-call-1] view — nested/CLAUDE.md', 1, true))
+local tool_row = assert(line_with(observer_buf, '[tool][tool-call-1] view'))
 fleet._on_event({
   v = 1,
   id = 'tool-complete',
@@ -1212,7 +1212,7 @@ fleet._on_event({
   },
 })
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
-vim.api.nvim_win_set_cursor(0, { assert(line_with(observer_buf, '[tool] view')), 0 })
+vim.api.nvim_win_set_cursor(0, { assert(line_with(observer_buf, '[tool][tool-call-1] view')), 0 })
 local observer_enter = vim.api.nvim_buf_call(observer_buf, function()
   return vim.fn.maparg('<CR>', 'n', false, true)
 end)
@@ -1241,20 +1241,21 @@ fleet._on_event({
       toolName = 'powershell',
       arguments = {
         command = 'Start-Sleep -Seconds 90',
+        description = 'Sleep for 90 seconds',
         mode = 'async',
         detach = true,
       },
     },
   },
 })
-local async_tool_start_row = assert(line_with(observer_buf, '[tool #C-async-tool] powershell'))
+local async_tool_start_row = assert(line_with(observer_buf, '[task] starting'))
 assert(
   buffer_text(observer_buf):find(
-    '> 🟡 **[tool #C-async-tool] powershell** — processing…',
+    '> 🟡 [task] starting · [shell] Sleep for 90 seconds',
     1,
     true
   ),
-  'async tool start was not rendered as a compact correlated row'
+  'async shell launch was not rendered as a starting task'
 )
 for index = 1, 21 do
   local call_id = ('intervening-tool-%d'):format(index)
@@ -1307,45 +1308,257 @@ fleet._on_event({
     },
   },
 })
-local async_tool_complete_row
-for index, line in ipairs(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false)) do
-  if line:find('🟢 **[tool #C-async-tool] powershell**', 1, true) then
-    async_tool_complete_row = index
-  end
-end
 assert(
-  async_tool_complete_row and async_tool_complete_row > async_tool_start_row,
-  'async tool completion was not appended after its start row'
+  line_with(observer_buf, '[task] starting') == async_tool_start_row,
+  'successful async shell launch created a separate completion row'
 )
 assert(
-  line_count_with(observer_buf, '[tool #C-async-tool] powershell') == 2,
-  'async tool start and completion did not retain the same identifier'
+  not buffer_text(observer_buf):find('🛠️ Tool · ', 1, true),
+  'successful async shell launch rendered a redundant tool participant'
 )
+fleet._on_event({
+  v = 1,
+  id = 'async-shell-task-running',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'async-shell',
+        type = 'shell',
+        status = 'running',
+        description = 'Sleep for 90 seconds',
+        command = 'Start-Sleep -Seconds 90',
+      },
+    },
+  },
+})
+local async_task_started_row = assert(line_with(observer_buf, '[task][async-shell] started'))
+assert(async_task_started_row == async_tool_start_row, 'task start did not update the launch row')
 assert(
-  buffer_text(observer_buf):match(
-    '🛠️ Tool · %d%d:%d%d:%d%d\n\n'
-      .. '   🟢 %*%*%[tool #C%-async%-tool%] powershell%*%* — completed'
+  buffer_text(observer_buf):find(
+    '> 🟢 [task][async-shell] started · [shell] Sleep for 90 seconds',
+    1,
+    true
   ),
-  'async tool completion did not render as a properly spaced actor message'
+  'registered async task did not use a green started event'
 )
 assert(
-  buffers.timeline_item_at_cursor(observer_buf, async_tool_complete_row - 2).status == 'completed',
-  'async tool details were not available from the actor header'
-)
-assert(
-  buffers.timeline_item_at_cursor(observer_buf, async_tool_complete_row).status == 'completed',
-  'async tool details were not available from the actor message'
+  line_count_with(observer_buf, '[task][async-shell]') == 1,
+  'async task registration duplicated its starting row'
 )
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
-vim.api.nvim_win_set_cursor(0, { async_tool_complete_row - 2, 0 })
+vim.api.nvim_win_set_cursor(0, { async_task_started_row, 0 })
 observer_enter.callback()
 local async_tool_detail_buf = vim.api.nvim_get_current_buf()
 local async_tool_detail_text = buffer_text(async_tool_detail_buf)
-assert(async_tool_detail_text:find('Status: completed', 1, true))
-assert(async_tool_detail_text:find('background command completed', 1, true))
+assert(async_tool_detail_text:find('Status: running', 1, true))
+assert(async_tool_detail_text:find('Sleep for 90 seconds', 1, true))
 vim.api.nvim_buf_call(async_tool_detail_buf, function()
   vim.fn.maparg('q', 'n', false, true).callback()
 end)
+fleet._on_event({
+  v = 1,
+  id = 'async-shell-task-completed',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'async-shell',
+        type = 'shell',
+        status = 'completed',
+        description = 'Sleep for 90 seconds',
+        command = 'Start-Sleep -Seconds 90',
+        result = 'background command completed',
+      },
+    },
+  },
+})
+local async_task_complete_row = assert(line_with(observer_buf, '[task][async-shell] completed'))
+assert(async_task_complete_row > async_task_started_row, 'task completion was not chronological')
+assert(line_count_with(observer_buf, '[task][async-shell]') == 2)
+assert(
+  buffer_text(observer_buf):match(
+    '🧑‍💻 Task · %d%d:%d%d:%d%d\n\n'
+      .. '   🟢 %[task%]%[async%-shell%] completed · %[shell%] Sleep for 90 seconds'
+  ),
+  'async task completion did not render as a participant message'
+)
+fleet._on_event({
+  v = 1,
+  id = 'short-async-start',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = false,
+  payload = {
+    eventType = 'tool.execution_start',
+    data = {
+      toolCallId = 'short-async',
+      toolName = 'powershell',
+      arguments = {
+        command = 'Write-Output done',
+        description = 'Run a short command',
+        mode = 'async',
+        detach = true,
+      },
+    },
+  },
+})
+local short_start_row = assert(line_with(observer_buf, '[task] starting · [shell] Run a short command'))
+fleet._on_event({
+  v = 1,
+  id = 'short-async-complete',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'short-async',
+      success = true,
+      result = { shellId = 'short-shell' },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'short-task-terminal',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'short-shell',
+        type = 'shell',
+        status = 'completed',
+        description = 'Run a short command',
+        command = 'Write-Output done',
+        result = 'done',
+      },
+    },
+  },
+})
+assert(
+  line_with(observer_buf, '[task][short-shell] started') == short_start_row,
+  'terminal-first task snapshot did not replace its starting row'
+)
+assert(line_with(observer_buf, '[task][short-shell] completed') > short_start_row)
+assert(not buffer_text(observer_buf):find('[task] starting · [shell] Run a short command', 1, true))
+for _, launch in ipairs({
+  { call = 'overlap-a', task = 'overlap-task-a', description = 'First identical command' },
+  { call = 'overlap-b', task = 'overlap-task-b', description = 'Second identical command' },
+}) do
+  fleet._on_event({
+    v = 1,
+    id = launch.call .. '-start',
+    type = 'activity.event',
+    memberId = 'observer',
+    target = 'activity',
+    done = false,
+    payload = {
+      eventType = 'tool.execution_start',
+      data = {
+        toolCallId = launch.call,
+        toolName = 'powershell',
+        arguments = {
+          command = 'Start-Sleep -Seconds 5',
+          description = launch.description,
+          mode = 'async',
+          detach = true,
+        },
+      },
+    },
+  })
+end
+local overlap_a_row = assert(line_with(observer_buf, '[shell] First identical command'))
+local overlap_b_row = assert(line_with(observer_buf, '[shell] Second identical command'))
+fleet._on_event({
+  v = 1,
+  id = 'overlap-a-complete',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'overlap-a',
+      success = true,
+      result = { shellId = 'overlap-task-a' },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'overlap-task-b-running',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'overlap-task-b',
+        type = 'shell',
+        status = 'running',
+        description = 'Second identical command',
+        command = 'Start-Sleep -Seconds 5',
+      },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'overlap-b-complete',
+  type = 'activity.event',
+  memberId = 'observer',
+  target = 'activity',
+  done = true,
+  payload = {
+    eventType = 'tool.execution_complete',
+    data = {
+      toolCallId = 'overlap-b',
+      success = true,
+      result = { shellId = 'overlap-task-b' },
+    },
+  },
+})
+fleet._on_event({
+  v = 1,
+  id = 'overlap-task-a-running',
+  type = 'tasks.changed',
+  memberId = 'observer',
+  target = 'status',
+  done = true,
+  payload = {
+    tasks = {
+      {
+        id = 'overlap-task-a',
+        type = 'shell',
+        status = 'running',
+        description = 'First identical command',
+        command = 'Start-Sleep -Seconds 5',
+      },
+    },
+  },
+})
+assert(
+  line_with(observer_buf, '[task][overlap-task-a] started') == overlap_a_row,
+  'first identical command was correlated to the wrong launch row'
+)
+assert(
+  line_with(observer_buf, '[task][overlap-task-b] started') == overlap_b_row,
+  'second identical command was correlated to the wrong launch row'
+)
 fleet._on_event({
   v = 1,
   id = 'shell-task-running',
@@ -1398,12 +1611,12 @@ fleet._on_event({
   },
 })
 assert(
-  buffer_text(observer_buf):find('🔴 **[tool] powershell** — failed', 1, true),
+  buffer_text(observer_buf):find('🔴 [tool][tool-call-2] powershell — failed', 1, true),
   'failed tool kept its running indicator'
 )
 assert(
   buffer_text(observer_buf):find(
-    '   🔴 **[task #T-shell-42] failed · [shell] Parse PR JSON details using python**',
+    '   🔴 [task][shell-42] failed · [shell] Parse PR JSON details using python',
     1,
     true
   ),
@@ -1462,7 +1675,7 @@ assert(
   'successful helper tool falsely emitted task completion'
 )
 vim.api.nvim_set_current_win(vim.fn.win_findbuf(observer_buf)[1])
-local failed_tool_row = assert(line_with(observer_buf, '[tool] powershell'))
+local failed_tool_row = assert(line_with(observer_buf, '[tool][tool-call-2] powershell'))
 vim.api.nvim_win_set_cursor(0, { failed_tool_row, 0 })
 vim.api.nvim_buf_clear_namespace(
   observer_buf,
@@ -1518,11 +1731,11 @@ conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1,
 assert(not conversation_text:find('tool output must stay hidden', 1, true))
 assert(not conversation_text:find('secret', 1, true))
 assert(
-  conversation_text:find('🟢 **[tool] view** — nested/CLAUDE.md', 1, true),
+  conversation_text:find('🟢 [tool][tool-call-1] view — nested/CLAUDE.md', 1, true),
   'tool status did not update in place'
 )
 assert(
-  line_with(observer_buf, '[tool] view') == tool_row,
+  line_with(observer_buf, '[tool][tool-call-1] view') == tool_row,
   'tool completion moved instead of updating its chronological row'
 )
 assert(conversation_text:find('Assistant output remains normally highlighted.', 1, true))

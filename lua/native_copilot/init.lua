@@ -243,12 +243,6 @@ local function schedule_description(schedule)
   return schedule.recurring == false and 'one shot' or 'scheduled'
 end
 
-local function short_identifier(prefix, value)
-  local text = tostring(value or '?'):gsub('[^%w_-]', '')
-  if #text > 10 then text = text:sub(1, 10) end
-  return prefix .. '-' .. text
-end
-
 local function concise_detail(value)
   value = value ~= vim.NIL and value or nil
   if value == nil then return nil end
@@ -273,7 +267,7 @@ local function update_schedule(member_id, schedule_id, event, updates, event_id)
     ('schedule:%s:%s:%s'):format(schedule_id, event, event_id or event),
     {
     kind = 'schedule',
-    identifier = short_identifier('S', schedule_id),
+    identifier = schedule_id,
     event = event,
     label = schedule_description(schedule),
     status = status,
@@ -615,13 +609,13 @@ local function emit_task_event(member_id, task, event)
   local status = json_value(task.status) or 'idle'
   buffers.upsert_timeline(member_id, ('task:%s:%s'):format(task.id, event), {
     kind = 'task',
-    identifier = short_identifier('T', task.id),
+    identifier = task.id,
     event = event,
     label = ('[%s] %s'):format(
       json_value(task.type) or 'task',
       task_description(task)
     ),
-    status = status,
+    status = event == 'started' and 'completed' or status,
     detail = task_terminal_detail(task, status),
     actor_message = event ~= 'started',
     task = vim.deepcopy(task),
@@ -662,6 +656,23 @@ local function tool_timeline_detail(tool_name, arguments, status)
   return detail
 end
 
+local function shell_tool(name)
+  name = tostring(name or ''):lower()
+  return name == 'powershell'
+    or name == 'bash'
+    or name == 'shell'
+    or name == 'local_shell'
+    or name == 'local-shell'
+end
+
+local function shell_start_label(arguments)
+  arguments = type(arguments) == 'table' and arguments or {}
+  local description = json_value(arguments.description)
+    or json_value(arguments.command)
+    or 'Background shell command'
+  return ('[shell] %s'):format(tostring(description):gsub('[\r\n]+', ' '))
+end
+
 local function update_tool_call(member_id, call_id, tool_name, status, details)
   local activity = state.tool_calls[member_id]
   if not activity then
@@ -670,9 +681,11 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   end
   local item = activity.items[call_id]
   if not item then
+    activity.sequence = (activity.sequence or 0) + 1
     item = {
       id = call_id,
       name = tool_name,
+      sequence = activity.sequence,
     }
     activity.items[call_id] = item
   else
@@ -695,25 +708,60 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       or json_value(arguments.detach) == true
     )
   item.async = item.async or async_mode
+  item.async_shell = item.async and shell_tool(item.name)
+  if item.async_shell and status == 'completed' then
+    local function shell_id(value)
+      value = json_value(value)
+      if type(value) == 'table' then
+        local direct = json_value(value.shellId) or json_value(value.shell_id)
+        if direct ~= nil then return tostring(direct) end
+        for _, nested in pairs(value) do
+          local found = shell_id(nested)
+          if found then return found end
+        end
+      elseif type(value) == 'string' then
+        return value:match('[Ss]hell[Ii]d[%s:=]+([%w_-]+)')
+      end
+    end
+    item.shell_id = item.shell_id or shell_id(item.details.result)
+  end
   local terminal = status ~= 'running'
-  local timeline_id = item.async
-      and ('tool:%s:%s'):format(call_id, terminal and status or 'started')
-    or 'tool:' .. call_id
-  buffers.upsert_timeline(member_id, timeline_id, {
-    kind = 'tool',
-    identifier = item.async and short_identifier('C', call_id) or nil,
-    label = item.name,
-    status = status,
-    detail = tool_timeline_detail(item.name, item.details.arguments, status),
-    actor_message = item.async and terminal,
-    details = item.details,
-  })
+  item.timeline_id = item.timeline_id
+    or (item.async_shell and ('async-task:' .. call_id) or ('tool:' .. call_id))
+  if item.async_shell then
+    if not item.task_id and (not terminal or status == 'failed') then
+      buffers.upsert_timeline(member_id, item.timeline_id, {
+        kind = 'task',
+        event = status == 'failed' and 'failed to start' or 'starting',
+        label = shell_start_label(item.details.arguments),
+        status = status,
+        details = item.details,
+      })
+    end
+  else
+    buffers.upsert_timeline(member_id, item.timeline_id, {
+      kind = 'tool',
+      identifier = call_id,
+      label = item.name,
+      status = status,
+      detail = tool_timeline_detail(item.name, item.details.arguments, status),
+      actor_message = item.async and terminal,
+      details = item.details,
+    })
+  end
 
   while #activity.order > 20 do
     local evict_index
     for index, candidate_id in ipairs(activity.order) do
       local candidate = activity.items[candidate_id]
-      if candidate and candidate.status ~= 'running' then
+      if candidate
+        and candidate.status ~= 'running'
+        and not (
+          candidate.async_shell
+          and candidate.status == 'completed'
+          and not candidate.task_id
+        )
+      then
         evict_index = index
         break
       end
@@ -722,6 +770,53 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     local evicted = table.remove(activity.order, evict_index)
     activity.items[evicted] = nil
   end
+end
+
+local function claim_async_shell_tool(member_id, task)
+  if json_value(task.type) ~= 'shell' then return false end
+  local activity = state.tool_calls[member_id]
+  if not activity then return false end
+  local task_command = json_value(task.command)
+  local matched_id
+  local matched_command
+  local fallback
+  local pending_count = 0
+  for _, item in pairs(activity.items) do
+    if item
+      and item.async_shell
+      and item.status ~= 'failed'
+      and not item.task_id
+    then
+      pending_count = pending_count + 1
+      if item.shell_id and tostring(task.id) == item.shell_id then
+        if not matched_id or item.sequence < matched_id.sequence then matched_id = item end
+      end
+      if not item.shell_id then
+        local arguments = type(item.details) == 'table' and item.details.arguments or nil
+        if type(arguments) == 'table' and json_value(arguments.command) == task_command then
+          if not matched_command or item.sequence < matched_command.sequence then
+            matched_command = item
+          end
+        end
+        if not fallback or item.sequence < fallback.sequence then fallback = item end
+      end
+    end
+  end
+  fallback = matched_id
+    or matched_command
+    or (task_command == nil and pending_count == 1 and fallback or nil)
+  if not fallback then return false end
+  fallback.task_id = task.id
+  buffers.upsert_timeline(member_id, fallback.timeline_id, {
+    kind = 'task',
+    identifier = task.id,
+    event = 'started',
+    label = ('[shell] %s'):format(task_description(task)),
+    status = 'completed',
+    task = vim.deepcopy(task),
+    details = fallback.details,
+  })
+  return true
 end
 
 local function remove_environment(member_id, component)
@@ -787,11 +882,13 @@ local function merge_tasks(member_id, incoming)
       local current_task = by_id[task.id]
       local status = json_value(current_task.status) or 'idle'
       if not was_known then
-        emit_task_event(
-          member_id,
-          current_task,
-          (status == 'running' or status == 'idle') and 'started' or status
-        )
+        local claimed = claim_async_shell_tool(member_id, current_task)
+        if status == 'running' or status == 'idle' then
+          if not claimed then emit_task_event(member_id, current_task, 'started') end
+        else
+          if claimed then emit_task_event(member_id, current_task, 'started') end
+          emit_task_event(member_id, current_task, status)
+        end
       elseif status ~= previous_status then
         if status == 'running' or status == 'idle' then
           emit_task_event(member_id, current_task, 'started')

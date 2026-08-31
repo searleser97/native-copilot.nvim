@@ -12,8 +12,9 @@ the conversation rather than mutable status rows whose original event time and s
 **Target behavior**
 
 - Emit a separate row for each meaningful lifecycle event: started, completed, failed, or cancelled.
-- Prefix task events with `🧑‍💻` and schedule events with `⏰`.
-- Render asynchronous tool completions under a `🛠️ Tool` actor while keeping calls compact.
+- Prefix full task participant messages with `🧑‍💻` and schedule messages with `⏰`.
+- Represent asynchronous shell launches as task lifecycle rows instead of redundant tool
+  completion messages.
 - Include the same short identifier on every event for one task, schedule, or asynchronous tool.
 - Keep start rows concise and place output/error summaries on terminal rows.
 - Preserve the full event payload in the detail view.
@@ -57,10 +58,10 @@ block instead of appearing after the first user message.
 
 ### NC-004: Remove actor emoji from compact task rows
 
-**Status:** Pending
+**Status:** Completed
 
-Compact task rows should use their status indicator and `[task #T-...]` identifier without also
-displaying the actor emoji. Keep the emoji on full `Task` participant headers.
+Compact task rows should use their status indicator and `[task][<runtime-id>]` identifier without
+also displaying the actor emoji. Keep the emoji on full `Task` participant headers.
 
 **Acceptance criteria**
 
@@ -70,7 +71,7 @@ displaying the actor emoji. Keep the emoji on full `Task` participant headers.
 
 ### NC-005: Standardize lifecycle event labels
 
-**Status:** Pending
+**Status:** Completed
 
 Use a shared `[type][<runtime-id>]` format for task, tool, schedule, and other correlated lifecycle
 events. Remove synthetic identifier prefixes such as `#T-`, `#C-`, and `#S-`, and do not surround
