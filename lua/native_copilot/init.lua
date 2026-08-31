@@ -68,8 +68,11 @@ local defaults = {
   follow_bottom = true,
   timestamp_format = '%H:%M:%S',
   conversation = {
-    user_label = '👨 You',
-    copilot_label = '🤖 Copilot',
+    user_label = '👨',
+    copilot_label = '🤖',
+    task_label = '🧑‍💻',
+    tool_label = '🛠️ Tool',
+    scheduler_label = '⏰ Scheduler',
     day_header_format = '%A, %B %d',
   },
   frontend = {

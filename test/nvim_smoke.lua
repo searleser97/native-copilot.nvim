@@ -353,7 +353,7 @@ assert(interleaved_text:find('Before task. After task.', before_task, true))
 assert(not interleaved_text:find('Initial tool result', 1, true))
 assert(not interleaved_text:find('[task][interleaved-removed]', 1, true))
 local deferred_task_header = assert(
-  interleaved_text:find('🧑‍💻 Task · ' .. deferred_timestamp, after_task, true)
+  interleaved_text:find('🧑‍💻 · ' .. deferred_timestamp, after_task, true)
 )
 assert(deferred_task_header < task_completed)
 local task_message_marks = vim.api.nvim_buf_get_extmarks(
@@ -825,6 +825,54 @@ for _, line in ipairs(vim.api.nvim_buf_get_lines(member.views.conversation.buf, 
 end
 assert(mcp_rows == 1, 'MCP reconciliation did not remove an orphaned source row')
 buffers.append_activity_block('reviewer', 'Error', 'Activity-only terminal output.')
+
+buffers.setup({
+  conversation = {
+    task_label = 'CUSTOM TASK',
+    tool_label = 'CUSTOM TOOL',
+    scheduler_label = 'CUSTOM SCHEDULER',
+  },
+})
+local custom_actors = buffers.ensure_member('custom-actors', 'Custom actors')
+for _, item in ipairs({
+  {
+    id = 'task:custom',
+    kind = 'task',
+    identifier = 'custom',
+    event = 'completed',
+    label = 'Task result',
+  },
+  {
+    id = 'tool:custom',
+    kind = 'tool',
+    identifier = 'custom',
+    event = 'completed',
+    label = 'Tool result',
+  },
+  {
+    id = 'schedule:custom',
+    kind = 'schedule',
+    identifier = 'custom',
+    event = 'completed',
+    label = 'Schedule result',
+  },
+}) do
+  buffers.upsert_timeline('custom-actors', item.id, {
+    kind = item.kind,
+    identifier = item.identifier,
+    event = item.event,
+    label = item.label,
+    status = 'completed',
+    actor_message = true,
+  })
+end
+local custom_actor_text = table.concat(
+  vim.api.nvim_buf_get_lines(custom_actors.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+assert(custom_actor_text:find('CUSTOM TASK · ', 1, true))
+assert(custom_actor_text:find('CUSTOM TOOL · ', 1, true))
+assert(custom_actor_text:find('CUSTOM SCHEDULER · ', 1, true))
 
 require('native_copilot').setup({
   mappings = {

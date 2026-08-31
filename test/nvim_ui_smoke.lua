@@ -201,7 +201,7 @@ local runtime_turn_text = buffer_text(
 assert(
   line_count_with(
     require('native_copilot.buffers').buffer('planner', 'conversation'),
-    '🤖 Copilot ·'
+    '🤖 ·'
   ) == 1,
   'runtime-initiated tool turn rendered more than one Copilot heading'
 )
@@ -217,7 +217,7 @@ assert(
 )
 assert(
   timeline_text:find(
-    '🧑‍💻 Task · ',
+    '🧑‍💻 · ',
     1,
     true
   )
@@ -300,7 +300,7 @@ end
 assert(failed_task_row and failed_task_row > running_task_row, 'task failure was not chronological')
 assert(
   buffer_text(coordinator_buf):find(
-    '🧑‍💻 Task · ',
+    '🧑‍💻 · ',
     1,
     true
   )
@@ -313,7 +313,7 @@ assert(
 )
 assert(
   buffer_text(coordinator_buf):match(
-    '🧑‍💻 Task · %d%d:%d%d:%d%d\n\n'
+    '🧑‍💻 · %d%d:%d%d:%d%d\n\n'
       .. '   🔴 %[task%]%[agent%-running%] failed · %[agent%] Review implementation'
   ),
   'failed task actor message did not use one blank line after its header'
@@ -509,7 +509,7 @@ prompt_submit.callback()
 protocol.send = original_send
 assert(invoked_command.type == 'command.invoke')
 assert(invoked_command.payload.name == 'context')
-assert(buffer_text(coordinator_buf):match('👨 You · %d%d:%d%d:%d%d\n\n   /context'))
+assert(buffer_text(coordinator_buf):match('👨 · %d%d:%d%d:%d%d\n\n   /context'))
 assert(not buffer_text(coordinator_buf):find('[command]', 1, true))
 fleet._on_event({
   v = 1,
@@ -525,7 +525,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '🤖 Copilot · %d%d:%d%d:%d%d\n\n   Context usage output'
+  '🤖 · %d%d:%d%d:%d%d\n\n   Context usage output'
 ))
 protocol.send = function(message_type, payload)
   invoked_command = { type = message_type, payload = payload }
@@ -708,10 +708,10 @@ assert(prompt_sends[1].type == 'prompt.send')
 assert(prompt_sends[1].payload.content == 'Implement the edited first feature')
 assert(#vim.fn.win_findbuf(prompt_queue_buf) == 0, 'empty prompt queue pane remained open')
 assert(buffer_text(coordinator_buf):match(
-  '👨 You · %d%d:%d%d:%d%d\n\n   Implement the edited first feature'
+  '👨 · %d%d:%d%d:%d%d\n\n   Implement the edited first feature'
 ))
 assert(buffer_text(coordinator_buf):match(
-  '🤖 Copilot · writing%.'
+  '🤖 · writing%.'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 fleet._on_event({
@@ -865,7 +865,7 @@ fleet._on_event({
   },
 })
 assert(buffer_text(coordinator_buf):match(
-  '👨 You · %d%d:%d%d:%d%d\n\n   Check deployment health'
+  '👨 · %d%d:%d%d:%d%d\n\n   Check deployment health'
 ))
 assert(not buffer_text(coordinator_buf):find('[prompt] Prompt', 1, true))
 assert(
@@ -1384,7 +1384,7 @@ assert(async_task_complete_row > async_task_started_row, 'task completion was no
 assert(line_count_with(observer_buf, '[task][async-shell]') == 2)
 assert(
   buffer_text(observer_buf):match(
-    '🧑‍💻 Task · %d%d:%d%d:%d%d\n\n'
+    '🧑‍💻 · %d%d:%d%d:%d%d\n\n'
       .. '   🟢 %[task%]%[async%-shell%] completed · %[shell%] Sleep for 90 seconds'
   ),
   'async task completion did not render as a participant message'
@@ -1803,7 +1803,7 @@ fleet._on_event({
   },
 })
 conversation_text = table.concat(vim.api.nvim_buf_get_lines(observer_buf, 0, -1, false), '\n')
-assert(conversation_text:find('🤖 Copilot', 1, true))
+assert(conversation_text:find('🤖 ·', 1, true))
 assert(conversation_text:find('Dynamically discovered command output.', 1, true))
 
 fleet.close()

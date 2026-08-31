@@ -14,10 +14,10 @@ local actor_symbols = {
   task = '🧑‍💻',
   schedule = '⏰',
 }
-local actor_labels = {
-  task = 'Task',
-  schedule = 'Scheduler',
-  tool = 'Tool',
+local actor_option_names = {
+  task = 'task_label',
+  schedule = 'scheduler_label',
+  tool = 'tool_label',
 }
 local activity_namespace = vim.api.nvim_create_namespace('native_copilot_inline_activity')
 local activity_body_namespace = vim.api.nvim_create_namespace('native_copilot_activity_body')
@@ -35,8 +35,11 @@ local options = {
   timestamp_format = '%H:%M:%S',
   now = os.time,
   conversation = {
-    user_label = '👨 You',
-    copilot_label = '🤖 Copilot',
+    user_label = '👨',
+    copilot_label = '🤖',
+    task_label = '🧑‍💻',
+    tool_label = '🛠️ Tool',
+    scheduler_label = '⏰ Scheduler',
     day_header_format = '%A, %B %d',
   },
 }
@@ -680,10 +683,16 @@ local function timeline_lines(item, now)
     or ('[%s]'):format(kind)
   local event = item.event and (tostring(item.event) .. ' · ') or ''
   if item.actor_message then
-    local actor = item.actor or (kind == 'tool' and '🛠️' or actor_symbols[kind]) or '💬'
-    local actor_label = item.actor_label or actor_labels[kind] or kind
+    local actor_heading
+    if item.actor or item.actor_label then
+      local actor = item.actor or (kind == 'tool' and '🛠️' or actor_symbols[kind]) or '💬'
+      actor_heading = item.actor_label and (actor .. ' ' .. item.actor_label) or actor
+    else
+      local option_name = actor_option_names[kind]
+      actor_heading = option_name and options.conversation[option_name] or kind
+    end
     return {
-      ('%s %s · %s'):format(actor, actor_label, timestamp(now)),
+      ('%s · %s'):format(actor_heading, timestamp(now)),
       '',
       ('%s%s %s %s%s%s'):format(
         content_indent,

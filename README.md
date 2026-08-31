@@ -50,8 +50,11 @@ require("native_copilot").setup({
   follow_bottom = true,
   timestamp_format = '%H:%M:%S',
   conversation = {
-    user_label = '👨 You',
-    copilot_label = '🤖 Copilot',
+    user_label = '👨',
+    copilot_label = '🤖',
+    task_label = '🧑‍💻',
+    tool_label = '🛠️ Tool',
+    scheduler_label = '⏰ Scheduler',
     day_header_format = '%A, %B %d',
   },
   prompt_queue_height = 5,
@@ -140,8 +143,8 @@ responses retain a leading `🔴`. Permission requests use a leading `🟡` row 
 `🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted
 while Copilot is busy stay in a FIFO pane between
 the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
-Slash commands are rendered as normal `👨 You` turns rather than duplicated `[command]` rows; their
-text output remains under `🤖 Copilot`, and any work they start is represented by the resulting
+Slash commands are rendered as normal `👨` turns rather than duplicated `[command]` rows; their
+text output remains under `🤖`, and any work they start is represented by the resulting
 task, tool, environment, or schedule rows. Use `/tasks` or
 `:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
@@ -338,8 +341,9 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 ## Rendering and observability
 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
-renderer dependency. Conversation turns default to `👨 You` and `🤖 Copilot`, without a redundant
-document title. Both labels are configurable through `conversation` setup options. Inline
+renderer dependency. User, Copilot, and Task turns default to emoji-only `👨`, `🤖`, and `🧑‍💻`
+headers, without a redundant document title. Their labels, along with Tool and Scheduler headings,
+are configurable through `conversation` setup options. Inline
 reasoning remains part of each conversation buffer as unlabeled text using Neovim's `Comment`
 highlight group. Each reasoning section is a native fold that starts open and supports normal
 fold commands such as `zc`, `zo`, and `za`. Errors remain visible in their related activity rows
@@ -408,7 +412,7 @@ feature policy.
 
 `/every`, `/after`, and model-created `manage_schedule` entries appear as stable `[schedule]` rows.
 Creation, re-arming, and cancellation update the original row. When a schedule fires, its message
-appears as a `👨 You` turn and its active response state appears beside `🤖 Copilot`. Press `<Enter>`
+appears as a `👨` turn and its active response state appears beside `🤖`. Press `<Enter>`
 on a schedule row to inspect its prompt and cadence without expanding that content in the main
 timeline.
 
