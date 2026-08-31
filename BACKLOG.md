@@ -101,7 +101,7 @@ row with the same foreground color used by the `Task` participant header instead
 
 ### NC-007: Add Task-colored backgrounds to task participant messages
 
-**Status:** Pending
+**Status:** Completed
 
 Give full `Task` participant messages a background derived from the current foreground color of the
 Task header. The background should visually group the header, lifecycle row, and task result while
@@ -118,7 +118,7 @@ remaining readable across color schemes.
 
 ### NC-008: Safely interleave task messages with streaming Copilot responses
 
-**Status:** Pending
+**Status:** Completed
 
 Validate and, if necessary, fix task participant messages that arrive while Copilot is still
 streaming a response. The asynchronous event must not corrupt, split incorrectly, reorder, or

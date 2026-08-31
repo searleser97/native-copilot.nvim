@@ -108,6 +108,22 @@ assert(vim.api.nvim_get_hl(0, {
   name = 'NativeCopilotUserMessage',
   link = true,
 }).link == 'CursorLine')
+local initial_task_message_highlight = vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotTaskMessage',
+  link = true,
+})
+assert(
+  initial_task_message_highlight.bg ~= nil
+    or initial_task_message_highlight.link == 'CursorLine'
+)
+vim.api.nvim_set_hl(0, 'Identifier', { fg = 0x6699cc })
+vim.api.nvim_set_hl(0, 'Normal', { fg = 0xeeeeee, bg = 0x101010 })
+vim.cmd('doautocmd ColorScheme')
+local task_message_highlight = vim.api.nvim_get_hl(0, {
+  name = 'NativeCopilotTaskMessage',
+  link = false,
+})
+assert(task_message_highlight.bg == 0x1f2932)
 local member = buffers.ensure_member('reviewer', 'Reviewer')
 assert(vim.bo[member.views.conversation.buf].buftype == 'nofile')
 assert(vim.bo[member.views.conversation.buf].filetype == 'native-copilot')
@@ -240,6 +256,66 @@ for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
   end
 end
 assert(compact_tool_highlighted, 'compact tool row did not use the Task header color')
+buffers.append_conversation_delta('reviewer', 'interleaved-message', 'Before task.')
+buffers.upsert_timeline('reviewer', 'task:interleaved-completed', {
+  kind = 'task',
+  identifier = 'interleaved',
+  event = 'completed',
+  label = '[agent] Validate interleaving',
+  status = 'completed',
+  detail = 'Task result',
+  actor_message = true,
+})
+buffers.upsert_timeline('reviewer', 'task:interleaved-failed', {
+  kind = 'task',
+  identifier = 'interleaved-failed',
+  event = 'failed',
+  label = '[agent] Validate failure',
+  status = 'failed',
+  detail = 'Task failure',
+  actor_message = true,
+})
+buffers.upsert_timeline('reviewer', 'task:interleaved-cancelled', {
+  kind = 'task',
+  identifier = 'interleaved-cancelled',
+  event = 'cancelled',
+  label = '[agent] Validate cancellation',
+  status = 'cancelled',
+  actor_message = true,
+})
+buffers.append_conversation_delta('reviewer', 'interleaved-message', 'After task.')
+buffers.complete_conversation('reviewer', 'interleaved-message', 'Before task.After task.')
+local interleaved_text = table.concat(
+  vim.api.nvim_buf_get_lines(member.views.conversation.buf, 0, -1, false),
+  '\n'
+)
+local before_task = assert(interleaved_text:find('Before task.', 1, true))
+local task_completed = assert(interleaved_text:find('[task][interleaved] completed', 1, true))
+local task_failed = assert(interleaved_text:find('[task][interleaved-failed] failed', 1, true))
+local task_cancelled = assert(
+  interleaved_text:find('[task][interleaved-cancelled] cancelled', 1, true)
+)
+local after_task = assert(interleaved_text:find('After task.', task_cancelled, true))
+assert(before_task < task_completed)
+assert(task_completed < task_failed)
+assert(task_failed < task_cancelled)
+assert(task_cancelled < after_task)
+assert(not interleaved_text:find('Task resultAfter task.', 1, true))
+local task_message_marks = vim.api.nvim_buf_get_extmarks(
+  member.views.conversation.buf,
+  vim.api.nvim_get_namespaces().native_copilot_timeline,
+  0,
+  -1,
+  { details = true }
+)
+local highlighted_task_messages = 0
+for _, mark in ipairs(task_message_marks) do
+  if mark[4].hl_group == 'NativeCopilotTaskMessage' then
+    assert(mark[4].hl_eol == true)
+    highlighted_task_messages = highlighted_task_messages + 1
+  end
+end
+assert(highlighted_task_messages == 3)
 assert(
   not header_tool_text:find('BOT · writing.\n\n\n', 1, true),
   'timeline row after the Copilot heading retained two empty rows'

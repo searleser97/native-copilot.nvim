@@ -45,6 +45,19 @@ local function timestamp(now)
   return os.date(options.timestamp_format, now or options.now())
 end
 
+local function blend_color(base, accent, accent_ratio)
+  local function channel(color, shift)
+    return math.floor(color / (2 ^ shift)) % 0x100
+  end
+  local function blend_channel(base_channel, accent_channel)
+    return math.floor(base_channel + (accent_channel - base_channel) * accent_ratio + 0.5)
+  end
+  local red = blend_channel(channel(base, 16), channel(accent, 16))
+  local green = blend_channel(channel(base, 8), channel(accent, 8))
+  local blue = blend_channel(channel(base, 0), channel(accent, 0))
+  return red * 0x10000 + green * 0x100 + blue
+end
+
 local function setup_highlights()
   vim.api.nvim_set_hl(0, 'NativeCopilotUserHeader', {
     default = true,
@@ -66,6 +79,23 @@ local function setup_highlights()
     default = true,
     link = 'CursorLine',
   })
+  local actor = vim.api.nvim_get_hl(0, {
+    name = 'NativeCopilotActorHeader',
+    link = false,
+  })
+  local normal = vim.api.nvim_get_hl(0, {
+    name = 'Normal',
+    link = false,
+  })
+  if actor.fg and normal.bg then
+    vim.api.nvim_set_hl(0, 'NativeCopilotTaskMessage', {
+      bg = blend_color(normal.bg, actor.fg, 0.18),
+    })
+  else
+    vim.api.nvim_set_hl(0, 'NativeCopilotTaskMessage', {
+      link = 'CursorLine',
+    })
+  end
 end
 
 setup_highlights()
@@ -831,19 +861,26 @@ function M.upsert_timeline(member_id, item_id, item)
         vim.api.nvim_buf_set_lines(view.buf, start_row, start_row, false, lines)
       end)
       view.last_block_kind = item.actor_message and 'actor_message' or 'timeline'
+      if item.actor_message and view.response_active then
+        view.response_line_start = true
+      end
     end
     record = {}
     view.timeline[item_id] = record
   end
 
+  local timeline_highlight
+  if item.actor_message and item.kind == 'task' then
+    timeline_highlight = 'NativeCopilotTaskMessage'
+  elseif not item.actor_message and (item.kind == 'task' or item.kind == 'tool') then
+    timeline_highlight = 'NativeCopilotActorHeader'
+  end
   record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
     id = record.extmark,
     end_row = start_row + #lines,
     end_col = 0,
-    hl_group = not item.actor_message and (item.kind == 'task' or item.kind == 'tool')
-        and 'NativeCopilotActorHeader'
-      or nil,
-    hl_eol = not item.actor_message and (item.kind == 'task' or item.kind == 'tool'),
+    hl_group = timeline_highlight,
+    hl_eol = timeline_highlight ~= nil,
     right_gravity = true,
     end_right_gravity = false,
   })
@@ -1111,6 +1148,7 @@ function M.append_conversation_delta(member_id, message_id, content)
   if first_visible_delta
     or view.last_block_kind == 'activity'
     or view.last_block_kind == 'timeline'
+    or view.last_block_kind == 'actor_message'
   then
     prepare_pending_block(view, 1)
   end
