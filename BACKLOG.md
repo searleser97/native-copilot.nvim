@@ -68,16 +68,19 @@ displaying the actor emoji. Keep the emoji on full `Task` participant headers.
 - Full task completion, failure, and cancellation participant headers retain the Task actor emoji.
 - Task status indicators and correlation identifiers remain unchanged.
 
-### NC-005: Simplify task correlation labels
+### NC-005: Standardize lifecycle event labels
 
 **Status:** Pending
 
-Render task correlation as `[task][<task-id>]` instead of embedding a shortened, prefixed
-identifier such as `[task #T-0]`. Use the runtime task ID directly.
+Use a shared `[type][<runtime-id>]` format for task, tool, schedule, and other correlated lifecycle
+events. Remove synthetic identifier prefixes such as `#T-`, `#C-`, and `#S-`, and do not surround
+event labels with Markdown `**` markers.
 
 **Acceptance criteria**
 
-- Task rows render identifiers in the form `[task][0]`.
-- The synthetic `#T-` prefix is removed.
-- Start and terminal events for one task display the same runtime task ID.
-- Task detail lookup and lifecycle correlation continue to work.
+- Correlated rows render identifiers such as `[task][0]`, `[tool][toolu_123]`, and
+  `[schedule][41]`.
+- Synthetic `#T-`, `#C-`, and `#S-` prefixes are removed.
+- Lifecycle event labels are not wrapped in Markdown bold markers.
+- Start and terminal events display the same runtime identifier.
+- Detail lookup and lifecycle correlation continue to work for every supported event type.
