@@ -80,6 +80,13 @@ local function line_with(buf, needle)
   end
 end
 
+local function has_quoted_environment(content)
+  for line in content:gmatch('[^\n]+') do
+    if line:match('^>%s+.*%[environment%]') then return true end
+  end
+  return false
+end
+
 local function pass(label)
   results[#results + 1] = 'PASS ' .. label
 end
@@ -166,6 +173,12 @@ tick = function()
       return
     end
     if not check(content:find('[environment] Tools — 4 loaded', 1, true), 'mock tools initialized') then
+      return
+    end
+    if not check(
+      not has_quoted_environment(content),
+      'environment rows rendered without blockquote markers'
+    ) then
       return
     end
     if profile == 'allow-all' then

@@ -77,6 +77,13 @@ local function text(buf)
   return buf and table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n') or ''
 end
 
+local function has_quoted_environment(content)
+  for line in content:gmatch('[^\n]+') do
+    if line:match('^>%s+.*%[environment%]') then return true end
+  end
+  return false
+end
+
 local function telescope_prompt()
   return find_buffer(function(buf) return vim.bo[buf].filetype == 'TelescopePrompt' end)
 end
@@ -173,6 +180,13 @@ tick = function()
   if phase == 'ready' then
     if not content:find('[environment] Copilot environment — ready', 1, true) then
       schedule_tick()
+      return
+    end
+    if not check(
+      not has_quoted_environment(content),
+      'environment rows rendered without blockquote markers'
+    ) then
+      finish()
       return
     end
     submit('/model')

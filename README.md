@@ -149,8 +149,9 @@ end, { buffer = true })
 prompt buffer or when the prompt cannot be submitted.
 
 The conversation is also the chronological activity timeline. Background tasks, environment
-initialization, foreground tools, schedules, and permission decisions appear as compact quoted
-rows. `🟡` is processing or waiting, `🟢` completed or approved, `🔴` failed, `⚪` cancelled,
+initialization, foreground tools, schedules, and permission decisions appear as compact timeline
+rows. Environment rows are unquoted. `🟡` is processing or waiting, `🟢` completed or approved,
+`🔴` failed, `⚪` cancelled,
 `🚫` denied, and `❓` unknown. Each row keeps a stable position and updates in place as its state
 changes, so completion does not reorder earlier work.
 
