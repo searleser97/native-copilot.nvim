@@ -1659,6 +1659,7 @@ local function picker(title, entries, choose, picker_options)
     prompt_title = title,
     sorting_strategy = picker_options.sorting_strategy,
     default_selection_index = picker_options.default_selection_index,
+    on_complete = picker_options.on_complete and { picker_options.on_complete } or nil,
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -2229,6 +2230,11 @@ function M._on_event(message)
       preserve_order = true,
       sorting_strategy = 'ascending',
       default_selection_index = #displayed_entries,
+      on_complete = function(active_picker)
+        local row = active_picker:get_row(#displayed_entries)
+        local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
+        if row >= 0 and row < line_count then active_picker:set_selection(row) end
+      end,
     })
     return
   elseif message.type == 'commands.list' then
