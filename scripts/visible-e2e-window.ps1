@@ -19,6 +19,7 @@ $env:NATIVE_COPILOT_E2E_OBSERVE = if ($Observe) { '1' } else { '0' }
 $env:NATIVE_COPILOT_E2E_TELESCOPE = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\telescope.nvim'
 $env:NATIVE_COPILOT_E2E_PLENARY = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\plenary.nvim'
 $env:NATIVE_COPILOT_E2E_BLINK = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\blink.cmp'
+$env:NATIVE_COPILOT_E2E_SMEAR = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\smear-cursor.nvim'
 
 $testScript = if ($Profile -eq 'telescope') {
     Join-Path $Root 'test\visible_picker_e2e.lua'

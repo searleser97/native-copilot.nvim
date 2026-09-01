@@ -18,7 +18,10 @@ local plenary_path =
   assert(vim.env.NATIVE_COPILOT_E2E_PLENARY, 'NATIVE_COPILOT_E2E_PLENARY is required')
 local blink_path =
   assert(vim.env.NATIVE_COPILOT_E2E_BLINK, 'NATIVE_COPILOT_E2E_BLINK is required')
+local smear_path =
+  assert(vim.env.NATIVE_COPILOT_E2E_SMEAR, 'NATIVE_COPILOT_E2E_SMEAR is required')
 
+vim.opt.runtimepath:prepend(smear_path)
 vim.opt.runtimepath:prepend(blink_path)
 vim.opt.runtimepath:prepend(plenary_path)
 vim.opt.runtimepath:prepend(telescope_path)
@@ -61,6 +64,9 @@ blink.setup({
       },
     },
   },
+})
+require('smear_cursor').setup({
+  smear_insert_mode = false,
 })
 
 local started_at = vim.uv.now()
@@ -630,6 +636,13 @@ tick = function()
     local session = selected and selected.value and selected.value.session
     local result_count = picker.manager:num_results()
     local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
+    local smear_window_count = 0
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      local buf = vim.api.nvim_win_get_buf(win)
+      if vim.bo[buf].filetype == 'smear-cursor' then
+        smear_window_count = smear_window_count + 1
+      end
+    end
     if not check(result_count == 321, '/resume reopened the complete session list') then
       finish()
       return
@@ -646,6 +659,13 @@ tick = function()
       '/resume moved the Telescope results cursor to the newest final session'
     ) then
       finish()
+      return
+    end
+    if not check(
+      smear_window_count < 20,
+      '/resume avoided a smear-cursor window explosion'
+    ) then
+      finish(('Observed %d smear-cursor windows'):format(smear_window_count))
       return
     end
     choose_where(function(item)
