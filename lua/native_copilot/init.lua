@@ -2247,7 +2247,7 @@ function M._on_event(message)
             active_picker:set_selection(row)
             local ignored = vim.wo[active_picker.results_win].eventignorewin
             local events = vim.split(ignored, ',', { plain = true, trimempty = true })
-            for _, event in ipairs({ 'CursorMoved', 'CursorMovedI' }) do
+            for _, event in ipairs({ 'CursorMoved', 'CursorMovedI', 'WinScrolled' }) do
               if not vim.tbl_contains(events, event) then table.insert(events, event) end
             end
             vim.wo[active_picker.results_win].eventignorewin = table.concat(events, ',')

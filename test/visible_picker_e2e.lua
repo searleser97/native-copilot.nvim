@@ -665,7 +665,8 @@ tick = function()
       return
     end
     if not check(
-      vim.wo[picker.results_win].eventignorewin:find('CursorMoved', 1, true) ~= nil,
+      vim.wo[picker.results_win].eventignorewin:find('CursorMoved', 1, true) ~= nil
+        and vim.wo[picker.results_win].eventignorewin:find('WinScrolled', 1, true) ~= nil,
       '/resume kept programmatic cursor movement events disabled for the picker lifetime'
     ) then
       finish()
