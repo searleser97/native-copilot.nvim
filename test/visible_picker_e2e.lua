@@ -65,9 +65,11 @@ blink.setup({
     },
   },
 })
-require('smear_cursor').setup({
+local smear_cursor = require('smear_cursor')
+smear_cursor.setup({
   smear_insert_mode = false,
 })
+smear_cursor.enabled = false
 
 local started_at = vim.uv.now()
 local original_lines = vim.o.lines
@@ -520,6 +522,7 @@ tick = function()
       return
     end
     pass('/resume <id> rejected a session active in another process')
+    smear_cursor.enabled = true
     submit('/resume', '<C-s>', 'i')
     phase = 'resume-picker'
   elseif phase == 'resume-picker' then
