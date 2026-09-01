@@ -110,7 +110,6 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<leader>aif` | Stop an active Fleet or recover an inactive one |
 | `<leader>ais` | Telescope picker for overview, status, member, and view |
 | `[a` / `]a` | Previous/next member conversation or prompt recipient |
-| `<C-Left>` / `<C-Right>` in `AI Prompt` | Previous/next prompt recipient while inserting |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
@@ -124,6 +123,18 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `p` in the prompt queue | Pause or resume FIFO dispatch |
 | `q` / `<BS>` in activity details | Close the floating detail pane |
 | `dd` in task details | Cancel the running or waiting task |
+
+Custom mappings can call the public member-cycling function. When invoked from `AI Prompt`, it
+preserves the draft and returns focus to the prompt:
+
+```lua
+vim.keymap.set("i", "<M-l>", function()
+  require("native_copilot").cycle_member(1)
+end)
+vim.keymap.set("i", "<M-h>", function()
+  require("native_copilot").cycle_member(-1)
+end)
+```
 
 The conversation is also the chronological activity timeline. Background tasks, environment
 initialization, foreground tools, schedules, and permission decisions appear as compact quoted

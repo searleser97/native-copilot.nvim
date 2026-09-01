@@ -434,8 +434,6 @@ local function submit_prompt()
   end
 end
 
-local cycle_member
-
 local function ensure_prompt_buffer()
   if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
     return state.prompt_buf
@@ -453,23 +451,11 @@ local function ensure_prompt_buffer()
     buffer = buf,
     desc = 'Send prompt to selected Copilot',
   })
-  local function cycle_prompt_recipient(step)
-    cycle_member(step)
-    focus_prompt()
-  end
-  vim.keymap.set('n', '[a', function() cycle_prompt_recipient(-1) end, {
+  vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,
     desc = 'Previous Copilot prompt recipient',
   })
-  vim.keymap.set('n', ']a', function() cycle_prompt_recipient(1) end, {
-    buffer = buf,
-    desc = 'Next Copilot prompt recipient',
-  })
-  vim.keymap.set('i', '<C-Left>', function() cycle_prompt_recipient(-1) end, {
-    buffer = buf,
-    desc = 'Previous Copilot prompt recipient',
-  })
-  vim.keymap.set('i', '<C-Right>', function() cycle_prompt_recipient(1) end, {
+  vim.keymap.set('n', ']a', function() M.cycle_member(1) end, {
     buffer = buf,
     desc = 'Next Copilot prompt recipient',
   })
@@ -1259,9 +1245,14 @@ local function member_label(member_id)
   return name
 end
 
-cycle_member = function(step)
+function M.cycle_member(step)
+  vim.validate('step', step, 'number')
+  if step == 0 then return end
   local members = ordered_members()
   if #members == 0 then return end
+  local return_to_prompt = state.prompt_buf
+    and vim.api.nvim_buf_is_valid(state.prompt_buf)
+    and vim.api.nvim_get_current_buf() == state.prompt_buf
   local index = 1
   for candidate, member_id in ipairs(members) do
     if member_id == state.selected then
@@ -1271,16 +1262,17 @@ cycle_member = function(step)
   end
   index = ((index - 1 + step) % #members) + 1
   M.show_member(members[index])
+  if return_to_prompt then focus_prompt() end
 end
 
 local function configure_agent_buffer(member_id, buf)
   if state.configured_buffers[buf] then return end
   state.configured_buffers[buf] = true
-  vim.keymap.set('n', '[a', function() cycle_member(-1) end, {
+  vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,
     desc = 'Previous Copilot member',
   })
-  vim.keymap.set('n', ']a', function() cycle_member(1) end, {
+  vim.keymap.set('n', ']a', function() M.cycle_member(1) end, {
     buffer = buf,
     desc = 'Next Copilot member',
   })

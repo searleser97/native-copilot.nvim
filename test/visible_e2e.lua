@@ -206,16 +206,20 @@ tick = function()
     local normal_target = vim.b[prompt_buf].native_copilot_target
     local normal_preserved = text(prompt_buf) == draft
       and vim.api.nvim_get_current_buf() == prompt_buf
-    prompt_mapping('<C-Right>', 'i')()
-    local insert_target = vim.b[prompt_buf].native_copilot_target
-    local insert_preserved = text(prompt_buf) == draft
+    native.cycle_member(1)
+    local public_api_target = vim.b[prompt_buf].native_copilot_target
+    local public_api_preserved = text(prompt_buf) == draft
       and vim.api.nvim_get_current_buf() == prompt_buf
+    local removed_insert_mapping = vim.api.nvim_buf_call(prompt_buf, function()
+      return vim.fn.maparg('<C-Right>', 'i') == ''
+    end)
     if not check(
       normal_target == 'e2e-recipient-cycle/planner'
-        and insert_target == 'e2e-recipient-cycle/reviewer'
+        and public_api_target == 'e2e-recipient-cycle/reviewer'
         and normal_preserved
-        and insert_preserved,
-      'prompt mappings cycled recipients without losing the draft or focus'
+        and public_api_preserved
+        and removed_insert_mapping,
+      'prompt mapping and public API cycled recipients without extra insert bindings'
     ) then
       return
     end
