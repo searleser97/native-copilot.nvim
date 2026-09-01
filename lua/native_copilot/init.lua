@@ -2235,7 +2235,10 @@ function M._on_event(message)
       on_complete = function(active_picker)
         local row = active_picker:get_row(#displayed_entries)
         local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
-        if row >= 0 and row < line_count then active_picker:set_selection(row) end
+        if row >= 0 and row < line_count then
+          active_picker:set_selection(row)
+          vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
+        end
       end,
     })
     return

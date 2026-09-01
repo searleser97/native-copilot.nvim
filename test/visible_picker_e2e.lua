@@ -630,7 +630,6 @@ tick = function()
     local session = selected and selected.value and selected.value.session
     local result_count = picker.manager:num_results()
     local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
-    local result_height = vim.api.nvim_win_get_height(picker.results_win)
     if not check(result_count == 321, '/resume reopened the complete session list') then
       finish()
       return
@@ -643,8 +642,8 @@ tick = function()
       return
     end
     if not check(
-      cursor_row >= result_height - 1,
-      '/resume scrolled the Telescope result window to the newest session at the bottom'
+      cursor_row == result_count,
+      '/resume moved the Telescope results cursor to the newest final session'
     ) then
       finish()
       return
