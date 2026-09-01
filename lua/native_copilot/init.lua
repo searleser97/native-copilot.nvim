@@ -1687,11 +1687,11 @@ local function picker(title, entries, choose, picker_options)
     local smear_cursor = package.loaded['smear_cursor']
     if type(smear_cursor) == 'table' and smear_cursor.enabled == true then
       smear_cursor.enabled = false
+      local restored = false
       restore_cursor_animation = function()
-        if restore_cursor_animation then
-          smear_cursor.enabled = true
-          restore_cursor_animation = nil
-        end
+        if restored then return end
+        restored = true
+        smear_cursor.enabled = true
       end
     end
   end
