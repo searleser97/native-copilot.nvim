@@ -719,7 +719,11 @@ local function tool_timeline_detail(tool_name, arguments, status)
 
   local name = (tool_name or ''):lower()
   local detail
-  if name == 'view' or name == 'read' or name == 'read_file' or name == 'read-file' then
+  if name == 'task' then
+    detail = json_value(arguments.prompt) or json_value(arguments.description)
+  elseif name == 'write_agent' or name:find('^send_to_') then
+    detail = json_value(arguments.message) or json_value(arguments.content)
+  elseif name == 'view' or name == 'read' or name == 'read_file' or name == 'read-file' then
     detail = json_value(arguments.path)
       or json_value(arguments.filePath)
       or json_value(arguments.file)
@@ -736,6 +740,16 @@ local function tool_timeline_detail(tool_name, arguments, status)
   detail = detail:gsub('[\r\n]+', ' ')
   if #detail > 180 then detail = detail:sub(1, 177) .. '...' end
   return detail
+end
+
+local function agent_tool_prompt(tool_name, arguments)
+  if type(arguments) ~= 'table' then return end
+  local name = tostring(tool_name or ''):lower()
+  if name == 'task' then
+    return json_value(arguments.prompt)
+  elseif name == 'write_agent' or name:find('^send_to_') then
+    return json_value(arguments.message) or json_value(arguments.content)
+  end
 end
 
 local function shell_tool(name)
@@ -2068,8 +2082,14 @@ local function history_event(member_id, event, context)
   if event.type == 'user.message' and event.data then
     local content = data.content or data.prompt
     if content then
-      local heading = (agent_id or source:find('^agent%-')) and 'Task' or 'You'
-      buffers.append_block(member_id, 'conversation', heading, content, event_time)
+      if agent_id or source:find('^agent%-') then
+        table.insert(context.agent_messages, {
+          content = content,
+          created_at = event_time,
+        })
+      else
+        buffers.append_block(member_id, 'conversation', 'You', content, event_time)
+      end
     end
   elseif
     agent_id
@@ -2091,7 +2111,14 @@ local function history_event(member_id, event, context)
     buffers.begin_response(member_id, data.reasoningId or event.id, event_time)
     buffers.complete_activity(member_id, data.reasoningId or event.id, data.content, event_time)
   elseif event.type == 'tool.execution_start' then
-    update_tool_call(member_id, data.toolCallId or event.id, data.toolName, 'running', {
+    local call_id = data.toolCallId or event.id
+    local prompt = agent_tool_prompt(data.toolName, data.arguments)
+    if prompt then
+      local key = tostring(prompt):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')
+      context.agent_tool_prompts[key] = (context.agent_tool_prompts[key] or 0) + 1
+      context.tool_arguments[tostring(call_id)] = data.arguments
+    end
+    update_tool_call(member_id, call_id, data.toolName, 'running', {
       arguments = data.arguments,
       created_at = event_time,
     })
@@ -2102,10 +2129,12 @@ local function history_event(member_id, event, context)
       created_at = event_time,
     })
   elseif event.type == 'subagent.started' then
+    local arguments = context.tool_arguments[tostring(data.toolCallId or '')]
     history_task(member_id, {
       id = tostring(event.agentId or data.toolCallId or event.id),
       type = data.agentName or 'agent',
       description = data.agentDescription or data.agentDisplayName or 'Background agent',
+      prompt = agent_tool_prompt('task', arguments),
       model = data.model,
     }, 'running', event_time)
   elseif event.type == 'subagent.completed' or event.type == 'subagent.failed' then
@@ -2149,6 +2178,24 @@ local function history_event(member_id, event, context)
       or event.type == 'session.warning' and 'Session warning'
       or 'Session information'
     buffers.append_activity_block(member_id, heading, data.message or vim.inspect(data))
+  end
+end
+
+local function finish_history_context(member_id, context)
+  for _, message in ipairs(context.agent_messages) do
+    local key = tostring(message.content):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')
+    local matches = context.agent_tool_prompts[key] or 0
+    if matches > 0 then
+      context.agent_tool_prompts[key] = matches - 1
+    else
+      buffers.append_block(
+        member_id,
+        'conversation',
+        'Task',
+        message.content,
+        message.created_at
+      )
+    end
   end
 end
 
@@ -2839,8 +2886,14 @@ function M._on_event(message)
       member_id,
       first_timestamp and math.floor(first_timestamp / 1000) or nil
     )
-    local context = { permissions = {} }
+    local context = {
+      permissions = {},
+      agent_messages = {},
+      agent_tool_prompts = {},
+      tool_arguments = {},
+    }
     for _, event in ipairs(payload.events or {}) do history_event(member_id, event, context) end
+    finish_history_context(member_id, context)
   elseif message.type == 'scheduled.prompt' then
     local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
     local schedule_id = json_value(payload.scheduleId)

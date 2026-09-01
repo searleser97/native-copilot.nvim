@@ -167,14 +167,21 @@ local function has_quoted_environment(content)
   return false
 end
 
-local function heading_before(content, needle)
+local function line_containing(content, needle)
   local lines = vim.split(content, '\n', { plain = true })
-  for index, line in ipairs(lines) do
-    if line:find(needle, 1, true) then
-      for previous = index - 1, 1, -1 do
-        if lines[previous] ~= '' then return lines[previous] end
-      end
-    end
+  for _, line in ipairs(lines) do
+    if line:find(needle, 1, true) then return line end
+  end
+end
+
+local function occurrence_count(content, needle)
+  local count = 0
+  local offset = 1
+  while true do
+    local start = content:find(needle, offset, true)
+    if not start then return count end
+    count = count + 1
+    offset = start + #needle
   end
 end
 
@@ -726,8 +733,19 @@ tick = function()
     local subagent_prompt =
       'Review the workspace validation and report only actionable findings.'
     if not check(
-      (heading_before(content, subagent_prompt) or ''):find('📝 · ', 1, true) == 1,
-      '/resume attributed sub-agent prompts to Task instead of the user'
+      occurrence_count(content, subagent_prompt) == 1
+        and (line_containing(content, subagent_prompt) or ''):find('[tool]', 1, true),
+      '/resume rendered the initial sub-agent prompt once in the task tool details'
+    ) then
+      finish()
+      return
+    end
+    local followup_prompt =
+      'Also verify that the validation result includes the constrained layout.'
+    if not check(
+      occurrence_count(content, followup_prompt) == 1
+        and (line_containing(content, followup_prompt) or ''):find('[tool]', 1, true),
+      '/resume rendered a running sub-agent follow-up in write_agent tool details'
     ) then
       finish()
       return
