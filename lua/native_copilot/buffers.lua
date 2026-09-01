@@ -1345,7 +1345,7 @@ function M.finish_response(member_id, event_time)
   then
     remove_message_heading(view)
   elseif not view.response_message_completed then
-    touch_message_heading(view, 'completed', nil, event_time or view.response_started_at)
+    touch_message_heading(view, 'completed', nil, view.response_started_at or event_time)
   end
   view.awaiting_response = nil
   view.active_message = nil

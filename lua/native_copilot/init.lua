@@ -2182,6 +2182,7 @@ local function history_event(member_id, event, context)
 end
 
 local function finish_history_context(member_id, context)
+  buffers.finish_response(member_id)
   for _, message in ipairs(context.agent_messages) do
     local key = tostring(message.content):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')
     local matches = context.agent_tool_prompts[key] or 0
