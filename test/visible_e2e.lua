@@ -208,10 +208,7 @@ tick = function()
         tool_row,
         true
       )
-    local task_header = reply and content:find('📝 · ', reply, true)
-    local prior_task = task_header
-      and content:find('[task][e2e-prior-task] completed', task_header, true)
-    if not (copilot_header and tool_row and reply and task_header and prior_task) then
+    if not (copilot_header and tool_row and reply) then
       schedule_tick()
       return
     end
@@ -226,12 +223,6 @@ tick = function()
     if not check(
       not tool_line:find('The background validation completed successfully', 1, true),
       'foreground tool and Copilot reply use separate lines'
-    ) then
-      return
-    end
-    if not check(
-      reply < task_header and task_header < prior_task,
-      'background task remained deferred until the foreground reply completed'
     ) then
       return
     end
@@ -256,6 +247,8 @@ tick = function()
     phase = 'reasoning-complete'
     schedule_tick()
   elseif phase == 'reasoning-complete' then
+    local reasoning_task_start =
+      content:find('[task][e2e-reasoning-task] started', 1, true)
     local first_reasoning =
       content:find('The completion event arrived while the foreground response was still active.', 1, true)
     local second_reasoning = content:find(
@@ -270,7 +263,14 @@ tick = function()
     local task_header = final_response and content:find('📝 · ', final_response, true)
     local task_row = task_header
       and content:find('[task][e2e-reasoning-task] completed', task_header, true)
-    if not (first_reasoning and second_reasoning and tool_row and final_response and task_row) then
+    if not (
+      reasoning_task_start
+      and first_reasoning
+      and second_reasoning
+      and tool_row
+      and final_response
+      and task_row
+    ) then
       schedule_tick()
       return
     end
@@ -282,7 +282,8 @@ tick = function()
       return
     end
     if not check(
-      first_reasoning < second_reasoning
+      reasoning_task_start < first_reasoning
+        and first_reasoning < second_reasoning
         and second_reasoning < tool_row
         and tool_row < final_response
         and final_response < task_row,

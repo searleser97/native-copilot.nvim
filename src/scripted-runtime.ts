@@ -134,15 +134,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   private async toolAuthorship(target: string): Promise<void> {
-    this.emit("tasks.changed", {
-      tasks: [{
-        id: "e2e-prior-task",
-        type: "shell",
-        status: "completed",
-        description: "Validate workspace in background",
-        result: "workspace validation passed",
-      }],
-    }, { memberId: target, target: "status", done: true });
     await observationPause();
     this.emit("activity.event", {
       eventType: "tool.execution_start",
@@ -173,6 +164,36 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   private async reasoningFolds(target: string): Promise<void> {
     this.emitBusy(target, "e2e-reasoning-turn");
+    this.emit("activity.event", {
+      eventType: "tool.execution_start",
+      data: {
+        toolCallId: "e2e-reasoning-background",
+        toolName: "powershell",
+        arguments: {
+          command: "Write-Output 'metadata refreshed'",
+          description: "Refresh validation metadata",
+          mode: "async",
+          detach: true,
+        },
+      },
+    }, this.fields(target));
+    this.emit("activity.event", {
+      eventType: "tool.execution_complete",
+      data: {
+        toolCallId: "e2e-reasoning-background",
+        success: true,
+        result: { shellId: "e2e-reasoning-task" },
+      },
+    }, this.fields(target, true));
+    this.emit("tasks.changed", {
+      tasks: [{
+        id: "e2e-reasoning-task",
+        type: "shell",
+        status: "running",
+        description: "Refresh validation metadata",
+      }],
+    }, { memberId: target, target: "status", done: true });
+    await observationPause();
     this.emit("activity.delta", {
       reasoningId: "e2e-reasoning-one",
       content:
