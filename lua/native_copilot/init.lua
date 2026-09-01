@@ -1730,7 +1730,10 @@ local function picker(title, entries, choose, picker_options)
         vim.api.nvim_create_autocmd('BufWipeout', {
           buffer = prompt_buf,
           once = true,
-          callback = function() vim.defer_fn(restore_cursor_animation, 100) end,
+          callback = function()
+            local restore = restore_cursor_animation
+            if restore then vim.defer_fn(restore, 100) end
+          end,
         })
       end
       actions.select_default:replace(function()
