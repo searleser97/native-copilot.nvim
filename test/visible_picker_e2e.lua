@@ -174,6 +174,17 @@ local function line_containing(content, needle)
   end
 end
 
+local function heading_before(content, needle)
+  local lines = vim.split(content, '\n', { plain = true })
+  for index, line in ipairs(lines) do
+    if line:find(needle, 1, true) then
+      for previous = index - 1, 1, -1 do
+        if lines[previous] ~= '' then return lines[previous] end
+      end
+    end
+  end
+end
+
 local function occurrence_count(content, needle)
   local count = 0
   local offset = 1
@@ -753,6 +764,17 @@ tick = function()
     if not check(
       not content:find('SUBAGENT INTERNAL RESPONSE MUST NOT RENDER AS STANDARD COPILOT', 1, true),
       '/resume kept sub-agent internal responses out of the root Copilot transcript'
+    ) then
+      finish()
+      return
+    end
+    local timestamp_tool = line_containing(content, 'history-timestamp-probe.txt') or ''
+    local timestamp_heading = heading_before(content, 'history-timestamp-probe.txt') or ''
+    local heading_time = timestamp_heading:match('🤖 · (%d%d:%d%d:%d%d)')
+    local tool_time = timestamp_tool:match('· (%d%d:%d%d:%d%d)$')
+    if not check(
+      heading_time ~= nil and heading_time == tool_time,
+      '/resume used the historical tool time for synthetic Copilot headings'
     ) then
       finish()
       return

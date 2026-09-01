@@ -774,6 +774,29 @@ export class ScriptedRuntime implements RuntimeAdapter {
           type: "assistant.turn_end",
           data: { turnId: "cli-turn-2" },
         },
+        {
+          id: "cli-orphan-tool-start",
+          parentId: "cli-turn-end-2",
+          timestamp: "2026-08-31T15:00:15.000Z",
+          type: "tool.execution_start",
+          data: {
+            toolCallId: "cli-history-timestamp",
+            toolName: "view",
+            arguments: { path: "history-timestamp-probe.txt" },
+          },
+        },
+        {
+          id: "cli-orphan-tool-complete",
+          parentId: "cli-orphan-tool-start",
+          timestamp: "2026-08-31T15:00:16.000Z",
+          type: "tool.execution_complete",
+          data: {
+            toolCallId: "cli-history-timestamp",
+            toolName: "view",
+            success: true,
+            result: { content: "timestamp probe complete" },
+          },
+        },
       ].map((event) => ({
         ...event,
         replayTimestamp: Date.parse(event.timestamp),

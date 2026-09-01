@@ -562,7 +562,8 @@ loads the real installed Telescope, Plenary, Blink, and smear-cursor plugins and
 pickers, direct command forms, newest-session selection, locked sessions, session restoration, and
 constrained UI layouts. Resume coverage also verifies that sub-agent prompts retain Task ownership
 without duplicating the initial `task` or later `write_agent` tool arguments, and that internal
-sub-agent responses do not appear as Standard Copilot output.
+sub-agent responses do not appear as Standard Copilot output. Tool-only historical responses also
+retain their original timestamp instead of using the time at which `/resume` was invoked.
 `telescope-no-smear` repeats that complete picker scenario without adding smear-cursor to Neovim's
 runtime path, proving the optional integration is not required.
 Shared scenarios cover streamed reasoning folds, fold open/close behavior, Tool ownership, and

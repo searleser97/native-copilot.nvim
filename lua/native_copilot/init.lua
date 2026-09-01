@@ -838,7 +838,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     end
   else
     if not item.async then
-      buffers.begin_response(member_id, 'tool:' .. tostring(call_id))
+      buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
     end
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
