@@ -127,6 +127,12 @@ local function submit(content)
   mapping.callback()
 end
 
+local function resume_cli_session()
+  submit('/resume e2e-cli-session')
+  phase = 'resume'
+  schedule_tick()
+end
+
 tick = function()
   local buf = conversation()
   local content = buf and text(buf) or ''
@@ -358,7 +364,7 @@ tick = function()
       phase = 'permission'
       schedule_tick()
     else
-      finish()
+      resume_cli_session()
     end
   elseif phase == 'permission' then
     if not (
@@ -373,6 +379,114 @@ tick = function()
       return
     end
     if not check(true, 'interactive permission approved through visible picker') then return end
+    resume_cli_session()
+  elseif phase == 'resume' then
+    local user_message =
+      content:find('Inspect this workspace and validate it without blocking the conversation.', 1, true)
+    local reasoning =
+      content:find('I should inspect the project structure first.', user_message or 1, true)
+    local tool_row = reasoning
+      and content:find('[tool][cli-list-files] glob', reasoning, true)
+    local instruction = tool_row
+      and content:find('[instruction] Repository instructions', tool_row, true)
+    local permission = instruction
+      and content:find('[permission] shell — approved: npm run check', instruction, true)
+    local first_reply = permission
+      and content:find(
+        'The workspace contains both the TypeScript host and the Neovim Lua client.',
+        permission,
+        true
+      )
+    local task_start = first_reply
+      and content:find('[task][cli-shell-7] started', first_reply, true)
+    local task_complete = task_start
+      and content:find('[task][cli-shell-7] completed', task_start, true)
+    local second_user = task_complete
+      and content:find('Schedule an hourly workspace recheck, then cancel it.', task_complete, true)
+    local schedule_created = second_user
+      and content:find('[schedule][1] created', second_user, true)
+    local schedule_cancelled = schedule_created
+      and content:find('[schedule][1] cancelled', schedule_created, true)
+    local final_reply = schedule_cancelled
+      and content:find(
+        'Validation completed successfully, and the temporary recurring check was cancelled.',
+        schedule_cancelled,
+        true
+      )
+    local agent_task = final_reply
+      and content:find('[task][cli-reviewer] completed', final_reply, true)
+    if not (
+      user_message
+      and reasoning
+      and tool_row
+      and instruction
+      and first_reply
+      and task_start
+      and task_complete
+      and permission
+      and second_user
+      and schedule_created
+      and schedule_cancelled
+      and final_reply
+      and agent_task
+    ) then
+      schedule_tick()
+      return
+    end
+    if not check(
+      not content:find('Run a background workspace validation', 1, true),
+      'resuming a CLI session replaced the previous Standard buffer'
+    ) then
+      return
+    end
+    local history_epoch = 1788188400
+    if not check(
+      content:find(
+        ('──────── %s ────────'):format(os.date('%A, %B %d', history_epoch)),
+        1,
+        true
+      ) ~= nil
+        and content:find('👨 · ' .. os.date('%H:%M:%S', history_epoch), 1, true) ~= nil,
+      'CLI session replay preserved original event timestamps'
+    ) then
+      return
+    end
+    local _, historical_day_headers = content:gsub('──────── ', '')
+    if not check(
+      historical_day_headers == 1,
+      'CLI session replay used only the persisted historical date header'
+    ) then
+      return
+    end
+    if not check(
+      user_message < reasoning
+        and reasoning < tool_row
+        and tool_row < instruction
+        and instruction < permission
+        and permission < first_reply
+        and first_reply < task_start
+        and task_start < task_complete
+        and task_complete < second_user
+        and second_user < schedule_created
+        and schedule_created < schedule_cancelled
+        and schedule_cancelled < final_reply
+        and final_reply < agent_task,
+      'CLI session history preserved durable timeline order'
+    ) then
+      return
+    end
+    if not check(
+      not content:find('DUPLICATE EPHEMERAL CONTENT', 1, true),
+      'CLI session replay omitted ephemeral streaming deltas'
+    ) then
+      return
+    end
+    if not check(
+      not content:find('<system_notification>', 1, true),
+      'CLI system notifications replayed as structured Task rows'
+    ) then
+      return
+    end
     finish()
   end
 end

@@ -32,6 +32,7 @@ const observationPause = (milliseconds = 350): Promise<void> =>
 
 export class ScriptedRuntime implements RuntimeAdapter {
   private standardRunId: string | undefined;
+  private resumedCliSession = false;
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private stopped = false;
 
@@ -372,11 +373,294 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   async listSessions(): Promise<unknown[]> {
-    return [];
+    return this.resumedCliSession
+      ? []
+      : [{
+          sessionId: "e2e-cli-session",
+          startTime: new Date("2026-08-31T15:00:00.000Z"),
+          modifiedTime: new Date("2026-08-31T15:30:00.000Z"),
+          modifiedAgoSeconds: 60,
+          summary: "CLI workspace validation",
+          isRemote: false,
+          inUse: false,
+          context: { workingDirectory: this.workspace },
+        }];
   }
 
-  async resumeStandardSession(_sessionId: string): Promise<void> {
-    await this.openStandard();
+  async resumeStandardSession(sessionId: string): Promise<void> {
+    if (sessionId !== "e2e-cli-session") {
+      throw new Error(`Session "${sessionId}" was not found for this workspace.`);
+    }
+    if (this.standardRunId) {
+      this.db.finishRun(this.standardRunId, "stopped", `Resuming session ${sessionId}`);
+    }
+    this.standardRunId = randomUUID();
+    this.db.createRun(this.standardRunId, "standard", null, this.workspace, process.pid);
+    this.resumedCliSession = true;
+    const target = "standard";
+    this.emit("session.loading", {
+      mode: "standard-loading",
+      sessionId,
+    }, { runId: this.standardRunId, memberId: target, target: "status", done: false });
+    this.emit("session.history", {
+      events: [
+        {
+          id: "cli-user-1",
+          parentId: null,
+          timestamp: "2026-08-31T15:00:00.000Z",
+          type: "user.message",
+          data: {
+            content: "Inspect this workspace and validate it without blocking the conversation.",
+            source: "user",
+            delivery: "idle",
+          },
+        },
+        {
+          id: "cli-turn-start-1",
+          parentId: "cli-user-1",
+          timestamp: "2026-08-31T15:00:00.500Z",
+          type: "assistant.turn_start",
+          data: { turnId: "cli-turn-1" },
+        },
+        {
+          id: "cli-reasoning-1",
+          parentId: "cli-turn-start-1",
+          timestamp: "2026-08-31T15:00:01.000Z",
+          type: "assistant.reasoning",
+          data: {
+            reasoningId: "cli-reasoning",
+            content:
+              "I should inspect the project structure first.\n\n" +
+              "Then I can start validation in the background and continue explaining.",
+          },
+        },
+        {
+          id: "cli-tool-start-1",
+          parentId: "cli-reasoning-1",
+          timestamp: "2026-08-31T15:00:02.000Z",
+          type: "tool.execution_start",
+          data: {
+            toolCallId: "cli-list-files",
+            toolName: "glob",
+            arguments: { pattern: "**/*.{ts,lua}" },
+          },
+        },
+        {
+          id: "cli-tool-complete-1",
+          parentId: "cli-tool-start-1",
+          timestamp: "2026-08-31T15:00:03.000Z",
+          type: "tool.execution_complete",
+          data: {
+            toolCallId: "cli-list-files",
+            toolName: "glob",
+            success: true,
+            result: { files: ["src/main.ts", "lua/native_copilot/init.lua"] },
+          },
+        },
+        {
+          id: "cli-instruction-notification",
+          parentId: "cli-tool-complete-1",
+          timestamp: "2026-08-31T15:00:03.100Z",
+          type: "system.notification",
+          data: {
+            content: "<system_notification>Repository instructions discovered.</system_notification>",
+            kind: {
+              type: "instruction_discovered",
+              description: "Repository instructions",
+              sourcePath: ".github/copilot-instructions.md",
+              triggerFile: "src/main.ts",
+              triggerTool: "view",
+            },
+          },
+        },
+        {
+          id: "cli-permission-request",
+          parentId: "cli-instruction-notification",
+          timestamp: "2026-08-31T15:00:03.250Z",
+          type: "permission.requested",
+          data: {
+            requestId: "cli-permission",
+            permissionRequest: {
+              kind: "shell",
+              fullCommandText: "npm run check",
+            },
+          },
+        },
+        {
+          id: "cli-permission-complete",
+          parentId: "cli-permission-request",
+          timestamp: "2026-08-31T15:00:03.400Z",
+          type: "permission.completed",
+          data: {
+            requestId: "cli-permission",
+            result: { kind: "approved" },
+          },
+        },
+        {
+          id: "cli-message-delta-1",
+          parentId: "cli-permission-complete",
+          timestamp: "2026-08-31T15:00:03.500Z",
+          type: "assistant.message_delta",
+          ephemeral: true,
+          data: {
+            messageId: "cli-message-1",
+            deltaContent: "DUPLICATE EPHEMERAL CONTENT",
+          },
+        },
+        {
+          id: "cli-message-1",
+          parentId: "cli-message-delta-1",
+          timestamp: "2026-08-31T15:00:04.000Z",
+          type: "assistant.message",
+          data: {
+            messageId: "cli-message-1",
+            content: "The workspace contains both the TypeScript host and the Neovim Lua client.",
+          },
+        },
+        {
+          id: "cli-shell-start",
+          parentId: "cli-message-1",
+          timestamp: "2026-08-31T15:00:05.000Z",
+          type: "tool.execution_start",
+          data: {
+            toolCallId: "cli-shell",
+            toolName: "powershell",
+            arguments: {
+              command: "npm run check",
+              description: "Validate the workspace",
+              mode: "async",
+              detach: true,
+            },
+          },
+        },
+        {
+          id: "cli-shell-detached",
+          parentId: "cli-shell-start",
+          timestamp: "2026-08-31T15:00:06.000Z",
+          type: "tool.execution_complete",
+          data: {
+            toolCallId: "cli-shell",
+            toolName: "powershell",
+            success: true,
+            result: { shellId: "cli-shell-7" },
+          },
+        },
+        {
+          id: "cli-turn-end-1",
+          parentId: "cli-shell-detached",
+          timestamp: "2026-08-31T15:00:07.000Z",
+          type: "assistant.turn_end",
+          data: { turnId: "cli-turn-1" },
+        },
+        {
+          id: "cli-shell-notification",
+          parentId: "cli-turn-end-1",
+          timestamp: "2026-08-31T15:00:08.000Z",
+          type: "system.notification",
+          data: {
+            content: "<system_notification>Workspace validation completed.</system_notification>",
+            kind: {
+              type: "shell_completed",
+              shellId: "cli-shell-7",
+              description: "Validate the workspace",
+              exitCode: 0,
+            },
+          },
+        },
+        {
+          id: "cli-user-2",
+          parentId: "cli-shell-notification",
+          timestamp: "2026-08-31T15:00:09.000Z",
+          type: "user.message",
+          data: {
+            content: "Schedule an hourly workspace recheck, then cancel it.",
+            source: "user",
+            delivery: "idle",
+          },
+        },
+        {
+          id: "cli-turn-start-2",
+          parentId: "cli-user-2",
+          timestamp: "2026-08-31T15:00:10.000Z",
+          type: "assistant.turn_start",
+          data: { turnId: "cli-turn-2" },
+        },
+        {
+          id: "cli-schedule-created",
+          parentId: "cli-turn-start-2",
+          timestamp: "2026-08-31T15:00:11.000Z",
+          type: "session.schedule_created",
+          data: {
+            id: 1,
+            intervalMs: 3600000,
+            prompt: "Recheck the workspace",
+            recurring: true,
+          },
+        },
+        {
+          id: "cli-schedule-cancelled",
+          parentId: "cli-schedule-created",
+          timestamp: "2026-08-31T15:00:12.000Z",
+          type: "session.schedule_cancelled",
+          data: { id: 1 },
+        },
+        {
+          id: "cli-subagent-start",
+          agentId: "cli-reviewer",
+          parentId: "cli-schedule-cancelled",
+          timestamp: "2026-08-31T15:00:12.250Z",
+          type: "subagent.started",
+          data: {
+            toolCallId: "cli-review-tool",
+            agentName: "reviewer",
+            agentDisplayName: "Workspace reviewer",
+            agentDescription: "Review the validation result",
+          },
+        },
+        {
+          id: "cli-subagent-complete",
+          agentId: "cli-reviewer",
+          parentId: "cli-subagent-start",
+          timestamp: "2026-08-31T15:00:12.500Z",
+          type: "subagent.completed",
+          data: {
+            toolCallId: "cli-review-tool",
+            agentName: "reviewer",
+            agentDisplayName: "Workspace reviewer",
+            totalToolCalls: 1,
+          },
+        },
+        {
+          id: "cli-message-2",
+          parentId: "cli-subagent-complete",
+          timestamp: "2026-08-31T15:00:13.000Z",
+          type: "assistant.message",
+          data: {
+            messageId: "cli-message-2",
+            content: "Validation completed successfully, and the temporary recurring check was cancelled.",
+          },
+        },
+        {
+          id: "cli-turn-end-2",
+          parentId: "cli-message-2",
+          timestamp: "2026-08-31T15:00:14.000Z",
+          type: "assistant.turn_end",
+          data: { turnId: "cli-turn-2" },
+        },
+      ].map((event) => ({
+        ...event,
+        replayTimestamp: Date.parse(event.timestamp),
+      })),
+    }, { runId: this.standardRunId, memberId: target, target: "conversation", done: true });
+    this.emit("member.state", {
+      state: "idle",
+      sessionId,
+    }, { runId: this.standardRunId, memberId: target, target: "status", done: true });
+    this.emit("standard.ready", {
+      mode: "standard",
+      recovered: true,
+      sessionId,
+    }, { runId: this.standardRunId, memberId: target, target: "status", done: true });
   }
 
   async listCommands(_target: string): Promise<unknown[]> {

@@ -189,3 +189,35 @@ text labels for operational clarity, and every participant heading remains confi
 - Preserve timestamps, accessibility, scanability, and unambiguous actor identity.
 - Ensure Scheduler and Tool participant headers remain coherent with the chosen format.
 - Update all rendering and tests only after the preferred design is confirmed.
+
+## Prompt submission
+
+### NC-012: Submit prompts with `<C-s>` in insert mode
+
+**Status:** Pending
+
+Add an insert-mode `<C-s>` mapping to submit the current Native Copilot prompt without requiring
+the user to leave insert mode.
+
+**Acceptance criteria**
+
+- `<C-s>` submits the active prompt while the cursor is in the prompt buffer's insert mode.
+- Existing normal-mode submission behavior remains unchanged.
+- The mapping is buffer-local and does not affect ordinary editing buffers.
+- Visible E2E coverage submits at least one prompt through the insert-mode mapping.
+
+### NC-013: Expose prompt submission for user-defined mappings
+
+**Status:** Pending
+
+Determine whether Native Copilot exposes a stable public function or `<Plug>` mapping that users
+can call from their own normal- and insert-mode keybindings. If it does not, design and expose one
+instead of requiring users to invoke internal callbacks.
+
+**Acceptance criteria**
+
+- Document whether a public prompt-submission API already exists.
+- If missing, expose a supported Lua function or `<Plug>` mapping.
+- User configuration can replace or supplement the default mappings without copying internal
+  prompt logic.
+- Invalid calls outside a Native Copilot prompt buffer fail safely and consistently.

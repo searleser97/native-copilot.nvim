@@ -1729,7 +1729,12 @@ export class CopilotRuntime {
     if (!suppressHistory) {
       this.emit(
         "session.history",
-        { events: history },
+        {
+          events: history.map((event) => ({
+            ...event,
+            replayTimestamp: Date.parse(event.timestamp),
+          })),
+        },
         { runId, memberId: target, target: "conversation", done: true },
       );
     }

@@ -247,6 +247,19 @@ function M.buffer(member_id, view_id)
   return entry and entry.views[view_id or 'conversation'].buf or nil
 end
 
+function M.prepare_history(member_id, event_time)
+  local view = M.ensure_member(member_id).views.conversation
+  local now = event_time or options.now()
+  with_modifiable(view.buf, function()
+    vim.api.nvim_buf_set_lines(view.buf, 0, -1, false, {
+      ('──────── %s ────────'):format(os.date(options.conversation.day_header_format, now)),
+      '',
+    })
+  end)
+  view.current_day = os.date('%Y-%m-%d', now)
+  view.last_block_kind = nil
+end
+
 local function flush(view)
   view.flush_scheduled = false
   if view.pending == '' or not vim.api.nvim_buf_is_valid(view.buf) then return end
@@ -412,10 +425,10 @@ local function highlight_header(buf, row, line, group)
   })
 end
 
-function M.append_block(member_id, view_id, heading, content)
+function M.append_block(member_id, view_id, heading, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
-  local now = ensure_day_header(view, options.now())
+  local now = ensure_day_header(view, event_time or options.now())
   prepare_pending_block(view, 1)
   local line_count = vim.api.nvim_buf_line_count(view.buf)
   local display_heading
@@ -463,8 +476,8 @@ function M.append_block(member_id, view_id, heading, content)
   end
 end
 
-local function begin_inline_activity(view, activity_id, heading)
-  ensure_day_header(view, options.now())
+local function begin_inline_activity(view, activity_id, heading, event_time)
+  ensure_day_header(view, event_time or options.now())
   flush(view)
   local plain = heading == 'Reasoning summary'
   local continuation = view.last_block_kind == 'activity'
@@ -615,7 +628,7 @@ local function replace_activity_content(view, activity, content)
   return true
 end
 
-function M.complete_activity(member_id, activity_id, content)
+function M.complete_activity(member_id, activity_id, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   local activity = view.active_activity and view.active_activity.id == activity_id
@@ -642,7 +655,7 @@ function M.complete_activity(member_id, activity_id, content)
       if not view.streaming then finalize_render(view) end
     end
   else
-    M.append_activity_block(member_id, 'Reasoning summary', content)
+    M.append_activity_block(member_id, 'Reasoning summary', content, event_time)
     view.activity_records[activity_id] = {
       id = activity_id,
       content = content,
@@ -651,10 +664,15 @@ function M.complete_activity(member_id, activity_id, content)
   end
 end
 
-function M.append_activity_block(member_id, heading, content)
+function M.append_activity_block(member_id, heading, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
-  begin_inline_activity(view, ('%s-%d'):format(heading, vim.uv.hrtime()), heading)
+  begin_inline_activity(
+    view,
+    ('%s-%d'):format(heading, vim.uv.hrtime()),
+    heading,
+    event_time
+  )
   local line_prefix = view.active_activity.plain
       and ('\n' .. content_indent)
     or ('\n' .. quote_indent .. ' ')
@@ -831,7 +849,7 @@ function M.upsert_timeline(member_id, item_id, item)
     local queued = deferred.items[item_id]
     if not queued then
       table.insert(deferred.order, item_id)
-      queued = { created_at = options.now() }
+      queued = { created_at = item.created_at or options.now() }
       deferred.items[item_id] = queued
     end
     queued.item = vim.deepcopy(item)
@@ -860,7 +878,7 @@ function M.upsert_timeline(member_id, item_id, item)
   end
   local overridden_time = view.timeline_time_overrides[item_id]
   view.timeline_time_overrides[item_id] = nil
-  local now = record and record.created_at or overridden_time or options.now()
+  local now = record and record.created_at or overridden_time or item.created_at or options.now()
   local lines = timeline_lines(item, now)
   if start_row then
     with_modifiable(view.buf, function()
@@ -1087,7 +1105,7 @@ local function animate_writing(view, generation)
   end, 400)
 end
 
-local function touch_message_heading(view, status, detail)
+local function touch_message_heading(view, status, detail, event_time)
   stop_writing_animation(view)
   local label = options.conversation.copilot_label
   if status == 'failed' then
@@ -1097,7 +1115,7 @@ local function touch_message_heading(view, status, detail)
     view,
     ('%s · %s%s'):format(
       label,
-      timestamp(),
+      timestamp(event_time),
       detail and (' · ' .. detail) or ''
     )
   )
@@ -1127,8 +1145,8 @@ local function remove_message_heading(view)
   view.message_heading = nil
 end
 
-local function begin_response(view, response_id)
-  ensure_day_header(view, options.now())
+local function begin_response(view, response_id, event_time)
+  ensure_day_header(view, event_time or options.now())
   prepare_pending_block(view, 1)
   vim.api.nvim_buf_clear_namespace(view.buf, message_heading_namespace, 0, -1)
   local heading_row = vim.api.nvim_buf_line_count(view.buf) - 1
@@ -1159,6 +1177,7 @@ local function begin_response(view, response_id)
   )
   view.awaiting_response = response_id or true
   view.response_active = true
+  view.response_message_completed = false
   view.last_block_kind = 'header'
   animate_writing(view, view.writing_generation)
 end
@@ -1184,10 +1203,10 @@ local function indent_response_delta(view, content)
   return table.concat(result)
 end
 
-function M.begin_response(member_id, response_id)
+function M.begin_response(member_id, response_id, event_time)
   local view = M.ensure_member(member_id).views.conversation
   if view.response_active or view.awaiting_response or view.active_message then return end
-  begin_response(view, response_id)
+  begin_response(view, response_id, event_time)
 end
 
 function M.append_conversation_delta(member_id, message_id, content)
@@ -1245,7 +1264,7 @@ function M.fail_response(member_id, detail)
   finalize_render(view)
 end
 
-function M.complete_conversation(member_id, message_id, content)
+function M.complete_conversation(member_id, message_id, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
   if view.awaiting_response and content == '' then
@@ -1260,18 +1279,19 @@ function M.complete_conversation(member_id, message_id, content)
     end
     append(view, indent_response_delta(view, content) .. '\n', true)
     view.awaiting_response = nil
-    touch_message_heading(view, 'completed')
+    touch_message_heading(view, 'completed', nil, event_time)
   elseif view.active_message == message_id then
     append(view, '\n', true)
-    touch_message_heading(view, 'completed')
+    touch_message_heading(view, 'completed', nil, event_time)
   elseif view.response_active and view.message_heading then
     prepare_pending_block(view, 1)
     append(view, indent_response_delta(view, content) .. '\n', true)
-    touch_message_heading(view, 'completed')
+    touch_message_heading(view, 'completed', nil, event_time)
   else
-    M.append_block(member_id, 'conversation', 'Copilot', content)
+    M.append_block(member_id, 'conversation', 'Copilot', content, event_time)
   end
   view.active_message = nil
+  view.response_message_completed = true
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.response_has_owned_timeline = false
@@ -1293,12 +1313,13 @@ function M.finish_response(member_id)
     and not view.response_has_owned_timeline
   then
     remove_message_heading(view)
-  else
+  elseif not view.response_message_completed then
     touch_message_heading(view, 'completed')
   end
   view.awaiting_response = nil
   view.active_message = nil
   view.response_active = false
+  view.response_message_completed = false
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.response_has_owned_timeline = false

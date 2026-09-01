@@ -258,7 +258,7 @@ local function concise_detail(value)
   return detail
 end
 
-local function update_schedule(member_id, schedule_id, event, updates, event_id)
+local function update_schedule(member_id, schedule_id, event, updates, event_id, event_time)
   local key = member_id .. ':' .. tostring(schedule_id)
   local schedule = vim.tbl_deep_extend('force', state.schedules[key] or {}, updates or {})
   state.schedules[key] = schedule
@@ -282,6 +282,7 @@ local function update_schedule(member_id, schedule_id, event, updates, event_id)
       nextRunAt = schedule.nextRunAt,
       event = event,
     },
+    created_at = event_time,
   })
 end
 
@@ -622,6 +623,7 @@ local function emit_task_event(member_id, task, event)
     detail = task_terminal_detail(task, status),
     actor_message = event ~= 'started',
     task = vim.deepcopy(task),
+    created_at = json_value(task.created_at),
   })
 end
 
@@ -703,6 +705,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   item.name = tool_name or item.name
   item.status = status
   item.details = vim.tbl_deep_extend('force', item.details or {}, details or {})
+  item.created_at = item.created_at or json_value(item.details.created_at)
   local arguments = item.details.arguments
   local async_mode = type(arguments) == 'table'
     and (
@@ -739,6 +742,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
         label = shell_start_label(item.details.arguments),
         status = status,
         details = item.details,
+        created_at = item.created_at,
       })
     end
   else
@@ -754,6 +758,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       actor_message = item.async and terminal,
       copilot_owned = not item.async,
       details = item.details,
+      created_at = json_value(item.details.created_at),
     })
   end
 
@@ -822,6 +827,7 @@ local function claim_async_shell_tool(member_id, task)
     status = 'completed',
     task = vim.deepcopy(task),
     details = fallback.details,
+    created_at = fallback.created_at,
   })
   return true
 end
@@ -1774,14 +1780,153 @@ local function event_member(message)
   return message.memberId or 'standard'
 end
 
-local function history_event(member_id, event)
+local function history_task(member_id, task, status, event_time)
+  task = vim.tbl_deep_extend('force', task, {
+    status = status,
+    created_at = event_time,
+  })
+  local existing
+  for _, candidate in ipairs(state.tasks[member_id] or {}) do
+    if tostring(json_value(candidate.id)) == tostring(json_value(task.id)) then
+      existing = candidate
+      break
+    end
+  end
+  if not existing and status ~= 'running' and status ~= 'idle' then
+    merge_tasks(member_id, { vim.tbl_deep_extend('force', task, { status = 'running' }) })
+  end
+  merge_tasks(member_id, { task })
+end
+
+local function history_notification(member_id, event, event_time)
+  local data = type(event.data) == 'table' and event.data or {}
+  local kind = type(data.kind) == 'table' and data.kind or {}
+  if kind.type == 'shell_completed' or kind.type == 'shell_detached_completed' then
+    history_task(member_id, {
+      id = tostring(kind.shellId or event.id),
+      type = 'shell',
+      description = kind.description or 'Background shell command',
+      result = kind.exitCode ~= nil and ('exit code ' .. tostring(kind.exitCode)) or 'completed',
+    }, kind.exitCode ~= nil and kind.exitCode ~= 0 and 'failed' or 'completed', event_time)
+  elseif kind.type == 'agent_completed' or kind.type == 'agent_idle' then
+    local status = kind.type == 'agent_idle' and 'idle'
+      or kind.status == 'failed' and 'failed'
+      or kind.status == 'cancelled' and 'cancelled'
+      or 'completed'
+    history_task(member_id, {
+      id = tostring(kind.agentId or event.id),
+      type = kind.agentType or 'agent',
+      description = kind.description or kind.prompt or 'Background agent',
+      prompt = kind.prompt,
+    }, status, event_time)
+  elseif kind.type == 'factory_completed' then
+    history_task(member_id, {
+      id = tostring(kind.runId or kind.factoryId or event.id),
+      type = 'factory',
+      description = kind.name or kind.factoryName or 'Factory run',
+      result = kind.result,
+      error = kind.error,
+    }, kind.status == 'failed' and 'failed' or 'completed', event_time)
+  elseif kind.type == 'instruction_discovered' then
+    buffers.upsert_timeline(member_id, 'history-notification:' .. tostring(event.id), {
+      kind = 'instruction',
+      label = kind.description or kind.sourcePath or 'Instruction discovered',
+      status = 'completed',
+      detail = kind.triggerFile,
+      created_at = event_time,
+    })
+  elseif kind.type == 'new_inbox_message' then
+    buffers.append_activity_block(
+      member_id,
+      'Inbox message',
+      kind.summary or ('New message from ' .. tostring(kind.senderName or 'another participant'))
+    )
+  elseif type(data.content) == 'string' and data.content ~= '' then
+    local content = data.content
+      :gsub('^%s*<system_notification>%s*', '')
+      :gsub('%s*</system_notification>%s*$', '')
+    if content ~= '' then buffers.append_activity_block(member_id, 'System notification', content) end
+  end
+end
+
+local function history_event(member_id, event, context)
+  if type(event) ~= 'table' or event.ephemeral == true then return end
+  local data = type(event.data) == 'table' and event.data or {}
+  local replay_timestamp = tonumber(json_value(event.replayTimestamp))
+  local event_time = replay_timestamp and math.floor(replay_timestamp / 1000) or nil
   if event.type == 'user.message' and event.data then
-    local content = event.data.content or event.data.prompt
-    if content then buffers.append_block(member_id, 'conversation', 'You', content) end
-  elseif event.type == 'assistant.message' and event.data and event.data.content then
-    buffers.complete_conversation(member_id, event.data.messageId or event.id, event.data.content)
-  elseif event.type == 'assistant.reasoning' and event.data and event.data.content then
-    buffers.complete_activity(member_id, event.data.reasoningId or event.id, event.data.content)
+    local content = data.content or data.prompt
+    if content then
+      buffers.append_block(member_id, 'conversation', 'You', content, event_time)
+    end
+  elseif event.type == 'assistant.turn_start' then
+    buffers.begin_response(member_id, data.turnId or event.id, event_time)
+  elseif event.type == 'assistant.turn_end' or event.type == 'session.idle' then
+    buffers.finish_response(member_id)
+  elseif event.type == 'assistant.message' and data.content then
+    buffers.complete_conversation(member_id, data.messageId or event.id, data.content, event_time)
+  elseif event.type == 'assistant.reasoning' and data.content then
+    buffers.begin_response(member_id, data.reasoningId or event.id, event_time)
+    buffers.complete_activity(member_id, data.reasoningId or event.id, data.content, event_time)
+  elseif event.type == 'tool.execution_start' then
+    update_tool_call(member_id, data.toolCallId or event.id, data.toolName, 'running', {
+      arguments = data.arguments,
+      created_at = event_time,
+    })
+  elseif event.type == 'tool.execution_complete' then
+    update_tool_call(member_id, data.toolCallId or event.id, data.toolName, data.success == false and 'failed' or 'completed', {
+      result = data.result,
+      error = data.error,
+      created_at = event_time,
+    })
+  elseif event.type == 'subagent.started' then
+    history_task(member_id, {
+      id = tostring(event.agentId or data.toolCallId or event.id),
+      type = data.agentName or 'agent',
+      description = data.agentDescription or data.agentDisplayName or 'Background agent',
+      model = data.model,
+    }, 'running', event_time)
+  elseif event.type == 'subagent.completed' or event.type == 'subagent.failed' then
+    history_task(member_id, {
+      id = tostring(event.agentId or data.toolCallId or event.id),
+      type = data.agentName or 'agent',
+      error = data.error,
+    }, event.type == 'subagent.failed' and 'failed'
+      or data.cancelled == true and 'cancelled'
+      or 'completed', event_time)
+  elseif event.type == 'system.notification' then
+    history_notification(member_id, event, event_time)
+  elseif event.type == 'permission.requested' then
+    context.permissions[tostring(data.requestId or event.id)] = data.permissionRequest or {}
+  elseif event.type == 'permission.completed' then
+    local request_id = tostring(data.requestId or '')
+    local request = context.permissions[request_id]
+    if request then
+      local result = type(data.result) == 'table' and data.result or {}
+      local approved = result.kind == 'approved' or result.kind == 'approved-for-session'
+      buffers.upsert_timeline(member_id, 'permission:' .. request_id, {
+        kind = 'permission',
+        label = request.kind or 'tool',
+        status = approved and 'completed' or 'denied',
+        detail = ('%s: %s'):format(
+          approved and 'approved' or 'denied',
+          tostring(permission_detail(request))
+        ),
+        created_at = event_time,
+      })
+      context.permissions[request_id] = nil
+    end
+  elseif event.type == 'session.schedule_created' then
+    update_schedule(member_id, data.id, 'created', data, event.id, event_time)
+  elseif event.type == 'session.schedule_cancelled' then
+    update_schedule(member_id, data.id, 'cancelled', data, event.id, event_time)
+  elseif event.type == 'session.schedule_rearmed' then
+    update_schedule(member_id, data.id, 'rearmed', data, event.id, event_time)
+  elseif event.type == 'session.error' or event.type == 'session.warning' or event.type == 'session.info' then
+    local heading = event.type == 'session.error' and 'Session error'
+      or event.type == 'session.warning' and 'Session warning'
+      or 'Session information'
+    buffers.append_activity_block(member_id, heading, data.message or vim.inspect(data))
   end
 end
 
@@ -2412,7 +2557,14 @@ function M._on_event(message)
   local member_id = event_member(message)
   local entry = ensure_member(member_id)
   if message.type == 'session.history' then
-    for _, event in ipairs(payload.events or {}) do history_event(member_id, event) end
+    local first_event = type(payload.events) == 'table' and payload.events[1] or nil
+    local first_timestamp = first_event and tonumber(json_value(first_event.replayTimestamp))
+    buffers.prepare_history(
+      member_id,
+      first_timestamp and math.floor(first_timestamp / 1000) or nil
+    )
+    local context = { permissions = {} }
+    for _, event in ipairs(payload.events or {}) do history_event(member_id, event, context) end
   elseif message.type == 'scheduled.prompt' then
     local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
     local schedule_id = json_value(payload.scheduleId)
