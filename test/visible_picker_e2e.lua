@@ -103,10 +103,15 @@ local function current_picker()
   return buf, picker
 end
 
-local function submit(content)
+local function submit(content, lhs, mode)
   local buf = assert(prompt(), 'prompt buffer was not found')
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { content })
-  return vim.api.nvim_buf_call(buf, native.submit_prompt)
+  if not lhs then return vim.api.nvim_buf_call(buf, native.submit_prompt) end
+  local mapping = vim.api.nvim_buf_call(buf, function()
+    return vim.fn.maparg(lhs, mode or 'n', false, true)
+  end)
+  assert(mapping.callback, ('prompt submit mapping %s was not found'):format(lhs))
+  return vim.api.nvim_buf_call(buf, mapping.callback)
 end
 
 local function choose_where(predicate)
@@ -390,7 +395,7 @@ tick = function()
     pass('/resume <id> rejected a session active in another process')
     vim.o.lines = 8
     vim.o.columns = 40
-    submit('/resume')
+    submit('/resume', '<C-s>', 'i')
     phase = 'resume-picker'
   elseif phase == 'resume-picker' then
     if not picker then

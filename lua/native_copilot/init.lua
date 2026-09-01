@@ -1650,17 +1650,8 @@ local function picker(title, entries, choose, picker_options)
   local action_state = modules['telescope.actions.state']
   local conf = modules['telescope.config'].values
   local sorters = modules['telescope.sorters']
-  local initial_selection_index = picker_options.initial_selection_index
   local telescope_options = {
     prompt_title = title,
-    default_selection_index = initial_selection_index,
-    on_complete = initial_selection_index
-        and {
-          function(active_picker)
-            active_picker:set_selection(active_picker:get_row(initial_selection_index))
-          end,
-        }
-      or nil,
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -2218,7 +2209,6 @@ function M._on_event(message)
       send('session.resume', { sessionId = item.session.sessionId })
     end, {
       preserve_order = true,
-      initial_selection_index = 1,
     })
     return
   elseif message.type == 'commands.list' then
