@@ -2104,7 +2104,7 @@ local function history_event(member_id, event, context)
   elseif event.type == 'assistant.turn_start' then
     buffers.begin_response(member_id, data.turnId or event.id, event_time)
   elseif event.type == 'assistant.turn_end' or event.type == 'session.idle' then
-    buffers.finish_response(member_id)
+    buffers.finish_response(member_id, event_time)
   elseif event.type == 'assistant.message' and data.content then
     buffers.complete_conversation(member_id, data.messageId or event.id, data.content, event_time)
   elseif event.type == 'assistant.reasoning' and data.content then

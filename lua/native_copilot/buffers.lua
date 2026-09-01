@@ -192,6 +192,7 @@ local function create_buffer(name, member_id, view_id)
     activity_streaming = false,
     active_message = nil,
     response_active = false,
+    response_started_at = nil,
     response_line_start = true,
     response_resume_after_actor = false,
     response_has_owned_timeline = false,
@@ -1182,6 +1183,7 @@ local function begin_response(view, response_id, event_time)
   view.writing_step = 1
   view.response_line_start = true
   view.response_resume_after_actor = false
+  view.response_started_at = event_time
   append(
     view,
     ('%s · writing.\n\n'):format(
@@ -1284,6 +1286,7 @@ function M.fail_response(member_id, detail)
   view.awaiting_response = nil
   view.active_message = nil
   view.response_active = false
+  view.response_started_at = nil
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.response_has_owned_timeline = false
@@ -1327,7 +1330,7 @@ function M.complete_conversation(member_id, message_id, content, event_time)
   flush_deferred_timeline(member_id, view)
 end
 
-function M.finish_response(member_id)
+function M.finish_response(member_id, event_time)
   local entry = registry[member_id]
   local view = entry and entry.views.conversation
   if not view
@@ -1342,12 +1345,13 @@ function M.finish_response(member_id)
   then
     remove_message_heading(view)
   elseif not view.response_message_completed then
-    touch_message_heading(view, 'completed')
+    touch_message_heading(view, 'completed', nil, event_time or view.response_started_at)
   end
   view.awaiting_response = nil
   view.active_message = nil
   view.response_active = false
   view.response_message_completed = false
+  view.response_started_at = nil
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.response_has_owned_timeline = false
