@@ -24,6 +24,17 @@ vim.opt.runtimepath:prepend(plenary_path)
 vim.opt.runtimepath:prepend(telescope_path)
 vim.opt.runtimepath:prepend(root)
 vim.o.termguicolors = true
+local scheduled_errors = {}
+local original_schedule_wrap = vim.schedule_wrap
+vim.schedule_wrap = function(callback)
+  return original_schedule_wrap(function(...)
+    local arguments = table.pack(...)
+    local ok, failure = xpcall(function()
+      callback(table.unpack(arguments, 1, arguments.n))
+    end, debug.traceback)
+    if not ok then table.insert(scheduled_errors, failure) end
+  end)
+end
 require('telescope').setup({
   defaults = {
     layout_strategy = 'flex',
@@ -84,6 +95,16 @@ native.open({ reuse_current_tab = true })
 
 local actions = require('telescope.actions')
 local action_state = require('telescope.actions.state')
+local picker_class = require('telescope.pickers').Picker
+local original_clear_extra_rows = picker_class.clear_extra_rows
+local inject_short_resume_results = true
+picker_class.clear_extra_rows = function(self, results_bufnr)
+  original_clear_extra_rows(self, results_bufnr)
+  if inject_short_resume_results and self.prompt_title == 'Resume Copilot session' then
+    inject_short_resume_results = false
+    vim.api.nvim_buf_set_lines(results_bufnr, 1, -1, false, {})
+  end
+end
 
 local function find_buffer(predicate)
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -483,6 +504,22 @@ tick = function()
     local selected = action_state.get_selected_entry()
     local session = selected and selected.value and selected.value.session
     local result_count = picker.manager:num_results()
+    local range_error
+    for _, failure in ipairs(scheduled_errors) do
+      if failure:find('Invalid cursor line: out of range', 1, true)
+        and failure:find('telescope', 1, true)
+      then
+        range_error = failure
+        break
+      end
+    end
+    if not check(
+      range_error == nil,
+      '/resume avoided Telescope cursor placement outside the sparse results buffer'
+    ) then
+      finish(range_error)
+      return
+    end
     if not check(
       picker.sorting_strategy == 'ascending',
       '/resume used safe newest-first Telescope ordering'
@@ -497,6 +534,28 @@ tick = function()
     if not check(
       session and session.sessionId == 'e2e-cli-session',
       '/resume initially selected the most recent sparse-list session at the bottom'
+    ) then
+      finish()
+      return
+    end
+    actions.close(prompt_buf)
+    phase = 'resume-sparse-closed'
+    schedule_tick()
+  elseif phase == 'resume-sparse-closed' then
+    if picker then
+      schedule_tick()
+      return
+    end
+    submit('/resume')
+    phase = 'resume-picker-locked'
+  elseif phase == 'resume-picker-locked' then
+    if not picker then
+      schedule_tick()
+      return
+    end
+    if not check(
+      picker.manager:num_results() == 25,
+      '/resume Telescope picker rendered the complete session list'
     ) then
       finish()
       return
@@ -532,7 +591,7 @@ tick = function()
     local result_count = picker.manager:num_results()
     local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
     local result_height = vim.api.nvim_win_get_height(picker.results_win)
-    if not check(result_count == 25, '/resume Telescope picker rendered the complete session list') then
+    if not check(result_count == 25, '/resume reopened the complete session list') then
       finish()
       return
     end
