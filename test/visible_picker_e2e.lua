@@ -497,12 +497,12 @@ tick = function()
       return
     end
     pass('SDK-provided slash command executed and rendered its result')
-    submit('/resume e2e-older-session-23')
+    submit('/resume e2e-older-session-023')
     phase = 'resume-locked-result'
   elseif phase == 'resume-locked-result' then
     local locked_error
     for _, message in ipairs(notifications) do
-      if message:find('e2e-older-session-23', 1, true)
+      if message:find('e2e-older-session-023', 1, true)
         and message:find('active in another process', 1, true)
       then
         locked_error = message
@@ -584,7 +584,7 @@ tick = function()
       return
     end
     if not check(
-      picker.manager:num_results() == 25,
+      picker.manager:num_results() == 321,
       '/resume Telescope picker rendered the complete session list'
     ) then
       finish()
@@ -631,7 +631,7 @@ tick = function()
     local result_count = picker.manager:num_results()
     local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
     local result_height = vim.api.nvim_win_get_height(picker.results_win)
-    if not check(result_count == 25, '/resume reopened the complete session list') then
+    if not check(result_count == 321, '/resume reopened the complete session list') then
       finish()
       return
     end

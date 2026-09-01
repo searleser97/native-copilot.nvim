@@ -406,12 +406,12 @@ export class ScriptedRuntime implements RuntimeAdapter {
           context: { workingDirectory: this.workspace },
         };
     if (this.profile !== "telescope") return [current];
-    const older = Array.from({ length: 24 }, (_, index) => ({
-        sessionId: `e2e-older-session-${String(index + 1).padStart(2, "0")}`,
-        startTime: new Date(Date.UTC(2026, 7, 1 + index, 12, 0, 0)),
-        modifiedTime: new Date(Date.UTC(2026, 7, 1 + index, 12, 30, 0)),
-        modifiedAgoSeconds: (25 - index) * 86_400,
-        summary: `Older workspace session ${String(index + 1).padStart(2, "0")}`,
+    const older = Array.from({ length: 320 }, (_, index) => ({
+        sessionId: `e2e-older-session-${String(index + 1).padStart(3, "0")}`,
+        startTime: new Date(Date.UTC(2025, 9, 16 + index, 12, 0, 0)),
+        modifiedTime: new Date(Date.UTC(2025, 9, 16 + index, 12, 30, 0)),
+        modifiedAgoSeconds: (321 - index) * 86_400,
+        summary: `Older workspace session ${String(index + 1).padStart(3, "0")}`,
         isRemote: false,
         inUse: index === 22,
         context: { workingDirectory: this.workspace },
@@ -423,7 +423,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   async resumeStandardSession(sessionId: string): Promise<void> {
-    if (this.profile === "telescope" && sessionId === "e2e-older-session-23") {
+    if (this.profile === "telescope" && sessionId === "e2e-older-session-023") {
       throw new Error(`Session "${sessionId}" is active in another process.`);
     }
     if (sessionId !== "e2e-cli-session") {
