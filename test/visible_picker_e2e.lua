@@ -243,6 +243,13 @@ tick = function()
       schedule_tick()
       return
     end
+    if not check(
+      picker.sorting_strategy == 'descending',
+      'ordinary Telescope pickers preserved the configured sorting strategy'
+    ) then
+      finish()
+      return
+    end
     choose_where(function(item)
       return item.model and item.model.modelId == 'scripted-deep'
     end)
@@ -447,6 +454,13 @@ tick = function()
     local selected = action_state.get_selected_entry()
     local session = selected and selected.value and selected.value.session
     local result_count = picker.manager:num_results()
+    if not check(
+      picker.sorting_strategy == 'ascending',
+      '/resume used safe newest-first Telescope ordering'
+    ) then
+      finish()
+      return
+    end
     if not check(result_count == 25, '/resume Telescope picker rendered the complete session list') then
       finish()
       return

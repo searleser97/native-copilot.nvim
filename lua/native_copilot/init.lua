@@ -1652,6 +1652,7 @@ local function picker(title, entries, choose, picker_options)
   local sorters = modules['telescope.sorters']
   local telescope_options = {
     prompt_title = title,
+    sorting_strategy = picker_options.sorting_strategy,
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -2209,6 +2210,7 @@ function M._on_event(message)
       send('session.resume', { sessionId = item.session.sessionId })
     end, {
       preserve_order = true,
+      sorting_strategy = 'ascending',
     })
     return
   elseif message.type == 'commands.list' then

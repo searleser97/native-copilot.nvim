@@ -204,7 +204,8 @@ require("native_copilot").setup({
 ```
 
 The plugin does not select Telescope merely because it is installed, and it preserves Telescope's
-configured layout. `/resume` lists sessions newest first and initially selects the newest session.
+configured layout. `/resume` lists sessions newest first at the top and initially selects the
+newest session.
 
 ## Configuration
 
