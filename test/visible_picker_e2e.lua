@@ -107,7 +107,18 @@ pickers_module.new = function(opts, picker_options)
       original_clear_extra_rows(self, results_bufnr)
       if inject_short_resume_results then
         inject_short_resume_results = false
-        vim.api.nvim_buf_set_lines(results_bufnr, 1, -1, false, {})
+        local first_descending_line = math.max(
+          1,
+          self.max_results - vim.api.nvim_win_get_height(self.results_win)
+        )
+        local line_count = vim.api.nvim_buf_line_count(results_bufnr)
+        if line_count > first_descending_line then
+          vim.api.nvim_buf_set_lines(results_bufnr, first_descending_line, -1, false, {})
+        elseif line_count < first_descending_line then
+          local padding = {}
+          for _ = line_count + 1, first_descending_line do table.insert(padding, '') end
+          vim.api.nvim_buf_set_lines(results_bufnr, -1, -1, false, padding)
+        end
       end
     end
   end
