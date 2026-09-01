@@ -167,6 +167,17 @@ local function has_quoted_environment(content)
   return false
 end
 
+local function heading_before(content, needle)
+  local lines = vim.split(content, '\n', { plain = true })
+  for index, line in ipairs(lines) do
+    if line:find(needle, 1, true) then
+      for previous = index - 1, 1, -1 do
+        if lines[previous] ~= '' then return lines[previous] end
+      end
+    end
+  end
+end
+
 local function telescope_prompt()
   return find_buffer(function(buf) return vim.bo[buf].filetype == 'TelescopePrompt' end)
 end
@@ -710,6 +721,22 @@ tick = function()
       and not content:find('Inspect this workspace and validate it without blocking', 1, true)
     then
       schedule_tick()
+      return
+    end
+    local subagent_prompt =
+      'Review the workspace validation and report only actionable findings.'
+    if not check(
+      (heading_before(content, subagent_prompt) or ''):find('📝 · ', 1, true) == 1,
+      '/resume attributed sub-agent prompts to Task instead of the user'
+    ) then
+      finish()
+      return
+    end
+    if not check(
+      not content:find('SUBAGENT INTERNAL RESPONSE MUST NOT RENDER AS STANDARD COPILOT', 1, true),
+      '/resume kept sub-agent internal responses out of the root Copilot transcript'
+    ) then
+      finish()
       return
     end
     local picker_error

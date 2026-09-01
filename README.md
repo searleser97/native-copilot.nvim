@@ -560,8 +560,10 @@ the scenario finishes. `allow-all` omits MCP servers, `allow-all-mcp` renders co
 mock servers, and `manual-permissions` exercises the interactive approval picker. `telescope`
 loads the real installed Telescope, Plenary, Blink, and smear-cursor plugins and covers command
 pickers, direct command forms, newest-session selection, locked sessions, session restoration, and
-constrained UI layouts. `telescope-no-smear` repeats that complete picker scenario without adding
-smear-cursor to Neovim's runtime path, proving the optional integration is not required.
+constrained UI layouts. Resume coverage also verifies that sub-agent prompts retain Task ownership
+and that internal sub-agent responses do not appear as Standard Copilot output.
+`telescope-no-smear` repeats that complete picker scenario without adding smear-cursor to Neovim's
+runtime path, proving the optional integration is not required.
 Shared scenarios cover streamed reasoning folds, fold open/close behavior, Tool ownership, and
 Task deferral.
 Observation mode runs the `allow-all` profile, writes timestamped artifacts, and leaves Neovim open

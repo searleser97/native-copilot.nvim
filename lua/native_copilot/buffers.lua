@@ -26,6 +26,7 @@ local message_heading_namespace = vim.api.nvim_create_namespace('native_copilot_
 local header_highlight_namespace =
   vim.api.nvim_create_namespace('native_copilot_header_highlight')
 local user_message_namespace = vim.api.nvim_create_namespace('native_copilot_user_message')
+local task_message_namespace = vim.api.nvim_create_namespace('native_copilot_task_message')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
 local content_indent = '   '
 local quote_indent = content_indent .. '>'
@@ -442,6 +443,10 @@ function M.append_block(member_id, view_id, heading, content, event_time)
     display_heading = options.conversation.copilot_label
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
+  elseif view_id == 'conversation' and heading == 'Task' then
+    display_heading = options.conversation.task_label
+    content = trim_blank_boundary_lines(content)
+    content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   else
     local level = view_id == 'conversation' and '#' or '##'
     display_heading = ('%s%s %s'):format(content_indent, level, heading)
@@ -449,7 +454,10 @@ function M.append_block(member_id, view_id, heading, content, event_time)
   end
   append(view, ('%s · %s\n\n%s\n'):format(display_heading, timestamp(now), content), true)
   if view_id == 'conversation' then view.last_block_kind = 'message' end
-  if view_id == 'conversation' and (heading == 'You' or heading == 'Copilot') then
+  if
+    view_id == 'conversation'
+    and (heading == 'You' or heading == 'Copilot' or heading == 'Task')
+  then
     local lines = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, -1, false)
     for index, line in ipairs(lines) do
       if line:find(display_heading .. ' · ', 1, true) == 1 then
@@ -459,13 +467,24 @@ function M.append_block(member_id, view_id, heading, content, event_time)
           heading_row,
           line,
           heading == 'You' and 'NativeCopilotUserHeader'
-            or 'NativeCopilotAssistantHeader'
+            or heading == 'Copilot' and 'NativeCopilotAssistantHeader'
+            or 'NativeCopilotActorHeader'
         )
         if heading == 'You' then
           vim.api.nvim_buf_set_extmark(view.buf, user_message_namespace, heading_row, 0, {
             end_row = vim.api.nvim_buf_line_count(view.buf) - 1,
             end_col = 0,
             hl_group = 'NativeCopilotUserMessage',
+            hl_eol = true,
+            right_gravity = false,
+            end_right_gravity = false,
+            priority = 100,
+          })
+        elseif heading == 'Task' then
+          vim.api.nvim_buf_set_extmark(view.buf, task_message_namespace, heading_row, 0, {
+            end_row = vim.api.nvim_buf_line_count(view.buf) - 1,
+            end_col = 0,
+            hl_group = 'NativeCopilotTaskMessage',
             hl_eol = true,
             right_gravity = false,
             end_right_gravity = false,

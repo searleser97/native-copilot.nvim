@@ -643,9 +643,21 @@ export class ScriptedRuntime implements RuntimeAdapter {
           data: { id: 1 },
         },
         {
-          id: "cli-subagent-start",
+          id: "cli-subagent-prompt",
           agentId: "cli-reviewer",
           parentId: "cli-schedule-cancelled",
+          timestamp: "2026-08-31T15:00:12.125Z",
+          type: "user.message",
+          data: {
+            content: "Review the workspace validation and report only actionable findings.",
+            source: "agent-standard",
+            delivery: "idle",
+          },
+        },
+        {
+          id: "cli-subagent-start",
+          agentId: "cli-reviewer",
+          parentId: "cli-subagent-prompt",
           timestamp: "2026-08-31T15:00:12.250Z",
           type: "subagent.started",
           data: {
@@ -656,9 +668,20 @@ export class ScriptedRuntime implements RuntimeAdapter {
           },
         },
         {
-          id: "cli-subagent-complete",
+          id: "cli-subagent-internal-message",
           agentId: "cli-reviewer",
           parentId: "cli-subagent-start",
+          timestamp: "2026-08-31T15:00:12.375Z",
+          type: "assistant.message",
+          data: {
+            messageId: "cli-subagent-internal-message",
+            content: "SUBAGENT INTERNAL RESPONSE MUST NOT RENDER AS STANDARD COPILOT",
+          },
+        },
+        {
+          id: "cli-subagent-complete",
+          agentId: "cli-reviewer",
+          parentId: "cli-subagent-internal-message",
           timestamp: "2026-08-31T15:00:12.500Z",
           type: "subagent.completed",
           data: {

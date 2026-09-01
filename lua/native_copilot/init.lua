@@ -2063,11 +2063,24 @@ local function history_event(member_id, event, context)
   local data = type(event.data) == 'table' and event.data or {}
   local replay_timestamp = tonumber(json_value(event.replayTimestamp))
   local event_time = replay_timestamp and math.floor(replay_timestamp / 1000) or nil
+  local agent_id = json_value(event.agentId)
+  local source = tostring(json_value(data.source) or '')
   if event.type == 'user.message' and event.data then
     local content = data.content or data.prompt
     if content then
-      buffers.append_block(member_id, 'conversation', 'You', content, event_time)
+      local heading = (agent_id or source:find('^agent%-')) and 'Task' or 'You'
+      buffers.append_block(member_id, 'conversation', heading, content, event_time)
     end
+  elseif
+    agent_id
+    and (
+      event.type:find('^assistant%.')
+      or event.type == 'tool.execution_start'
+      or event.type == 'tool.execution_complete'
+    )
+  then
+    -- Sub-agent internals belong to the Task lifecycle, not the root Copilot transcript.
+    return
   elseif event.type == 'assistant.turn_start' then
     buffers.begin_response(member_id, data.turnId or event.id, event_time)
   elseif event.type == 'assistant.turn_end' or event.type == 'session.idle' then
