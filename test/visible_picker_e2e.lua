@@ -74,6 +74,7 @@ local notifications = {}
 local completed = false
 local phase = 'early-completion'
 local last_trace = 0
+local resume_picker_ready_at
 local tick
 
 vim.notify = function(message)
@@ -520,6 +521,15 @@ tick = function()
       schedule_tick()
       return
     end
+    if not resume_picker_ready_at then
+      resume_picker_ready_at = vim.uv.now()
+      schedule_tick()
+      return
+    end
+    if vim.uv.now() - resume_picker_ready_at < 500 then
+      schedule_tick()
+      return
+    end
     local selected = action_state.get_selected_entry()
     local session = selected and selected.value and selected.value.session
     local result_count = picker.manager:num_results()
@@ -558,6 +568,7 @@ tick = function()
       return
     end
     actions.close(prompt_buf)
+    resume_picker_ready_at = nil
     phase = 'resume-sparse-closed'
     schedule_tick()
   elseif phase == 'resume-sparse-closed' then
@@ -598,10 +609,20 @@ tick = function()
     pass('/resume picker rejected a session active in another process')
     vim.o.lines = 8
     vim.o.columns = 40
+    resume_picker_ready_at = nil
     submit('/resume')
     phase = 'resume-picker-reopened'
   elseif phase == 'resume-picker-reopened' then
     if not picker then
+      schedule_tick()
+      return
+    end
+    if not resume_picker_ready_at then
+      resume_picker_ready_at = vim.uv.now()
+      schedule_tick()
+      return
+    end
+    if vim.uv.now() - resume_picker_ready_at < 500 then
       schedule_tick()
       return
     end
