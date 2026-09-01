@@ -95,15 +95,22 @@ native.open({ reuse_current_tab = true })
 
 local actions = require('telescope.actions')
 local action_state = require('telescope.actions.state')
-local picker_class = require('telescope.pickers').Picker
-local original_clear_extra_rows = picker_class.clear_extra_rows
+local pickers_module = require('telescope.pickers')
+local original_picker_new = pickers_module.new
 local inject_short_resume_results = true
-picker_class.clear_extra_rows = function(self, results_bufnr)
-  original_clear_extra_rows(self, results_bufnr)
-  if inject_short_resume_results and self.prompt_title == 'Resume Copilot session' then
-    inject_short_resume_results = false
-    vim.api.nvim_buf_set_lines(results_bufnr, 1, -1, false, {})
+pickers_module.new = function(opts, picker_options)
+  local picker = original_picker_new(opts, picker_options)
+  if picker_options.prompt_title == 'Resume Copilot session' then
+    local original_clear_extra_rows = picker.clear_extra_rows
+    picker.clear_extra_rows = function(self, results_bufnr)
+      original_clear_extra_rows(self, results_bufnr)
+      if inject_short_resume_results then
+        inject_short_resume_results = false
+        vim.api.nvim_buf_set_lines(results_bufnr, 1, -1, false, {})
+      end
+    end
   end
+  return picker
 end
 
 local function find_buffer(predicate)
