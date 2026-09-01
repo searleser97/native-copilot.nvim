@@ -1636,7 +1636,6 @@ local function picker(title, entries, choose, picker_options)
     'telescope.actions.state',
     'telescope.config',
     'telescope.sorters',
-    'telescope.themes',
   }) do
     local ok, loaded = pcall(require, name)
     if not ok then
@@ -1651,28 +1650,17 @@ local function picker(title, entries, choose, picker_options)
   local action_state = modules['telescope.actions.state']
   local conf = modules['telescope.config'].values
   local sorters = modules['telescope.sorters']
-  local themes = modules['telescope.themes']
-  local telescope_options = themes.get_dropdown({
+  local initial_selection_index = picker_options.initial_selection_index
+  local telescope_options = {
     prompt_title = title,
-    previewer = false,
-    sorting_strategy = 'ascending',
-    selection_strategy = 'reset',
-    default_selection_index = picker_options.initial_selection == 'bottom' and #entries or 1,
-    on_complete = picker_options.initial_selection == 'bottom'
+    default_selection_index = initial_selection_index,
+    on_complete = initial_selection_index
         and {
           function(active_picker)
-            active_picker:set_selection(active_picker:get_row(#entries))
+            active_picker:set_selection(active_picker:get_row(initial_selection_index))
           end,
         }
       or nil,
-    layout_config = {
-      width = function(_, columns)
-        return math.max(1, math.min(columns - 2, 100))
-      end,
-      height = function(_, _, lines)
-        return math.max(1, math.min(lines - 2, #entries + 2, 20))
-      end,
-    },
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -1692,7 +1680,7 @@ local function picker(title, entries, choose, picker_options)
       end)
       return true
     end,
-  })
+  }
   local ok, failure = pcall(function()
     pickers.new({}, telescope_options):find()
   end)
@@ -2222,12 +2210,7 @@ function M._on_event(message)
       notify('No previous Copilot sessions were found for this workspace.', vim.log.levels.INFO)
       return
     end
-    local displayed_entries = entries
-    if options.frontend.picker == 'telescope' then
-      displayed_entries = {}
-      for index = #entries, 1, -1 do table.insert(displayed_entries, entries[index]) end
-    end
-    picker('Resume Copilot session', displayed_entries, function(item)
+    picker('Resume Copilot session', entries, function(item)
       if item.session.inUse then
         notify('That Copilot session is active in another process.', vim.log.levels.WARN)
         return
@@ -2235,7 +2218,7 @@ function M._on_event(message)
       send('session.resume', { sessionId = item.session.sessionId })
     end, {
       preserve_order = true,
-      initial_selection = 'bottom',
+      initial_selection_index = 1,
     })
     return
   elseif message.type == 'commands.list' then

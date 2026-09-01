@@ -203,9 +203,8 @@ require("native_copilot").setup({
 })
 ```
 
-The plugin does not select Telescope merely because it is installed. Telescope pickers use an
-adaptive dropdown without a preview so they remain usable in constrained windows. `/resume` keeps
-the newest session at the bottom, selects it initially, and scrolls it into view.
+The plugin does not select Telescope merely because it is installed, and it preserves Telescope's
+configured layout. `/resume` lists sessions newest first and initially selects the newest session.
 
 ## Configuration
 

@@ -400,22 +400,13 @@ tick = function()
     local selected = action_state.get_selected_entry()
     local session = selected and selected.value and selected.value.session
     local result_count = picker.manager:num_results()
-    local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
-    local result_height = vim.api.nvim_win_get_height(picker.results_win)
     if not check(result_count == 25, '/resume Telescope picker rendered the complete session list') then
       finish()
       return
     end
     if not check(
       session and session.sessionId == 'e2e-cli-session',
-      '/resume initially selected the most recent session at the bottom'
-    ) then
-      finish()
-      return
-    end
-    if not check(
-      cursor_row >= result_height - 1,
-      '/resume scrolled the Telescope result window to the newest sessions'
+      '/resume listed and initially selected the most recent session first'
     ) then
       finish()
       return
