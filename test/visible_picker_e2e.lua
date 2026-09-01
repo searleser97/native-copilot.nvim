@@ -33,7 +33,8 @@ require('telescope').setup({
     },
   },
 })
-require('blink.cmp').setup({
+local blink = require('blink.cmp')
+blink.setup({
   completion = {
     menu = { auto_show = true },
     list = { selection = { preselect = false, auto_insert = false } },
@@ -59,8 +60,9 @@ local original_showtabline = vim.o.showtabline
 local results = {}
 local notifications = {}
 local completed = false
-local phase = 'ready'
+local phase = 'early-completion'
 local last_trace = 0
+local early_completion_started = false
 local tick
 
 vim.notify = function(message)
@@ -224,7 +226,62 @@ tick = function()
 
   local content = text(conversation())
   local prompt_buf, picker = current_picker()
-  if phase == 'ready' then
+  if phase == 'early-completion' then
+    local prompt_bufnr = prompt()
+    if not prompt_bufnr then
+      schedule_tick()
+      return
+    end
+    if not early_completion_started then
+      local prompt_win
+      for _, candidate in ipairs(vim.api.nvim_list_wins()) do
+        if vim.api.nvim_win_get_buf(candidate) == prompt_bufnr then
+          prompt_win = candidate
+          break
+        end
+      end
+      if not prompt_win then
+        schedule_tick()
+        return
+      end
+      vim.api.nvim_set_current_win(prompt_win)
+      vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { '' })
+      vim.api.nvim_win_set_cursor(prompt_win, { 1, 0 })
+      vim.cmd('startinsert')
+      vim.api.nvim_input('/res')
+      early_completion_started = true
+      schedule_tick()
+      return
+    end
+    if not blink.is_visible() then
+      schedule_tick()
+      return
+    end
+    local completion_items = require('blink.cmp.completion.list').items
+    local found_resume = false
+    for _, item in ipairs(completion_items) do
+      if item.label == 'resume' then
+        found_resume = true
+        break
+      end
+    end
+    if not check(
+      found_resume and not content:find('[environment] Copilot environment — ready', 1, true),
+      'Blink offered /resume before the environment finished loading'
+    ) then
+      finish()
+      return
+    end
+    blink.hide({
+      callback = function()
+        local escape = vim.api.nvim_replace_termcodes('<Esc>', true, false, true)
+        vim.api.nvim_input(escape)
+        vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { '' })
+        phase = 'ready'
+        schedule_tick()
+      end,
+    })
+  elseif phase == 'ready' then
     if not content:find('[environment] Copilot environment — ready', 1, true) then
       schedule_tick()
       return
@@ -442,8 +499,6 @@ tick = function()
       return
     end
     pass('/resume <id> rejected a session active in another process')
-    vim.o.lines = 8
-    vim.o.columns = 40
     submit('/resume', '<C-s>', 'i')
     phase = 'resume-picker'
   elseif phase == 'resume-picker' then
@@ -461,13 +516,13 @@ tick = function()
       finish()
       return
     end
-    if not check(result_count == 25, '/resume Telescope picker rendered the complete session list') then
+    if not check(result_count == 2, '/resume handled a sparse session list') then
       finish()
       return
     end
     if not check(
       session and session.sessionId == 'e2e-cli-session',
-      '/resume listed and initially selected the most recent session first'
+      '/resume initially selected the most recent sparse-list session at the bottom'
     ) then
       finish()
       return
@@ -489,6 +544,8 @@ tick = function()
       return
     end
     pass('/resume picker rejected a session active in another process')
+    vim.o.lines = 8
+    vim.o.columns = 40
     submit('/resume')
     phase = 'resume-picker-reopened'
   elseif phase == 'resume-picker-reopened' then
@@ -498,9 +555,23 @@ tick = function()
     end
     local selected = action_state.get_selected_entry()
     local session = selected and selected.value and selected.value.session
+    local result_count = picker.manager:num_results()
+    local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
+    local result_height = vim.api.nvim_win_get_height(picker.results_win)
+    if not check(result_count == 25, '/resume Telescope picker rendered the complete session list') then
+      finish()
+      return
+    end
     if not check(
       session and session.sessionId == 'e2e-cli-session',
       '/resume preserved newest-session selection after rejecting a locked entry'
+    ) then
+      finish()
+      return
+    end
+    if not check(
+      cursor_row >= result_height - 1,
+      '/resume scrolled the Telescope result window to the newest session at the bottom'
     ) then
       finish()
       return

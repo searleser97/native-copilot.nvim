@@ -115,6 +115,7 @@ local state = {
   overview = false,
   configured_buffers = {},
   command_requests = {},
+  command_catalog_loaded = {},
   permission_queue = {},
   permission_prompt_open = false,
   tool_calls = {},
@@ -192,6 +193,9 @@ local function update_prompt_label()
   vim.wo[state.prompt_win].winbar =
     (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
   if options.frontend.completion == 'blink' and M.ensure_commands then
+    if not commands.catalog(state.selected) then
+      commands.set_catalog(state.selected, client_commands())
+    end
     vim.schedule(function() M.ensure_commands(state.selected) end)
   end
 end
@@ -1282,6 +1286,7 @@ local function reset_member(member_id)
   state.queued_prompts[member_id] = nil
   state.prompt_queue_paused[member_id] = nil
   state.command_requests[member_id] = nil
+  state.command_catalog_loaded[member_id] = nil
   state.member_meta[member_id] = nil
   commands.set_catalog(member_id, nil)
 end
@@ -1653,6 +1658,7 @@ local function picker(title, entries, choose, picker_options)
   local telescope_options = {
     prompt_title = title,
     sorting_strategy = picker_options.sorting_strategy,
+    default_selection_index = picker_options.default_selection_index,
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -1757,7 +1763,13 @@ function M.select_commands()
 end
 
 function M.ensure_commands(target)
-  if not target or commands.catalog(target) or state.command_requests[target] then return end
+  if
+    not target
+    or state.command_catalog_loaded[target]
+    or state.command_requests[target]
+  then
+    return
+  end
   if not protocol.is_running() then return end
   state.command_requests[target] = true
   send('commands.list', { target = target, purpose = 'cache' })
@@ -2202,7 +2214,12 @@ function M._on_event(message)
       notify('No previous Copilot sessions were found for this workspace.', vim.log.levels.INFO)
       return
     end
-    picker('Resume Copilot session', entries, function(item)
+    local displayed_entries = entries
+    if options.frontend.picker == 'telescope' then
+      displayed_entries = {}
+      for index = #entries, 1, -1 do table.insert(displayed_entries, entries[index]) end
+    end
+    picker('Resume Copilot session', displayed_entries, function(item)
       if item.session.inUse then
         notify('That Copilot session is active in another process.', vim.log.levels.WARN)
         return
@@ -2211,12 +2228,14 @@ function M._on_event(message)
     end, {
       preserve_order = true,
       sorting_strategy = 'ascending',
+      default_selection_index = #displayed_entries,
     })
     return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
     local available = commands.merge(payload.commands or {}, client_commands())
     state.command_requests[target] = nil
+    state.command_catalog_loaded[target] = true
     commands.set_catalog(target, available)
     if payload.purpose ~= 'cache' then show_commands(target, available) end
     return

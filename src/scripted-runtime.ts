@@ -33,6 +33,7 @@ const observationPause = (milliseconds = 350): Promise<void> =>
 export class ScriptedRuntime implements RuntimeAdapter {
   private standardRunId: string | undefined;
   private resumedCliSession = false;
+  private sessionListCount = 0;
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private stopped = false;
 
@@ -393,6 +394,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async listSessions(): Promise<unknown[]> {
     if (this.resumedCliSession) return [];
+    this.sessionListCount += 1;
     const current = {
           sessionId: "e2e-cli-session",
           startTime: new Date("2026-08-31T15:00:00.000Z"),
@@ -414,6 +416,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         inUse: index === 22,
         context: { workingDirectory: this.workspace },
       }));
+    if (this.sessionListCount === 1) {
+      return [current, older[22]];
+    }
     return [current, ...older.reverse()];
   }
 
