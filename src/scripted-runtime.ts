@@ -23,8 +23,12 @@ interface PendingPermission {
   target: string;
 }
 
+const observationMode = process.env.NATIVE_COPILOT_E2E_OBSERVE === "1";
+const delayMultiplier = observationMode ? 8 : 1;
 const delay = (milliseconds: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
+  new Promise((resolve) => setTimeout(resolve, milliseconds * delayMultiplier));
+const observationPause = (milliseconds = 350): Promise<void> =>
+  observationMode ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve();
 
 export class ScriptedRuntime implements RuntimeAdapter {
   private standardRunId: string | undefined;
@@ -78,6 +82,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         },
       },
     }, this.fields(target));
+    await observationPause();
     this.emit("activity.event", {
       eventType: "tool.execution_complete",
       data: {
@@ -131,6 +136,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         result: "completed",
       }],
     }, { memberId: target, target: "status", done: true });
+    await observationPause();
     this.emit("activity.event", {
       eventType: "tool.execution_start",
       data: {
@@ -147,7 +153,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         result: { output: "done", exitCode: 0 },
       },
     }, this.fields(target, true));
+    await observationPause();
     this.emitBusy(target, "e2e-tool-authorship-turn");
+    await observationPause();
     this.emitMessage(target, "e2e-tool-authorship-message", "TOOL-AUTHOR-OK");
     this.emitIdle(target);
   }
@@ -225,6 +233,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       component: "Copilot environment",
       message: "Starting scripted runtime",
     }, { memberId: target, target: "status" });
+    await observationPause(250);
     for (const [component, count] of [
       ["Tools", 4],
       ["Instructions", 1],
@@ -236,6 +245,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         component,
         items: Array.from({ length: count }, (_, index) => ({ name: `${component}-${index}` })),
       }, { memberId: target, target: "status", done: true });
+      await observationPause(250);
     }
     const mcpItems = this.profile === "allow-all"
       ? []
@@ -249,6 +259,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       component: "MCP servers",
       items: mcpItems,
     }, { memberId: target, target: "status", done: true });
+    await observationPause(250);
     this.emit("environment.status", {
       component: "Copilot environment",
       status: "ready",
@@ -282,14 +293,14 @@ export class ScriptedRuntime implements RuntimeAdapter {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return false;
     this.pendingPermissions.delete(requestId);
-    setTimeout(() => {
+    void delay(20).then(() => {
       this.emitMessage(
         pending.target,
         "e2e-permission-message",
         approved ? "PERMISSION-APPROVED" : "PERMISSION-DENIED",
       );
       this.emitIdle(pending.target);
-    }, 20);
+    });
     return true;
   }
 

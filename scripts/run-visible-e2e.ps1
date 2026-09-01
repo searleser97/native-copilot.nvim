@@ -1,9 +1,13 @@
 param(
     [ValidateSet('all', 'allow-all', 'allow-all-mcp', 'manual-permissions')]
-    [string]$Profile = 'all'
+    [string]$Profile = 'all',
+    [switch]$Observe
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Observe -and $Profile -eq 'all') {
+    throw 'Observation mode requires one explicit profile.'
+}
 $root = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $root '.e2e-artifacts'
 $profiles = if ($Profile -eq 'all') {
@@ -22,11 +26,16 @@ public static extern bool IsZoomed(System.IntPtr hWnd);
 '@
 
 foreach ($current in $profiles) {
-    $result = Join-Path $artifacts "$current-result.txt"
-    $snapshot = Join-Path $artifacts "$current-conversation.txt"
-    $database = Join-Path $artifacts "$current.sqlite"
-    $log = Join-Path $artifacts "$current-nvim.log"
-    $trace = Join-Path $artifacts "$current-trace.txt"
+    $artifactName = if ($Observe) {
+        "$current-observe-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff'))"
+    } else {
+        $current
+    }
+    $result = Join-Path $artifacts "$artifactName-result.txt"
+    $snapshot = Join-Path $artifacts "$artifactName-conversation.txt"
+    $database = Join-Path $artifacts "$artifactName.sqlite"
+    $log = Join-Path $artifacts "$artifactName-nvim.log"
+    $trace = Join-Path $artifacts "$artifactName-trace.txt"
     foreach ($path in @(
         $result,
         $snapshot,
@@ -42,7 +51,7 @@ foreach ($current in $profiles) {
     $before = @(Get-Process wezterm-gui -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Id)
     $windowScript = Join-Path $root 'scripts\visible-e2e-window.ps1'
-    Start-Process -FilePath 'wezterm.exe' -ArgumentList @(
+    $windowArguments = @(
         'start',
         '--always-new-process',
         '--',
@@ -65,7 +74,9 @@ foreach ($current in $profiles) {
         $log,
         '-Trace',
         $trace
-    ) | Out-Null
+    )
+    if ($Observe) { $windowArguments += '-Observe' }
+    Start-Process -FilePath 'wezterm.exe' -ArgumentList $windowArguments | Out-Null
 
     $windowDeadline = [DateTime]::UtcNow.AddSeconds(5)
     $window = $null
@@ -110,6 +121,13 @@ foreach ($current in $profiles) {
     $lines = @(Get-Content -LiteralPath $result)
     $lines | ForEach-Object { Write-Output "[$current] $_" }
     $failure = $lines | Where-Object { $_ -like 'FAIL *' } | Select-Object -First 1
+    if ($Observe) {
+        Write-Output "[$current] OBSERVE Neovim remains open; close the window when finished."
+        if ($failure) {
+            throw "Visible E2E profile '$current' failed. Snapshot: $snapshot"
+        }
+        continue
+    }
     $exitDeadline = [DateTime]::UtcNow.AddSeconds(3)
     while (Get-Process -Id $windowId -ErrorAction SilentlyContinue) {
         if ([DateTime]::UtcNow -ge $exitDeadline) {

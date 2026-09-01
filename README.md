@@ -517,11 +517,19 @@ npm run test:e2e:allow-all-mcp
 npm run test:e2e:manual-permissions
 ```
 
+Use observation mode to slow the scripted events and leave the completed maximized window open:
+
+```powershell
+npm run test:e2e:observe
+```
+
 Each profile opens an independent visible window, drives prompts through the real prompt mapping,
 writes assertions and conversation snapshots under `.e2e-artifacts\`, and closes immediately when
 the scenario finishes. `allow-all` omits MCP servers, `allow-all-mcp` renders connected and failed
 mock servers, and `manual-permissions` exercises the interactive approval picker. Shared scenarios
 cover streamed reasoning folds, fold open/close behavior, Tool ownership, and Task deferral.
+Observation mode runs the `allow-all` profile, writes timestamped artifacts, and leaves Neovim open
+until the user closes it.
 
 `npm run check` remains available for a TypeScript-only compile check, and `npm run build` emits the
 Node host required by the visible suite. Neither command replaces the visible E2E matrix.

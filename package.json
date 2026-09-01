@@ -12,6 +12,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1",
     "test:e2e": "npm run test",
+    "test:e2e:observe": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all -Observe",
     "test:e2e:allow-all": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all",
     "test:e2e:allow-all-mcp": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all-mcp",
     "test:e2e:manual-permissions": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile manual-permissions"

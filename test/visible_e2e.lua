@@ -91,6 +91,13 @@ local function finish(failure)
   if buf then vim.fn.writefile(vim.api.nvim_buf_get_lines(buf, 0, -1, false), snapshot_path) end
   if failure then results[#results + 1] = 'FAIL ' .. failure end
   vim.fn.writefile(results, result_path)
+  if vim.env.NATIVE_COPILOT_E2E_OBSERVE == '1' then
+    vim.api.nvim_echo({
+      { failure and 'Visible E2E failed — observation window left open.'
+        or 'Visible E2E passed — observation window left open.' },
+    }, false, {})
+    return
+  end
   vim.defer_fn(function() vim.cmd('qa!') end, failure and 1500 or 500)
 end
 
