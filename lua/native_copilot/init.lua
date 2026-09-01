@@ -1276,8 +1276,8 @@ end
 -- Clears one member's transient UI state and buffers without touching any other
 -- member, keeping Standard and other Fleets intact during incremental lifecycle
 -- transitions.
-local function reset_member(member_id)
-  buffers.remove_member(member_id)
+local function reset_member(member_id, preserve_buffers)
+  if not preserve_buffers then buffers.remove_member(member_id) end
   state.tasks[member_id] = nil
   state.environment[member_id] = nil
   state.tool_calls[member_id] = nil
@@ -2245,7 +2245,18 @@ function M._on_event(message)
           local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
           if row >= 0 and row < line_count then
             active_picker:set_selection(row)
+            local ignored = vim.wo[active_picker.results_win].eventignorewin
+            local events = vim.split(ignored, ',', { plain = true, trimempty = true })
+            for _, event in ipairs({ 'CursorMoved', 'CursorMovedI' }) do
+              if not vim.tbl_contains(events, event) then table.insert(events, event) end
+            end
+            vim.wo[active_picker.results_win].eventignorewin = table.concat(events, ',')
             vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
+            vim.schedule(function()
+              if vim.api.nvim_win_is_valid(active_picker.results_win) then
+                vim.wo[active_picker.results_win].eventignorewin = ignored
+              end
+            end)
           end
         end)
       end,
@@ -2610,7 +2621,7 @@ function M._on_event(message)
   elseif message.type == 'session.loading' then
     -- Only the Standard session is reloaded; concurrent Fleets are untouched.
     close_task_detail()
-    reset_member('standard')
+    reset_member('standard', true)
     state.mode = 'standard-loading'
     add_to_order('standard')
     ensure_member('standard', 'Copilot')
