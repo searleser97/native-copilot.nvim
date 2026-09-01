@@ -107,11 +107,18 @@ local function submit(content, lhs, mode)
   local buf = assert(prompt(), 'prompt buffer was not found')
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { content })
   if not lhs then return vim.api.nvim_buf_call(buf, native.submit_prompt) end
-  local mapping = vim.api.nvim_buf_call(buf, function()
-    return vim.fn.maparg(lhs, mode or 'n', false, true)
-  end)
-  assert(mapping.callback, ('prompt submit mapping %s was not found'):format(lhs))
-  return vim.api.nvim_buf_call(buf, mapping.callback)
+  local win
+  for _, candidate in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(candidate) == buf then
+      win = candidate
+      break
+    end
+  end
+  assert(win and vim.api.nvim_win_is_valid(win), 'prompt window was not found')
+  vim.api.nvim_set_current_win(win)
+  if mode == 'i' then vim.cmd('startinsert') end
+  local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
+  return vim.api.nvim_input(keys) > 0
 end
 
 local function choose_where(predicate)
