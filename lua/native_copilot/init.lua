@@ -2252,11 +2252,6 @@ function M._on_event(message)
             end
             vim.wo[active_picker.results_win].eventignorewin = table.concat(events, ',')
             vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
-            vim.schedule(function()
-              if vim.api.nvim_win_is_valid(active_picker.results_win) then
-                vim.wo[active_picker.results_win].eventignorewin = ignored
-              end
-            end)
           end
         end)
       end,

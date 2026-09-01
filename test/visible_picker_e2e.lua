@@ -631,7 +631,7 @@ tick = function()
       schedule_tick()
       return
     end
-    if vim.uv.now() - resume_picker_ready_at < 500 then
+    if vim.uv.now() - resume_picker_ready_at < 2000 then
       schedule_tick()
       return
     end
@@ -660,6 +660,13 @@ tick = function()
     if not check(
       cursor_row == result_count,
       '/resume moved the Telescope results cursor to the newest final session'
+    ) then
+      finish()
+      return
+    end
+    if not check(
+      vim.wo[picker.results_win].eventignorewin:find('CursorMoved', 1, true) ~= nil,
+      '/resume kept programmatic cursor movement events disabled for the picker lifetime'
     ) then
       finish()
       return
