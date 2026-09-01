@@ -1656,6 +1656,7 @@ local function picker(title, entries, choose, picker_options)
   local conf = modules['telescope.config'].values
   local sorters = modules['telescope.sorters']
   local restore_eventignore
+  local restore_cursor_animation
   if picker_options.suppress_cursor_events then
     local ignored = vim.o.eventignore
     local events = vim.split(ignored, ',', { plain = true, trimempty = true })
@@ -1667,6 +1668,16 @@ local function picker(title, entries, choose, picker_options)
       if restore_eventignore then
         vim.o.eventignore = ignored
         restore_eventignore = nil
+      end
+    end
+    local smear_cursor = package.loaded['smear_cursor']
+    if type(smear_cursor) == 'table' and smear_cursor.enabled == true then
+      smear_cursor.enabled = false
+      restore_cursor_animation = function()
+        if restore_cursor_animation then
+          smear_cursor.enabled = true
+          restore_cursor_animation = nil
+        end
       end
     end
   end
@@ -1701,6 +1712,13 @@ local function picker(title, entries, choose, picker_options)
     }),
     sorter = picker_options.preserve_order and sorters.empty() or conf.generic_sorter({}),
     attach_mappings = function(prompt_buf)
+      if restore_cursor_animation then
+        vim.api.nvim_create_autocmd('BufWipeout', {
+          buffer = prompt_buf,
+          once = true,
+          callback = function() vim.defer_fn(restore_cursor_animation, 100) end,
+        })
+      end
       actions.select_default:replace(function()
         local selection = action_state.get_selected_entry()
         if restore_eventignore then restore_eventignore() end
@@ -1716,6 +1734,7 @@ local function picker(title, entries, choose, picker_options)
   if restore_eventignore then vim.defer_fn(restore_eventignore, 1000) end
   if not ok then
     if restore_eventignore then restore_eventignore() end
+    if restore_cursor_animation then restore_cursor_animation() end
     notify(('Could not open Telescope picker: %s'):format(failure), vim.log.levels.ERROR)
   end
 end

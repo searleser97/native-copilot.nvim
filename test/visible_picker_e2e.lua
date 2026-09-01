@@ -679,7 +679,6 @@ tick = function()
       finish()
       return
     end
-    smear_cursor.enabled = false
     choose_where(function(item)
       return item.session and item.session.sessionId == 'e2e-cli-session'
     end)
@@ -687,6 +686,10 @@ tick = function()
     vim.o.columns = original_columns
     phase = 'resume-result'
   elseif phase == 'resume-result' then
+    if not smear_cursor.enabled then
+      schedule_tick()
+      return
+    end
     if not content:find('CLI session resume restored current Tools', 1, true)
       and not content:find('Inspect this workspace and validate it without blocking', 1, true)
     then
