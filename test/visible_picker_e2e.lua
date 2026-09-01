@@ -21,7 +21,15 @@ vim.opt.runtimepath:prepend(plenary_path)
 vim.opt.runtimepath:prepend(telescope_path)
 vim.opt.runtimepath:prepend(root)
 vim.o.termguicolors = true
-require('telescope').setup({})
+require('telescope').setup({
+  defaults = {
+    layout_strategy = 'flex',
+    layout_config = {
+      vertical = { width = 0.95, height = 0.95, preview_height = 0.6 },
+      horizontal = { width = 0.95, height = 0.95, preview_width = 0.6 },
+    },
+  },
+})
 
 local started_at = vim.uv.now()
 local original_lines = vim.o.lines
