@@ -270,11 +270,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }, { memberId: target, target: "status", done: false });
   }
 
-  async openStandard(): Promise<void> {
-    if (this.standardRunId) return;
-    this.standardRunId = randomUUID();
-    this.db.createRun(this.standardRunId, "standard", null, this.workspace, process.pid);
-    const target = "standard";
+  private async loadEnvironment(target: string): Promise<void> {
     this.emit("environment.progress", {
       component: "Copilot environment",
       message: "Starting scripted runtime",
@@ -310,6 +306,14 @@ export class ScriptedRuntime implements RuntimeAdapter {
       component: "Copilot environment",
       status: "ready",
     }, { memberId: target, target: "status", done: true });
+  }
+
+  async openStandard(): Promise<void> {
+    if (this.standardRunId) return;
+    this.standardRunId = randomUUID();
+    this.db.createRun(this.standardRunId, "standard", null, this.workspace, process.pid);
+    const target = "standard";
+    await this.loadEnvironment(target);
     this.emit("member.state", { state: "idle" }, {
       memberId: target,
       target: "status",
@@ -652,6 +656,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         replayTimestamp: Date.parse(event.timestamp),
       })),
     }, { runId: this.standardRunId, memberId: target, target: "conversation", done: true });
+    await this.loadEnvironment(target);
     this.emit("member.state", {
       state: "idle",
       sessionId,

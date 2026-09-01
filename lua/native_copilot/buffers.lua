@@ -258,6 +258,8 @@ function M.prepare_history(member_id, event_time)
   end)
   view.current_day = os.date('%Y-%m-%d', now)
   view.last_block_kind = nil
+  view.history_prepared = true
+  view.history_environment_started = false
 end
 
 local function flush(view)
@@ -902,7 +904,13 @@ function M.upsert_timeline(member_id, item_id, item)
 
   if not start_row then
     ensure_day_header(view, now)
-    start_row = item.kind == 'environment' and environment_insert_row(view) or nil
+    local first_history_environment = item.kind == 'environment'
+      and view.history_prepared
+      and not view.history_environment_started
+    start_row = item.kind == 'environment'
+        and not first_history_environment
+        and environment_insert_row(view)
+      or nil
     if start_row then
       shift_tracked_rows(view, start_row, #lines)
       with_modifiable(view.buf, function()
@@ -932,6 +940,7 @@ function M.upsert_timeline(member_id, item_id, item)
     record = {}
     view.timeline[item_id] = record
   end
+  if item.kind == 'environment' then view.history_environment_started = true end
 
   local timeline_highlight
   if item.actor_message and item.kind == 'task' then

@@ -1686,6 +1686,24 @@ export class CopilotRuntime {
     live.unsubscribe = session.on((event) => this.handleSessionEvent(live, event));
     this.live.set(target, live);
     this.db.upsertSession(runId, memberId, sessionId, "connected");
+    const history = await session.getEvents();
+    // Skip the history replay for an in-process reconnect: the UI buffer for this
+    // target is retained across the reconnect (peer/mutation changes never reset a
+    // buffer), so re-emitting the full transcript would duplicate it. A fresh
+    // connect, a host-restart recovery, or a move into a new destination buffer
+    // still needs the history to render.
+    if (!suppressHistory) {
+      this.emit(
+        "session.history",
+        {
+          events: history.map((event) => ({
+            ...event,
+            replayTimestamp: Date.parse(event.timestamp),
+          })),
+        },
+        { runId, memberId: target, target: "conversation", done: true },
+      );
+    }
     for (const probe of environmentProbes) {
       this.emit(
         "environment.progress",
@@ -1719,24 +1737,6 @@ export class CopilotRuntime {
           { runId, memberId: target, target: "activity", done: true },
         );
       }
-    }
-    const history = await session.getEvents();
-    // Skip the history replay for an in-process reconnect: the UI buffer for this
-    // target is retained across the reconnect (peer/mutation changes never reset a
-    // buffer), so re-emitting the full transcript would duplicate it. A fresh
-    // connect, a host-restart recovery, or a move into a new destination buffer
-    // still needs the history to render.
-    if (!suppressHistory) {
-      this.emit(
-        "session.history",
-        {
-          events: history.map((event) => ({
-            ...event,
-            replayTimestamp: Date.parse(event.timestamp),
-          })),
-        },
-        { runId, memberId: target, target: "conversation", done: true },
-      );
     }
     this.emit(
       "member.state",

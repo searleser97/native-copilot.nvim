@@ -529,10 +529,11 @@ tick = function()
     ) then
       return
     end
-    local _, historical_day_headers = content:gsub('──────── ', '')
+    local before_history = content:sub(1, user_message)
+    local _, historical_day_headers = before_history:gsub('──────── ', '')
     if not check(
       historical_day_headers == 1,
-      'CLI session replay used only the persisted historical date header'
+      'CLI session replay began with the persisted historical date header'
     ) then
       return
     end
@@ -550,6 +551,30 @@ tick = function()
         and schedule_cancelled < final_reply
         and final_reply < agent_task,
       'CLI session history preserved durable timeline order'
+    ) then
+      return
+    end
+    local tools = content:find('[environment] Tools — 4 loaded', agent_task, true)
+    local instructions = tools
+      and content:find('[environment] Instructions — 1 loaded', tools, true)
+    local skills = instructions
+      and content:find('[environment] Skills — 0 loaded', instructions, true)
+    local plugins = skills
+      and content:find('[environment] Plugins — 0 loaded', skills, true)
+    local agents = plugins
+      and content:find('[environment] Agents — 0 loaded', plugins, true)
+    local environment_ready =
+      content:find('[environment] Copilot environment — ready', agent_task, true)
+    local mcp_ready = profile == 'allow-all'
+      and not content:find('[environment] MCP ', agent_task, true)
+      or profile == 'allow-all-mcp'
+        and content:find('MCP mock-files — connected', agent_task, true)
+        and content:find('MCP mock-broken — failed', agent_task, true)
+      or profile == 'manual-permissions'
+        and content:find('MCP mock-permissions — connected', agent_task, true)
+    if not check(
+      tools and instructions and skills and plugins and agents and environment_ready and mcp_ready,
+      'CLI session resume restored current Tools, MCP, and environment rows'
     ) then
       return
     end
