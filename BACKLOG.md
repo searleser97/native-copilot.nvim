@@ -194,7 +194,7 @@ text labels for operational clarity, and every participant heading remains confi
 
 ### NC-012: Submit prompts with `<C-s>` in insert mode
 
-**Status:** Pending
+**Status:** Completed
 
 Add an insert-mode `<C-s>` mapping to submit the current Native Copilot prompt without requiring
 the user to leave insert mode.
@@ -208,7 +208,7 @@ the user to leave insert mode.
 
 ### NC-013: Expose prompt submission for user-defined mappings
 
-**Status:** Pending
+**Status:** Completed
 
 Determine whether Native Copilot exposes a stable public function or `<Plug>` mapping that users
 can call from their own normal- and insert-mode keybindings. If it does not, design and expose one

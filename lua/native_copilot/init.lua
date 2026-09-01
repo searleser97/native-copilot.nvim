@@ -340,15 +340,15 @@ local function finish_foreground_turn(member_id)
   dispatch_next_prompt(member_id)
 end
 
-local function submit_prompt()
+local function submit_prompt_content()
   local content = vim.trim(table.concat(prompt_lines(), '\n'))
   if content == '' then
     notify('The prompt is empty.', vim.log.levels.WARN)
-    return
+    return false
   end
   if not buffers.get_member(state.selected) then
     notify('Select an agent before sending.', vim.log.levels.WARN)
-    return
+    return false
   end
   set_prompt_lines({ '' })
   if state.prompt_queue_edit then
@@ -363,14 +363,14 @@ local function submit_prompt()
     end
     state.prompt_queue_edit = nil
     refresh_prompt_queue()
-    return
+    return true
   end
   local command = commands.parse(content)
   if command then
     buffers.append_block(state.selected, 'conversation', 'You', content)
     if command.name:lower() == 'tasks' then
       M.select_task()
-      return
+      return true
     elseif command.name:lower() == 'fleet' then
       if command.input then
         send('prompt.send', {
@@ -381,24 +381,24 @@ local function submit_prompt()
       else
         M.select_fleet()
       end
-      return
+      return true
     elseif command.name:lower() == 'resume' then
       if command.input then
         send('session.resume', { sessionId = command.input })
       else
         send('sessions.list')
       end
-      return
+      return true
     elseif command.name:lower() == 'mcp-reload' then
       send('mcp.reload', { target = state.selected })
-      return
+      return true
     elseif command.name:lower() == 'model' then
       if command.input then
         send('model.switch', { target = state.selected, modelId = command.input })
       else
         send('model.list', { target = state.selected, purpose = 'select' })
       end
-      return
+      return true
     elseif command.name:lower() == 'mcp' then
       local action, server_name = (command.input or ''):match('^(%S+)%s*(.*)$')
       action = action and action:lower() or 'select'
@@ -422,7 +422,7 @@ local function submit_prompt()
       else
         notify(('Unknown /mcp action: %s'):format(action), vim.log.levels.ERROR)
       end
-      return
+      return true
     end
     invoke_command(state.selected, command.name, command.input)
   else
@@ -432,6 +432,22 @@ local function submit_prompt()
       enqueue_prompt(state.selected, content)
     end
   end
+  return true
+end
+
+function M.submit_prompt()
+  if
+    not state.prompt_buf
+    or not vim.api.nvim_buf_is_valid(state.prompt_buf)
+    or vim.api.nvim_get_current_buf() ~= state.prompt_buf
+  then
+    notify(
+      'Prompt submission is only available from the Native Copilot prompt buffer.',
+      vim.log.levels.WARN
+    )
+    return false
+  end
+  return submit_prompt_content()
 end
 
 local function ensure_prompt_buffer()
@@ -447,7 +463,11 @@ local function ensure_prompt_buffer()
   vim.b[buf].ai_prompt = true
   vim.b[buf].native_copilot_prompt = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
-  vim.keymap.set('n', '<CR>', submit_prompt, {
+  vim.keymap.set('n', '<CR>', M.submit_prompt, {
+    buffer = buf,
+    desc = 'Send prompt to selected Copilot',
+  })
+  vim.keymap.set('i', '<C-s>', M.submit_prompt, {
     buffer = buf,
     desc = 'Send prompt to selected Copilot',
   })

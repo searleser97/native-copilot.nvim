@@ -117,14 +117,14 @@ local function check(condition, label)
   return true
 end
 
-local function submit(content)
+local function submit(content, lhs, mode)
   local buf = assert(prompt(), 'prompt buffer was not found')
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { content })
   local mapping = vim.api.nvim_buf_call(buf, function()
-    return vim.fn.maparg('<CR>', 'n', false, true)
+    return vim.fn.maparg(lhs or '<CR>', mode or 'n', false, true)
   end)
   assert(mapping.callback, 'prompt submit mapping was not found')
-  mapping.callback()
+  return vim.api.nvim_buf_call(buf, mapping.callback)
 end
 
 local function prompt_mapping(lhs, mode)
@@ -187,6 +187,19 @@ tick = function()
         return
       end
     end
+    local original_notify = vim.notify
+    local outside_warning
+    vim.notify = function(message) outside_warning = message end
+    local outside_submit = vim.api.nvim_buf_call(buf, native.submit_prompt)
+    vim.notify = original_notify
+    if not check(
+      outside_submit == false
+        and outside_warning
+          == 'Prompt submission is only available from the Native Copilot prompt buffer.',
+      'public prompt submission rejected calls outside the prompt buffer'
+    ) then
+      return
+    end
     local prompt_buf = assert(prompt(), 'prompt buffer was not found')
     local draft = 'Keep this draft while changing recipients.'
     vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { draft })
@@ -233,7 +246,17 @@ tick = function()
         },
       },
     })
-    submit('Run a background workspace validation and keep explaining while it finishes.')
+    local insert_submitted = submit(
+      'Run a background workspace validation and keep explaining while it finishes.',
+      '<C-s>',
+      'i'
+    )
+    if not check(
+      insert_submitted == true and text(prompt_buf) == '',
+      'insert-mode Ctrl-S submitted through the public prompt API'
+    ) then
+      return
+    end
     phase = 'task'
     schedule_tick()
   elseif phase == 'task' then

@@ -111,6 +111,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<leader>ais` | Telescope picker for overview, status, member, and view |
 | `[a` / `]a` | Previous/next member conversation or prompt recipient |
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
+| `<C-s>` in `AI Prompt` | Submit from insert mode |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `/fleet <objective>` | Ask Standard Copilot to design and start a task-specific Fleet |
@@ -135,6 +136,17 @@ vim.keymap.set("i", "<M-h>", function()
   require("native_copilot").cycle_member(-1)
 end)
 ```
+
+Prompt submission is also exposed as a public function for user-defined buffer-local mappings:
+
+```lua
+vim.keymap.set({ "n", "i" }, "<M-CR>", function()
+  require("native_copilot").submit_prompt()
+end, { buffer = true })
+```
+
+`submit_prompt()` returns `false` and displays a warning when called outside the Native Copilot
+prompt buffer or when the prompt cannot be submitted.
 
 The conversation is also the chronological activity timeline. Background tasks, environment
 initialization, foreground tools, schedules, and permission decisions appear as compact quoted
