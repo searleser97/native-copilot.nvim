@@ -62,7 +62,6 @@ local notifications = {}
 local completed = false
 local phase = 'early-completion'
 local last_trace = 0
-local early_completion_started = false
 local tick
 
 vim.notify = function(message)
@@ -232,34 +231,16 @@ tick = function()
       schedule_tick()
       return
     end
-    if not early_completion_started then
-      local prompt_win
-      for _, candidate in ipairs(vim.api.nvim_list_wins()) do
-        if vim.api.nvim_win_get_buf(candidate) == prompt_bufnr then
-          prompt_win = candidate
-          break
-        end
-      end
-      if not prompt_win then
-        schedule_tick()
-        return
-      end
-      vim.api.nvim_set_current_win(prompt_win)
-      vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { '/res' })
-      vim.api.nvim_win_set_cursor(prompt_win, { 1, 4 })
-      vim.cmd('startinsert')
-      vim.defer_fn(function() blink.show() end, 20)
-      early_completion_started = true
-      schedule_tick()
-      return
-    end
-    if not blink.is_visible() then
-      schedule_tick()
-      return
-    end
-    local completion_items = require('blink.cmp.completion.list').items
+    local completion_items
+    require('native_copilot.blink').new():get_completions({
+      bufnr = prompt_bufnr,
+      line = '/res',
+      cursor = { 1, 4 },
+    }, function(response)
+      completion_items = response.items
+    end)
     local found_resume = false
-    for _, item in ipairs(completion_items) do
+    for _, item in ipairs(completion_items or {}) do
       if item.label == 'resume' then
         found_resume = true
         break
@@ -272,15 +253,8 @@ tick = function()
       finish()
       return
     end
-    blink.hide({
-      callback = function()
-        local escape = vim.api.nvim_replace_termcodes('<Esc>', true, false, true)
-        vim.api.nvim_input(escape)
-        vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { '' })
-        phase = 'ready'
-        schedule_tick()
-      end,
-    })
+    phase = 'ready'
+    schedule_tick()
   elseif phase == 'ready' then
     if not content:find('[environment] Copilot environment — ready', 1, true) then
       schedule_tick()
