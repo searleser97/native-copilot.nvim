@@ -1660,6 +1660,7 @@ local function picker(title, entries, choose, picker_options)
     sorting_strategy = picker_options.sorting_strategy,
     default_selection_index = picker_options.default_selection_index,
     on_complete = picker_options.on_complete and { picker_options.on_complete } or nil,
+    temp__scrolling_limit = picker_options.result_limit,
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -2230,6 +2231,7 @@ function M._on_event(message)
       preserve_order = true,
       sorting_strategy = 'ascending',
       default_selection_index = #displayed_entries,
+      result_limit = #displayed_entries,
       on_complete = function(active_picker)
         local row = active_picker:get_row(#displayed_entries)
         local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
