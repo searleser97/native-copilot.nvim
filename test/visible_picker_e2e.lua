@@ -245,10 +245,10 @@ tick = function()
         return
       end
       vim.api.nvim_set_current_win(prompt_win)
-      vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { '' })
-      vim.api.nvim_win_set_cursor(prompt_win, { 1, 0 })
+      vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { '/res' })
+      vim.api.nvim_win_set_cursor(prompt_win, { 1, 4 })
       vim.cmd('startinsert')
-      vim.api.nvim_input('/res')
+      vim.defer_fn(function() blink.show() end, 20)
       early_completion_started = true
       schedule_tick()
       return
