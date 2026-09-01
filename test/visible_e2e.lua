@@ -127,6 +127,15 @@ local function submit(content)
   mapping.callback()
 end
 
+local function prompt_mapping(lhs, mode)
+  local buf = assert(prompt(), 'prompt buffer was not found')
+  local mapping = vim.api.nvim_buf_call(buf, function()
+    return vim.fn.maparg(lhs, mode, false, true)
+  end)
+  assert(mapping.callback, ('prompt mapping %s (%s) was not found'):format(lhs, mode))
+  return mapping.callback
+end
+
 local function resume_cli_session()
   submit('/resume e2e-cli-session')
   phase = 'resume'
@@ -178,6 +187,48 @@ tick = function()
         return
       end
     end
+    local prompt_buf = assert(prompt(), 'prompt buffer was not found')
+    local draft = 'Keep this draft while changing recipients.'
+    vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { draft })
+    native._on_event({
+      type = 'fleet.ready',
+      payload = {
+        fleetId = 'e2e-recipient-cycle',
+        name = 'Recipient Cycle',
+        entryMember = 'e2e-recipient-cycle/planner',
+        members = {
+          { id = 'e2e-recipient-cycle/planner', displayName = 'Planner' },
+          { id = 'e2e-recipient-cycle/reviewer', displayName = 'Reviewer' },
+        },
+      },
+    })
+    prompt_mapping(']a', 'n')()
+    local normal_target = vim.b[prompt_buf].native_copilot_target
+    local normal_preserved = text(prompt_buf) == draft
+      and vim.api.nvim_get_current_buf() == prompt_buf
+    prompt_mapping('<C-Right>', 'i')()
+    local insert_target = vim.b[prompt_buf].native_copilot_target
+    local insert_preserved = text(prompt_buf) == draft
+      and vim.api.nvim_get_current_buf() == prompt_buf
+    if not check(
+      normal_target == 'e2e-recipient-cycle/planner'
+        and insert_target == 'e2e-recipient-cycle/reviewer'
+        and normal_preserved
+        and insert_preserved,
+      'prompt mappings cycled recipients without losing the draft or focus'
+    ) then
+      return
+    end
+    native._on_event({
+      type = 'fleet.stopped',
+      payload = {
+        fleetId = 'e2e-recipient-cycle',
+        members = {
+          'e2e-recipient-cycle/planner',
+          'e2e-recipient-cycle/reviewer',
+        },
+      },
+    })
     submit('Run a background workspace validation and keep explaining while it finishes.')
     phase = 'task'
     schedule_tick()
