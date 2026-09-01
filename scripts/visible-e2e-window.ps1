@@ -9,7 +9,11 @@ param(
     [switch]$Observe
 )
 
-$env:NATIVE_COPILOT_E2E_PROFILE = $Profile
+$env:NATIVE_COPILOT_E2E_PROFILE = if ($Profile -eq 'telescope-no-smear') {
+    'telescope'
+} else {
+    $Profile
+}
 $env:NATIVE_COPILOT_E2E_ROOT = $Root
 $env:NATIVE_COPILOT_E2E_RESULT = $Result
 $env:NATIVE_COPILOT_E2E_SNAPSHOT = $Snapshot
@@ -19,9 +23,14 @@ $env:NATIVE_COPILOT_E2E_OBSERVE = if ($Observe) { '1' } else { '0' }
 $env:NATIVE_COPILOT_E2E_TELESCOPE = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\telescope.nvim'
 $env:NATIVE_COPILOT_E2E_PLENARY = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\plenary.nvim'
 $env:NATIVE_COPILOT_E2E_BLINK = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\blink.cmp'
-$env:NATIVE_COPILOT_E2E_SMEAR = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\smear-cursor.nvim'
+$env:NATIVE_COPILOT_E2E_WITH_SMEAR = if ($Profile -eq 'telescope') { '1' } else { '0' }
+if ($Profile -eq 'telescope') {
+    $env:NATIVE_COPILOT_E2E_SMEAR = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy\smear-cursor.nvim'
+} else {
+    Remove-Item Env:NATIVE_COPILOT_E2E_SMEAR -ErrorAction SilentlyContinue
+}
 
-$testScript = if ($Profile -eq 'telescope') {
+$testScript = if ($Profile -in @('telescope', 'telescope-no-smear')) {
     Join-Path $Root 'test\visible_picker_e2e.lua'
 } else {
     Join-Path $Root 'test\visible_e2e.lua'

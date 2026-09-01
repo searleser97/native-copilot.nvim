@@ -18,10 +18,12 @@ local plenary_path =
   assert(vim.env.NATIVE_COPILOT_E2E_PLENARY, 'NATIVE_COPILOT_E2E_PLENARY is required')
 local blink_path =
   assert(vim.env.NATIVE_COPILOT_E2E_BLINK, 'NATIVE_COPILOT_E2E_BLINK is required')
-local smear_path =
-  assert(vim.env.NATIVE_COPILOT_E2E_SMEAR, 'NATIVE_COPILOT_E2E_SMEAR is required')
+local with_smear = vim.env.NATIVE_COPILOT_E2E_WITH_SMEAR == '1'
+local smear_path = with_smear
+    and assert(vim.env.NATIVE_COPILOT_E2E_SMEAR, 'NATIVE_COPILOT_E2E_SMEAR is required')
+  or nil
 
-vim.opt.runtimepath:prepend(smear_path)
+if smear_path then vim.opt.runtimepath:prepend(smear_path) end
 vim.opt.runtimepath:prepend(blink_path)
 vim.opt.runtimepath:prepend(plenary_path)
 vim.opt.runtimepath:prepend(telescope_path)
@@ -65,11 +67,14 @@ blink.setup({
     },
   },
 })
-local smear_cursor = require('smear_cursor')
-smear_cursor.setup({
-  smear_insert_mode = false,
-})
-smear_cursor.enabled = false
+local smear_cursor
+if with_smear then
+  smear_cursor = require('smear_cursor')
+  smear_cursor.setup({
+    smear_insert_mode = false,
+  })
+  smear_cursor.enabled = false
+end
 
 local started_at = vim.uv.now()
 local original_lines = vim.o.lines
@@ -276,6 +281,17 @@ tick = function()
   local content = text(conversation())
   local prompt_buf, picker = current_picker()
   if phase == 'early-completion' then
+    if not with_smear then
+      local loaded = package.loaded['smear_cursor'] ~= nil
+      local available = pcall(require, 'smear_cursor')
+      if not check(
+        not loaded and not available,
+        'Telescope /resume ran without smear-cursor installed'
+      ) then
+        finish()
+        return
+      end
+    end
     local prompt_bufnr = prompt()
     if not prompt_bufnr then
       schedule_tick()
@@ -523,7 +539,7 @@ tick = function()
       return
     end
     pass('/resume <id> rejected a session active in another process')
-    smear_cursor.enabled = true
+    if smear_cursor then smear_cursor.enabled = true end
     submit('/resume', '<C-s>', 'i')
     phase = 'resume-picker'
   elseif phase == 'resume-picker' then
@@ -686,7 +702,7 @@ tick = function()
     vim.o.columns = original_columns
     phase = 'resume-result'
   elseif phase == 'resume-result' then
-    if not smear_cursor.enabled then
+    if smear_cursor and not smear_cursor.enabled then
       schedule_tick()
       return
     end

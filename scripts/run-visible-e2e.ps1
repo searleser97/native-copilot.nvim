@@ -1,5 +1,12 @@
 param(
-    [ValidateSet('all', 'allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope')]
+    [ValidateSet(
+        'all',
+        'allow-all',
+        'allow-all-mcp',
+        'manual-permissions',
+        'telescope',
+        'telescope-no-smear'
+    )]
     [string]$Profile = 'all',
     [switch]$Observe
 )
@@ -11,7 +18,7 @@ if ($Observe -and $Profile -eq 'all') {
 $root = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $root '.e2e-artifacts'
 $profiles = if ($Profile -eq 'all') {
-    @('allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope')
+    @('allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope', 'telescope-no-smear')
 } else {
     @($Profile)
 }

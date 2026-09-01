@@ -545,6 +545,7 @@ npm run test:e2e:allow-all
 npm run test:e2e:allow-all-mcp
 npm run test:e2e:manual-permissions
 npm run test:e2e:telescope
+npm run test:e2e:telescope-no-smear
 ```
 
 Use observation mode to slow the scripted events and leave the completed maximized window open:
@@ -557,8 +558,10 @@ Each profile opens an independent visible window, drives prompts through the rea
 writes assertions and conversation snapshots under `.e2e-artifacts\`, and closes immediately when
 the scenario finishes. `allow-all` omits MCP servers, `allow-all-mcp` renders connected and failed
 mock servers, and `manual-permissions` exercises the interactive approval picker. `telescope`
-loads the real installed Telescope and Plenary plugins and covers command pickers, direct command
-forms, newest-session selection, locked sessions, session restoration, and constrained UI layouts.
+loads the real installed Telescope, Plenary, Blink, and smear-cursor plugins and covers command
+pickers, direct command forms, newest-session selection, locked sessions, session restoration, and
+constrained UI layouts. `telescope-no-smear` repeats that complete picker scenario without adding
+smear-cursor to Neovim's runtime path, proving the optional integration is not required.
 Shared scenarios cover streamed reasoning folds, fold open/close behavior, Tool ownership, and
 Task deferral.
 Observation mode runs the `allow-all` profile, writes timestamped artifacts, and leaves Neovim open
