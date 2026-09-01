@@ -1703,6 +1703,7 @@ local function picker(title, entries, choose, picker_options)
     attach_mappings = function(prompt_buf)
       actions.select_default:replace(function()
         local selection = action_state.get_selected_entry()
+        if restore_eventignore then restore_eventignore() end
         actions.close(prompt_buf)
         if selection then choose(selection.value) end
       end)
