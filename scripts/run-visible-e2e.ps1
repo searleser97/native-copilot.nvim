@@ -16,6 +16,9 @@ New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
 Add-Type -Namespace NativeCopilotE2E -Name NativeWindow -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);
+
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsZoomed(System.IntPtr hWnd);
 '@
 
 foreach ($current in $profiles) {
@@ -73,14 +76,34 @@ foreach ($current in $profiles) {
         if (-not $window) { Start-Sleep -Milliseconds 50 }
     }
     if (-not $window) { throw "Visible E2E profile '$current' did not open WezTerm." }
-    [NativeCopilotE2E.NativeWindow]::ShowWindowAsync($window.MainWindowHandle, 3) | Out-Null
+    $windowId = $window.Id
+
+    $maximizeDeadline = [DateTime]::UtcNow.AddSeconds(3)
+    $windowHandle = [IntPtr]::Zero
+    while ([DateTime]::UtcNow -lt $maximizeDeadline) {
+        $window = Get-Process -Id $windowId -ErrorAction SilentlyContinue
+        if (-not $window) { break }
+        $window.Refresh()
+        $windowHandle = $window.MainWindowHandle
+        if ($windowHandle -ne [IntPtr]::Zero) {
+            [NativeCopilotE2E.NativeWindow]::ShowWindowAsync($windowHandle, 3) | Out-Null
+            if ([NativeCopilotE2E.NativeWindow]::IsZoomed($windowHandle)) { break }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    $maximized = $windowHandle -ne [IntPtr]::Zero -and
+        [NativeCopilotE2E.NativeWindow]::IsZoomed($windowHandle)
+    if (-not $maximized) {
+        Stop-Process -Id $windowId -ErrorAction SilentlyContinue
+        throw "Visible E2E profile '$current' did not maximize its WezTerm window."
+    }
 
     $resultDeadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $result) -and [DateTime]::UtcNow -lt $resultDeadline) {
         Start-Sleep -Milliseconds 50
     }
     if (-not (Test-Path -LiteralPath $result)) {
-        Stop-Process -Id $window.Id -ErrorAction SilentlyContinue
+        Stop-Process -Id $windowId -ErrorAction SilentlyContinue
         throw "Visible E2E profile '$current' timed out. Log: $log"
     }
 
@@ -88,9 +111,9 @@ foreach ($current in $profiles) {
     $lines | ForEach-Object { Write-Output "[$current] $_" }
     $failure = $lines | Where-Object { $_ -like 'FAIL *' } | Select-Object -First 1
     $exitDeadline = [DateTime]::UtcNow.AddSeconds(3)
-    while (Get-Process -Id $window.Id -ErrorAction SilentlyContinue) {
+    while (Get-Process -Id $windowId -ErrorAction SilentlyContinue) {
         if ([DateTime]::UtcNow -ge $exitDeadline) {
-            Stop-Process -Id $window.Id -ErrorAction SilentlyContinue
+            Stop-Process -Id $windowId -ErrorAction SilentlyContinue
             break
         }
         Start-Sleep -Milliseconds 50
