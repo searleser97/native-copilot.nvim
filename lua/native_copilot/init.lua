@@ -1655,11 +1655,39 @@ local function picker(title, entries, choose, picker_options)
   local action_state = modules['telescope.actions.state']
   local conf = modules['telescope.config'].values
   local sorters = modules['telescope.sorters']
+  local restore_eventignore
+  if picker_options.suppress_cursor_events then
+    local ignored = vim.o.eventignore
+    local events = vim.split(ignored, ',', { plain = true, trimempty = true })
+    for _, event in ipairs({ 'CursorMoved', 'CursorMovedI', 'ModeChanged', 'WinScrolled' }) do
+      if not vim.tbl_contains(events, event) then table.insert(events, event) end
+    end
+    vim.o.eventignore = table.concat(events, ',')
+    restore_eventignore = function()
+      if restore_eventignore then
+        vim.o.eventignore = ignored
+        restore_eventignore = nil
+      end
+    end
+  end
+  local on_complete
+  if picker_options.on_complete or restore_eventignore then
+    on_complete = function(active_picker)
+      local callback_ok, callback_failure = true, nil
+      if picker_options.on_complete then
+        callback_ok, callback_failure = pcall(picker_options.on_complete, active_picker)
+      end
+      if restore_eventignore then vim.defer_fn(restore_eventignore, 100) end
+      if not callback_ok then
+        notify(('Telescope picker completion failed: %s'):format(callback_failure), vim.log.levels.ERROR)
+      end
+    end
+  end
   local telescope_options = {
     prompt_title = title,
     sorting_strategy = picker_options.sorting_strategy,
     default_selection_index = picker_options.default_selection_index,
-    on_complete = picker_options.on_complete and { picker_options.on_complete } or nil,
+    on_complete = on_complete and { on_complete } or nil,
     temp__scrolling_limit = picker_options.result_limit,
     finder = finders.new_table({
       results = entries,
@@ -1684,7 +1712,9 @@ local function picker(title, entries, choose, picker_options)
   local ok, failure = pcall(function()
     pickers.new({}, telescope_options):find()
   end)
+  if restore_eventignore then vim.defer_fn(restore_eventignore, 1000) end
   if not ok then
+    if restore_eventignore then restore_eventignore() end
     notify(('Could not open Telescope picker: %s'):format(failure), vim.log.levels.ERROR)
   end
 end
@@ -2233,28 +2263,21 @@ function M._on_event(message)
       default_selection_index = #displayed_entries,
       result_limit = #displayed_entries,
       on_complete = function(active_picker)
-        vim.schedule(function()
-          if
-            active_picker.closed
-            or not vim.api.nvim_buf_is_valid(active_picker.results_bufnr)
-            or not vim.api.nvim_win_is_valid(active_picker.results_win)
-          then
-            return
-          end
-          local row = active_picker:get_row(#displayed_entries)
-          local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
-          if row >= 0 and row < line_count then
-            active_picker:set_selection(row)
-            local ignored = vim.wo[active_picker.results_win].eventignorewin
-            local events = vim.split(ignored, ',', { plain = true, trimempty = true })
-            for _, event in ipairs({ 'CursorMoved', 'CursorMovedI', 'WinScrolled' }) do
-              if not vim.tbl_contains(events, event) then table.insert(events, event) end
-            end
-            vim.wo[active_picker.results_win].eventignorewin = table.concat(events, ',')
-            vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
-          end
-        end)
+        if
+          active_picker.closed
+          or not vim.api.nvim_buf_is_valid(active_picker.results_bufnr)
+          or not vim.api.nvim_win_is_valid(active_picker.results_win)
+        then
+          return
+        end
+        local row = active_picker:get_row(#displayed_entries)
+        local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
+        if row >= 0 and row < line_count then
+          active_picker:set_selection(row)
+          vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
+        end
       end,
+      suppress_cursor_events = true,
     })
     return
   elseif message.type == 'commands.list' then

@@ -77,6 +77,7 @@ local original_columns = vim.o.columns
 local original_cmdheight = vim.o.cmdheight
 local original_laststatus = vim.o.laststatus
 local original_showtabline = vim.o.showtabline
+local original_eventignore = vim.o.eventignore
 local results = {}
 local notifications = {}
 local completed = false
@@ -665,18 +666,17 @@ tick = function()
       return
     end
     if not check(
-      vim.wo[picker.results_win].eventignorewin:find('CursorMoved', 1, true) ~= nil
-        and vim.wo[picker.results_win].eventignorewin:find('WinScrolled', 1, true) ~= nil,
-      '/resume kept programmatic cursor movement events disabled for the picker lifetime'
-    ) then
-      finish()
-      return
-    end
-    if not check(
       smear_window_count < 20,
       '/resume avoided a smear-cursor window explosion'
     ) then
       finish(('Observed %d smear-cursor windows'):format(smear_window_count))
+      return
+    end
+    if not check(
+      vim.o.eventignore == original_eventignore,
+      '/resume restored Neovim event handling after positioning the picker'
+    ) then
+      finish()
       return
     end
     smear_cursor.enabled = false
