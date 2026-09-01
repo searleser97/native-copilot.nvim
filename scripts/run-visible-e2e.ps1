@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'allow-all', 'allow-all-mcp', 'manual-permissions')]
+    [ValidateSet('all', 'allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope')]
     [string]$Profile = 'all',
     [switch]$Observe
 )
@@ -11,7 +11,7 @@ if ($Observe -and $Profile -eq 'all') {
 $root = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $root '.e2e-artifacts'
 $profiles = if ($Profile -eq 'all') {
-    @('allow-all', 'allow-all-mcp', 'manual-permissions')
+    @('allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope')
 } else {
     @($Profile)
 }
@@ -109,7 +109,7 @@ foreach ($current in $profiles) {
         throw "Visible E2E profile '$current' did not maximize its WezTerm window."
     }
 
-    $resultDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    $resultDeadline = [DateTime]::UtcNow.AddSeconds(35)
     while (-not (Test-Path -LiteralPath $result) -and [DateTime]::UtcNow -lt $resultDeadline) {
         Start-Sleep -Milliseconds 50
     }

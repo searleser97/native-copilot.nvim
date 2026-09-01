@@ -191,7 +191,8 @@ Commands mirror the primary mappings:
 :NativeCopilotReloadMcp
 ```
 
-Selection uses `vim.ui.select` by default. To use Telescope for Copilot Fleet pickers, install it separately and opt in explicitly:
+Selection uses `vim.ui.select` by default. To use Telescope for Copilot command, session, task,
+model, MCP, and Fleet pickers, install it separately and opt in explicitly:
 
 ```lua
 require("native_copilot").setup({
@@ -201,7 +202,9 @@ require("native_copilot").setup({
 })
 ```
 
-The plugin does not select Telescope merely because it is installed.
+The plugin does not select Telescope merely because it is installed. Telescope pickers use an
+adaptive dropdown without a preview so they remain usable in constrained windows. `/resume` keeps
+the newest session at the bottom, selects it initially, and scrolls it into view.
 
 ## Configuration
 
@@ -526,6 +529,7 @@ Prerequisites:
 - PowerShell 7 (`pwsh`)
 - WezTerm
 - Neovim available as `nvim`
+- Telescope and Plenary installed under Neovim's `stdpath("data")\lazy` for the real picker profile
 
 Run the complete visible matrix:
 
@@ -539,6 +543,7 @@ Run one launch profile while developing:
 npm run test:e2e:allow-all
 npm run test:e2e:allow-all-mcp
 npm run test:e2e:manual-permissions
+npm run test:e2e:telescope
 ```
 
 Use observation mode to slow the scripted events and leave the completed maximized window open:
@@ -550,8 +555,11 @@ npm run test:e2e:observe
 Each profile opens an independent visible window, drives prompts through the real prompt mapping,
 writes assertions and conversation snapshots under `.e2e-artifacts\`, and closes immediately when
 the scenario finishes. `allow-all` omits MCP servers, `allow-all-mcp` renders connected and failed
-mock servers, and `manual-permissions` exercises the interactive approval picker. Shared scenarios
-cover streamed reasoning folds, fold open/close behavior, Tool ownership, and Task deferral.
+mock servers, and `manual-permissions` exercises the interactive approval picker. `telescope`
+loads the real installed Telescope and Plenary plugins and covers command pickers, direct command
+forms, newest-session selection, locked sessions, session restoration, and constrained UI layouts.
+Shared scenarios cover streamed reasoning folds, fold open/close behavior, Tool ownership, and
+Task deferral.
 Observation mode runs the `allow-all` profile, writes timestamped artifacts, and leaves Neovim open
 until the user closes it.
 

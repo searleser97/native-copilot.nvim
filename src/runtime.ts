@@ -2085,9 +2085,17 @@ export class CopilotRuntime {
 
   async resumeStandardSession(sessionId: string): Promise<void> {
     const client = await this.ensureClient();
+    const active = [...this.live.entries()].find(([, live]) => live.session.sessionId === sessionId);
+    if (active) {
+      throw new Error(`Session "${sessionId}" is already active as "${active[0]}".`);
+    }
     const available = await client.listSessions({ workingDirectory: this.workspace });
     if (!available.some((session) => session.sessionId === sessionId)) {
       throw new Error(`Session "${sessionId}" was not found for this workspace.`);
+    }
+    const { inUse } = await client.rpc.sessions.checkInUse({ sessionIds: [sessionId] });
+    if (inUse.includes(sessionId)) {
+      throw new Error(`Session "${sessionId}" is active in another process.`);
     }
 
     await this.stopStandard(`Resuming session ${sessionId}`);

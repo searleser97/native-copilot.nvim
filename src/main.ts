@@ -360,10 +360,10 @@ async function main(): Promise<void> {
       case "mcp.reload": {
         const target = requiredString(payload, "target", command.type);
         const serverCount = await runtime.reloadMcp(target);
-        protocol.send("request.complete", { type: command.type, target, serverCount }, {
+        protocol.send("mcp.reloaded", { target, serverCount }, {
           requestId: command.id,
           memberId: target,
-          target: "status",
+          target: "conversation",
           done: true,
         });
         return;

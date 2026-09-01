@@ -137,7 +137,7 @@ local function prompt_mapping(lhs, mode)
 end
 
 local function resume_cli_session()
-  submit('/resume e2e-cli-session')
+  submit('/resume')
   phase = 'resume'
   schedule_tick()
 end

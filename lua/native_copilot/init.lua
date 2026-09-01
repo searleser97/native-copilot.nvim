@@ -94,6 +94,7 @@ local state = {
   prompt_queue_win = nil,
   prompt_queue_buf = nil,
   prompt_buf = nil,
+  compact_ui_options = nil,
   task_detail = nil,
   task_progress = nil,
   task_progress_loaded = false,
@@ -149,6 +150,14 @@ end
 
 local function is_ui_open()
   return state.tab and vim.api.nvim_tabpage_is_valid(state.tab)
+end
+
+local function restore_compact_ui_options()
+  if not state.compact_ui_options then return end
+  vim.o.cmdheight = state.compact_ui_options.cmdheight
+  vim.o.laststatus = state.compact_ui_options.laststatus
+  vim.o.showtabline = state.compact_ui_options.showtabline
+  state.compact_ui_options = nil
 end
 
 local function current_workspace()
@@ -596,14 +605,36 @@ refresh_prompt_queue = function()
   if not state.prompt_queue_win or not vim.api.nvim_win_is_valid(state.prompt_queue_win) then
     local current = vim.api.nvim_get_current_win()
     vim.api.nvim_set_current_win(state.prompt_win)
-    vim.cmd('aboveleft split')
-    state.prompt_queue_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(state.prompt_queue_win, buf)
+    local split = pcall(vim.cmd, 'aboveleft split')
+    if split then
+      state.prompt_queue_win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(state.prompt_queue_win, buf)
+    else
+      local height = math.max(
+        1,
+        math.min(options.prompt_queue_height, #lines, vim.o.lines - vim.o.cmdheight - 3)
+      )
+      state.prompt_queue_win = vim.api.nvim_open_win(buf, false, {
+        relative = 'editor',
+        row = math.max(0, vim.o.lines - vim.o.cmdheight - height - 2),
+        col = 0,
+        width = math.max(1, vim.o.columns),
+        height = height,
+        style = 'minimal',
+      })
+    end
     if vim.api.nvim_win_is_valid(current) then vim.api.nvim_set_current_win(current) end
   end
   vim.api.nvim_win_set_height(
     state.prompt_queue_win,
-    math.min(options.prompt_queue_height, #lines)
+    math.max(
+      1,
+      math.min(
+        options.prompt_queue_height,
+        #lines,
+        vim.o.lines - vim.o.cmdheight - 3
+      )
+    )
   )
   vim.wo[state.prompt_queue_win].winfixheight = true
   vim.wo[state.prompt_queue_win].winbar =
@@ -1150,8 +1181,8 @@ end
 local function open_detail_window()
   local buf = ensure_detail_buffer()
   render_task_detail()
-  local width = math.max(40, math.min(100, vim.o.columns - 8))
-  local height = math.max(6, math.min(options.task_detail_height, vim.o.lines - 6))
+  local width = math.max(1, math.min(100, vim.o.columns - 4))
+  local height = math.max(1, math.min(options.task_detail_height, vim.o.lines - vim.o.cmdheight - 4))
   if state.task_detail_win and vim.api.nvim_win_is_valid(state.task_detail_win) then
     vim.api.nvim_win_set_buf(state.task_detail_win, buf)
     vim.api.nvim_set_current_win(state.task_detail_win)
@@ -1368,14 +1399,43 @@ local function ensure_ui(reuse_current_tab)
   if not reuse_current_tab then vim.cmd('tabnew') end
   state.tab = vim.api.nvim_get_current_tabpage()
   state.main_win = vim.api.nvim_get_current_win()
+  if
+    not state.compact_ui_options
+    and vim.o.lines - vim.o.cmdheight < options.prompt_height + 4
+  then
+    state.compact_ui_options = {
+      cmdheight = vim.o.cmdheight,
+      laststatus = vim.o.laststatus,
+      showtabline = vim.o.showtabline,
+    }
+    vim.o.cmdheight = 0
+    vim.o.laststatus = 0
+    vim.o.showtabline = 0
+  end
   local entry = ensure_member(state.selected, state.selected == 'standard' and 'Copilot' or nil)
   vim.api.nvim_win_set_buf(state.main_win, entry.views.conversation.buf)
   buffers.on_shown(entry.views.conversation.buf)
-  vim.cmd('botright split')
-  state.prompt_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.prompt_win, ensure_prompt_buffer())
-  vim.api.nvim_win_set_height(state.prompt_win, options.prompt_height)
-  vim.wo[state.prompt_win].winfixheight = true
+  local prompt_buf = ensure_prompt_buffer()
+  local split = pcall(vim.cmd, 'botright split')
+  if split then
+    state.prompt_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(state.prompt_win, prompt_buf)
+    vim.api.nvim_win_set_height(
+      state.prompt_win,
+      math.max(1, math.min(options.prompt_height, vim.o.lines - vim.o.cmdheight - 2))
+    )
+    vim.wo[state.prompt_win].winfixheight = true
+  else
+    state.prompt_win = vim.api.nvim_open_win(prompt_buf, true, {
+      relative = 'win',
+      win = state.main_win,
+      row = math.max(0, vim.api.nvim_win_get_height(state.main_win) - 1),
+      col = 0,
+      width = math.max(1, vim.api.nvim_win_get_width(state.main_win)),
+      height = 1,
+      style = 'minimal',
+    })
+  end
   update_prompt_label()
   refresh_prompt_queue()
   vim.api.nvim_set_current_win(state.prompt_win)
@@ -1411,6 +1471,7 @@ function M.close()
   state.prompt_win = nil
   state.prompt_queue_win = nil
   state.overview = false
+  restore_compact_ui_options()
 end
 
 function M.toggle()
@@ -1465,7 +1526,7 @@ function M.show_overview()
   vim.api.nvim_win_set_buf(first, first_buf)
   buffers.on_shown(first_buf)
   for index = 2, maximum do
-    vim.cmd('rightbelow vsplit')
+    if not pcall(vim.cmd, 'rightbelow vsplit') then break end
     local member_buf = buffers.buffer(members[index], 'conversation')
     vim.api.nvim_win_set_buf(0, member_buf)
     buffers.on_shown(member_buf)
@@ -1547,7 +1608,8 @@ local function relative_age(seconds)
   return ('%d day%s ago'):format(days, days == 1 and '' or 's')
 end
 
-local function picker(title, entries, choose)
+local function picker(title, entries, choose, picker_options)
+  picker_options = picker_options or {}
   if options.frontend.picker == 'native' then
     vim.ui.select(entries, {
       prompt = title,
@@ -1566,13 +1628,51 @@ local function picker(title, entries, choose)
     return
   end
 
-  local pickers = require('telescope.pickers')
-  local finders = require('telescope.finders')
-  local actions = require('telescope.actions')
-  local action_state = require('telescope.actions.state')
-  local conf = require('telescope.config').values
-  pickers.new({}, {
+  local modules = {}
+  for _, name in ipairs({
+    'telescope.pickers',
+    'telescope.finders',
+    'telescope.actions',
+    'telescope.actions.state',
+    'telescope.config',
+    'telescope.sorters',
+    'telescope.themes',
+  }) do
+    local ok, loaded = pcall(require, name)
+    if not ok then
+      notify(('Telescope picker unavailable: %s'):format(loaded), vim.log.levels.ERROR)
+      return
+    end
+    modules[name] = loaded
+  end
+  local pickers = modules['telescope.pickers']
+  local finders = modules['telescope.finders']
+  local actions = modules['telescope.actions']
+  local action_state = modules['telescope.actions.state']
+  local conf = modules['telescope.config'].values
+  local sorters = modules['telescope.sorters']
+  local themes = modules['telescope.themes']
+  local telescope_options = themes.get_dropdown({
     prompt_title = title,
+    previewer = false,
+    sorting_strategy = 'ascending',
+    selection_strategy = 'reset',
+    default_selection_index = picker_options.initial_selection == 'bottom' and #entries or 1,
+    on_complete = picker_options.initial_selection == 'bottom'
+        and {
+          function(active_picker)
+            active_picker:set_selection(active_picker:get_row(#entries))
+          end,
+        }
+      or nil,
+    layout_config = {
+      width = function(_, columns)
+        return math.max(1, math.min(columns - 2, 100))
+      end,
+      height = function(_, _, lines)
+        return math.max(1, math.min(lines - 2, #entries + 2, 20))
+      end,
+    },
     finder = finders.new_table({
       results = entries,
       entry_maker = function(item)
@@ -1583,7 +1683,7 @@ local function picker(title, entries, choose)
         }
       end,
     }),
-    sorter = conf.generic_sorter({}),
+    sorter = picker_options.preserve_order and sorters.empty() or conf.generic_sorter({}),
     attach_mappings = function(prompt_buf)
       actions.select_default:replace(function()
         local selection = action_state.get_selected_entry()
@@ -1592,7 +1692,13 @@ local function picker(title, entries, choose)
       end)
       return true
     end,
-  }):find()
+  })
+  local ok, failure = pcall(function()
+    pickers.new({}, telescope_options):find()
+  end)
+  if not ok then
+    notify(('Could not open Telescope picker: %s'):format(failure), vim.log.levels.ERROR)
+  end
 end
 
 local function permission_detail(request)
@@ -2116,13 +2222,21 @@ function M._on_event(message)
       notify('No previous Copilot sessions were found for this workspace.', vim.log.levels.INFO)
       return
     end
-    picker('Resume Copilot session', entries, function(item)
+    local displayed_entries = entries
+    if options.frontend.picker == 'telescope' then
+      displayed_entries = {}
+      for index = #entries, 1, -1 do table.insert(displayed_entries, entries[index]) end
+    end
+    picker('Resume Copilot session', displayed_entries, function(item)
       if item.session.inUse then
         notify('That Copilot session is active in another process.', vim.log.levels.WARN)
         return
       end
       send('session.resume', { sessionId = item.session.sessionId })
-    end)
+    end, {
+      preserve_order = true,
+      initial_selection = 'bottom',
+    })
     return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
@@ -2241,11 +2355,23 @@ function M._on_event(message)
       ('MCP server `%s` %s.'):format(payload.serverName or '?', status)
     )
     return
+  elseif message.type == 'mcp.reloaded' then
+    buffers.append_block(
+      event_member(message),
+      'conversation',
+      'Copilot',
+      ('Reloaded %d MCP server%s.'):format(
+        tonumber(payload.serverCount) or 0,
+        tonumber(payload.serverCount) == 1 and '' or 's'
+      )
+    )
+    return
   elseif message.type == 'command.result' then
     local member_id = event_member(message)
     local result = payload.result or {}
-    if result.kind == 'text' and result.text and result.text ~= '' then
-      buffers.append_block(member_id, 'conversation', 'Copilot', result.text)
+    local result_text = result.text or result.content
+    if result.kind == 'text' and result_text and result_text ~= '' then
+      buffers.append_block(member_id, 'conversation', 'Copilot', result_text)
     elseif result.kind == 'completed' and result.message and result.message ~= '' then
       buffers.append_block(member_id, 'conversation', 'Copilot', result.message)
     elseif result.kind == 'agent-prompt' and result.notice and result.notice ~= '' then
@@ -2751,6 +2877,7 @@ function M.setup(user_options)
         state.main_win = nil
         state.prompt_win = nil
         state.overview = false
+        restore_compact_ui_options()
       end
     end,
   })

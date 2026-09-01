@@ -369,17 +369,31 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   recoverableFleetRuns(): Array<Record<string, unknown>> {
-    return [];
+    return this.profile === "telescope"
+      ? [{
+          id: "e2e-recoverable-fleet-run",
+          fleetId: "e2e-recovered-fleet",
+          name: "Recovered validation fleet",
+          status: "stopped",
+          startedAt: "2026-08-31T14:00:00.000Z",
+          members: ["planner", "reviewer"],
+        }]
+      : [];
   }
 
   async listModels(): Promise<unknown[]> {
-    return [{ id: "scripted-model", name: "Scripted Model" }];
+    return this.profile === "telescope"
+      ? [
+          { id: "scripted-fast", name: "Scripted Fast" },
+          { id: "scripted-model", name: "Scripted Model" },
+          { id: "scripted-deep", name: "Scripted Deep" },
+        ]
+      : [{ id: "scripted-model", name: "Scripted Model" }];
   }
 
   async listSessions(): Promise<unknown[]> {
-    return this.resumedCliSession
-      ? []
-      : [{
+    if (this.resumedCliSession) return [];
+    const current = {
           sessionId: "e2e-cli-session",
           startTime: new Date("2026-08-31T15:00:00.000Z"),
           modifiedTime: new Date("2026-08-31T15:30:00.000Z"),
@@ -388,10 +402,25 @@ export class ScriptedRuntime implements RuntimeAdapter {
           isRemote: false,
           inUse: false,
           context: { workingDirectory: this.workspace },
-        }];
+        };
+    if (this.profile !== "telescope") return [current];
+    const older = Array.from({ length: 24 }, (_, index) => ({
+        sessionId: `e2e-older-session-${String(index + 1).padStart(2, "0")}`,
+        startTime: new Date(Date.UTC(2026, 7, 1 + index, 12, 0, 0)),
+        modifiedTime: new Date(Date.UTC(2026, 7, 1 + index, 12, 30, 0)),
+        modifiedAgoSeconds: (25 - index) * 86_400,
+        summary: `Older workspace session ${String(index + 1).padStart(2, "0")}`,
+        isRemote: false,
+        inUse: index === 22,
+        context: { workingDirectory: this.workspace },
+      }));
+    return [current, ...older.reverse()];
   }
 
   async resumeStandardSession(sessionId: string): Promise<void> {
+    if (this.profile === "telescope" && sessionId === "e2e-older-session-23") {
+      throw new Error(`Session "${sessionId}" is active in another process.`);
+    }
     if (sessionId !== "e2e-cli-session") {
       throw new Error(`Session "${sessionId}" was not found for this workspace.`);
     }
@@ -673,13 +702,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   async invokeCommand(_target: string, name: string, input?: string): Promise<unknown> {
-    return { kind: "text", content: `${name}${input ? ` ${input}` : ""}` };
+    return { kind: "text", text: `${name}${input ? ` ${input}` : ""}` };
   }
 
   async modelState(_target: string): Promise<unknown> {
     return {
       current: { modelId: "scripted-model", name: "Scripted Model" },
-      models: [{ modelId: "scripted-model", name: "Scripted Model" }],
+      models: this.profile === "telescope"
+        ? [
+            { modelId: "scripted-fast", name: "Scripted Fast" },
+            { modelId: "scripted-model", name: "Scripted Model" },
+            { modelId: "scripted-deep", name: "Scripted Deep" },
+          ]
+        : [{ modelId: "scripted-model", name: "Scripted Model" }],
     };
   }
 
@@ -689,7 +724,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async listMcp(_target: string): Promise<unknown[]> {
     if (this.profile === "allow-all") return [];
-    return this.profile === "allow-all-mcp"
+    return this.profile === "allow-all-mcp" || this.profile === "telescope"
       ? [
           { name: "mock-files", status: "connected" },
           { name: "mock-broken", status: "failed" },
@@ -711,7 +746,24 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   async listTasks(_target: string): Promise<unknown[]> {
-    return [];
+    return this.profile === "telescope"
+      ? [
+          {
+            id: "e2e-picker-task-completed",
+            type: "shell",
+            status: "completed",
+            description: "Validate picker command coverage",
+            command: "npm test",
+            output: "All picker checks completed.",
+          },
+          {
+            id: "e2e-picker-task-running",
+            type: "agent",
+            status: "running",
+            description: "Review picker behavior",
+          },
+        ]
+      : [];
   }
 
   async taskProgress(_target: string, _taskId: string): Promise<unknown> {
@@ -744,7 +796,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }, { target: "status", done: true });
   }
 
-  async resumeFleet(_runId: string): Promise<void> {}
+  async resumeFleet(runId: string): Promise<void> {
+    if (this.profile !== "telescope" || runId !== "e2e-recoverable-fleet-run") return;
+    this.emit("fleet.ready", {
+      fleetId: "e2e-recovered-fleet",
+      name: "Recovered validation fleet",
+      entryMember: "e2e-recovered-fleet/planner",
+      recovered: true,
+      members: [
+        { id: "e2e-recovered-fleet/planner", displayName: "Planner" },
+        { id: "e2e-recovered-fleet/reviewer", displayName: "Reviewer" },
+      ],
+    }, { target: "status", done: true });
+  }
 
   async stopFleet(fleetIdOrRunId: string, reason = "Fleet stopped by scripted runtime"): Promise<void> {
     this.emit("fleet.stopped", {
