@@ -28,9 +28,10 @@ local scheduled_errors = {}
 local original_schedule_wrap = vim.schedule_wrap
 vim.schedule_wrap = function(callback)
   return original_schedule_wrap(function(...)
-    local arguments = table.pack(...)
+    local argument_count = select('#', ...)
+    local arguments = { ... }
     local ok, failure = xpcall(function()
-      callback(table.unpack(arguments, 1, arguments.n))
+      callback(unpack(arguments, 1, argument_count))
     end, debug.traceback)
     if not ok then table.insert(scheduled_errors, failure) end
   end)
