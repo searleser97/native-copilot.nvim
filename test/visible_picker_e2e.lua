@@ -241,7 +241,7 @@ tick = function()
     end)
     local found_resume = false
     for _, item in ipairs(completion_items or {}) do
-      if item.label == 'resume' then
+      if item.label == '/resume' then
         found_resume = true
         break
       end
