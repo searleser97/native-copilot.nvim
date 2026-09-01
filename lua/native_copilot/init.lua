@@ -1691,14 +1691,9 @@ local function picker(title, entries, choose, picker_options)
       restore_cursor_animation = function()
         if restored then return end
         restored = true
-        local ignored = vim.o.eventignore
-        local events = vim.split(ignored, ',', { plain = true, trimempty = true })
-        for _, event in ipairs({ 'CursorMoved', 'CursorMovedI', 'ModeChanged', 'WinScrolled' }) do
-          if not vim.tbl_contains(events, event) then table.insert(events, event) end
-        end
-        vim.o.eventignore = table.concat(events, ',')
+        local row, col = require('smear_cursor.screen').get_screen_cursor_position()
+        require('smear_cursor.animation').jump(row, col)
         smear_cursor.enabled = true
-        vim.defer_fn(function() vim.o.eventignore = ignored end, 100)
       end
     end
   end
@@ -2303,7 +2298,7 @@ function M._on_event(message)
     end
     picker('Resume Copilot session', displayed_entries, function(item, restore_cursor_animation)
       if item.session.inUse then
-        if restore_cursor_animation then vim.defer_fn(restore_cursor_animation, 100) end
+        if restore_cursor_animation then restore_cursor_animation() end
         notify('That Copilot session is active in another process.', vim.log.levels.WARN)
         return
       end
