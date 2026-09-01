@@ -671,6 +671,7 @@ tick = function()
       finish(('Observed %d smear-cursor windows'):format(smear_window_count))
       return
     end
+    smear_cursor.enabled = false
     choose_where(function(item)
       return item.session and item.session.sessionId == 'e2e-cli-session'
     end)
