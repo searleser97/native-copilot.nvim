@@ -1691,7 +1691,14 @@ local function picker(title, entries, choose, picker_options)
       restore_cursor_animation = function()
         if restored then return end
         restored = true
+        local ignored = vim.o.eventignore
+        local events = vim.split(ignored, ',', { plain = true, trimempty = true })
+        for _, event in ipairs({ 'CursorMoved', 'CursorMovedI', 'ModeChanged', 'WinScrolled' }) do
+          if not vim.tbl_contains(events, event) then table.insert(events, event) end
+        end
+        vim.o.eventignore = table.concat(events, ',')
         smear_cursor.enabled = true
+        vim.defer_fn(function() vim.o.eventignore = ignored end, 100)
       end
     end
   end
