@@ -497,7 +497,7 @@ local function begin_inline_activity(view, activity_id, heading)
   view.active_activity = activity
   view.activity_records[activity_id] = activity
   if plain then
-    view.pending = view.pending .. content_indent
+    view.pending = view.pending .. (continuation and ('\n' .. content_indent) or content_indent)
   elseif continuation then
     view.pending = view.pending .. quote_indent .. '\n' .. quote_indent .. ' '
   else

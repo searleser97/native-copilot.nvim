@@ -172,12 +172,13 @@ tick = function()
         return
       end
     end
-    submit('E2E_TASK_DEFERRAL')
+    submit('Run a background workspace validation and keep explaining while it finishes.')
     phase = 'task'
     schedule_tick()
   elseif phase == 'task' then
-    local stream_begin = content:find('STREAM-BEGIN', 1, true)
-    local stream_end = content:find('STREAM-END', stream_begin or 1, true)
+    local stream_begin =
+      content:find('I started the workspace validation in the background.', 1, true)
+    local stream_end = content:find('without splitting this message.', stream_begin or 1, true)
     local task_header = content:find('📝 · ', stream_end or 1, true)
     local task_complete = content:find('[task][e2e-task] completed', task_header or 1, true)
     if not (stream_begin and stream_end and task_header and task_complete) then
@@ -193,15 +194,20 @@ tick = function()
     ) then
       return
     end
-    submit('E2E_TOOL_AUTHORSHIP')
+    submit('Read the completed validation output and summarize the result.')
     phase = 'tool'
     schedule_tick()
   elseif phase == 'tool' then
-    local tool_prompt = content:find('E2E_TOOL_AUTHORSHIP', 1, true)
+    local tool_prompt = content:find('Read the completed validation output', 1, true)
     local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
     local tool_row = copilot_header
       and content:find('[tool][e2e-read] read_powershell', copilot_header, true)
-    local reply = tool_row and content:find('TOOL-AUTHOR-OK', tool_row, true)
+    local reply = tool_row
+      and content:find(
+        'The background validation completed successfully with exit code 0.',
+        tool_row,
+        true
+      )
     local task_header = reply and content:find('📝 · ', reply, true)
     local prior_task = task_header
       and content:find('[task][e2e-prior-task] completed', task_header, true)
@@ -218,7 +224,7 @@ tick = function()
     end
     local tool_line = content:sub(tool_row, content:find('\n', tool_row, true) or #content)
     if not check(
-      not tool_line:find('TOOL-AUTHOR-OK', 1, true),
+      not tool_line:find('The background validation completed successfully', 1, true),
       'foreground tool and Copilot reply use separate lines'
     ) then
       return
@@ -229,17 +235,20 @@ tick = function()
     ) then
       return
     end
-    submit('E2E_REASONING_FOLDS')
+    submit(
+      'Investigate the event-ordering issue, use the available result, and explain your conclusion.'
+    )
     phase = 'reasoning-stream'
     schedule_tick()
   elseif phase == 'reasoning-stream' then
-    local first_reasoning = content:find('REASONING-ONE-BEGIN', 1, true)
+    local first_reasoning =
+      content:find('The completion event arrived while the foreground response was still active.', 1, true)
     if not first_reasoning then
       schedule_tick()
       return
     end
     if not check(
-      not content:find('REASONING-FINAL-RESPONSE', first_reasoning, true),
+      not content:find('The event order is correct:', first_reasoning, true),
       'reasoning stream became visible before the final response'
     ) then
       return
@@ -247,12 +256,17 @@ tick = function()
     phase = 'reasoning-complete'
     schedule_tick()
   elseif phase == 'reasoning-complete' then
-    local first_reasoning = content:find('REASONING-ONE-BEGIN', 1, true)
-    local second_reasoning = content:find('REASONING-TWO-BEGIN', first_reasoning or 1, true)
+    local first_reasoning =
+      content:find('The completion event arrived while the foreground response was still active.', 1, true)
+    local second_reasoning = content:find(
+      'Next, I need to inspect the completed command before composing the final answer.',
+      first_reasoning or 1,
+      true
+    )
     local tool_row = second_reasoning
-      and content:find('[tool][e2e-reasoning-tool] reasoning_tool', second_reasoning, true)
+      and content:find('[tool][e2e-reasoning-tool] read_powershell', second_reasoning, true)
     local final_response = tool_row
-      and content:find('REASONING-FINAL-RESPONSE', tool_row, true)
+      and content:find('The event order is correct:', tool_row, true)
     local task_header = final_response and content:find('📝 · ', final_response, true)
     local task_row = task_header
       and content:find('[task][e2e-reasoning-task] completed', task_header, true)
@@ -261,8 +275,8 @@ tick = function()
       return
     end
     if not check(
-      select(2, content:gsub('REASONING%-ONE%-BEGIN', '')) == 1
-        and select(2, content:gsub('REASONING%-TWO%-BEGIN', '')) == 1,
+      select(2, content:gsub('The completion event arrived while the foreground response was still active%.', '')) == 1
+        and select(2, content:gsub('Next, I need to inspect the completed command before composing the final answer%.', '')) == 1,
       'consecutive reasoning summaries rendered once'
     ) then
       return
@@ -276,10 +290,12 @@ tick = function()
     ) then
       return
     end
-    local first_row = line_with(buf, 'REASONING-ONE-BEGIN')
-    local second_row = line_with(buf, 'REASONING-TWO-BEGIN')
-    local tool_line = line_with(buf, '[tool][e2e-reasoning-tool] reasoning_tool')
-    local final_row = line_with(buf, 'REASONING-FINAL-RESPONSE')
+    local first_row =
+      line_with(buf, 'The completion event arrived while the foreground response was still active.')
+    local second_row =
+      line_with(buf, 'Next, I need to inspect the completed command before composing the final answer.')
+    local tool_line = line_with(buf, '[tool][e2e-reasoning-tool] read_powershell')
+    local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
     if first_row and second_row and tool_line and final_row and #windows > 0 then
@@ -325,11 +341,19 @@ tick = function()
     ) then
       return
     end
+    local line_before_second = second_row
+      and vim.api.nvim_buf_get_lines(buf, second_row - 2, second_row - 1, false)[1]
+    if not check(
+      line_before_second and line_before_second:match('^%s*$') ~= nil,
+      'consecutive reasoning thoughts are separated by a blank line'
+    ) then
+      return
+    end
     if not check(fold.reopened == -1, 'reasoning fold opens and closes through native fold commands') then
       return
     end
     if profile == 'manual-permissions' then
-      submit('E2E_PERMISSION')
+      submit('Run a harmless PowerShell command so I can approve it.')
       phase = 'permission'
       schedule_tick()
     else
@@ -337,8 +361,12 @@ tick = function()
     end
   elseif phase == 'permission' then
     if not (
-      content:find('[permission] shell — approved once: Write-Output E2E_PERMISSION', 1, true)
-      and content:find('PERMISSION-APPROVED', 1, true)
+      content:find(
+        "[permission] shell — approved once: Write-Output 'observation approved'",
+        1,
+        true
+      )
+      and content:find('The approved PowerShell command completed successfully.', 1, true)
     ) then
       schedule_tick()
       return

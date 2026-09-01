@@ -75,8 +75,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
         toolCallId: "e2e-async-shell",
         toolName: "powershell",
         arguments: {
-          command: "mock wait",
-          description: "Mock background wait",
+          command: "Write-Output 'workspace valid'",
+          description: "Validate workspace in background",
           mode: "async",
           detach: true,
         },
@@ -96,12 +96,14 @@ export class ScriptedRuntime implements RuntimeAdapter {
         id: "e2e-task",
         type: "shell",
         status: "running",
-        description: "Mock background wait",
+        description: "Validate workspace in background",
       }],
     }, { memberId: target, target: "status", done: true });
     this.emit("conversation.delta", {
       messageId,
-      content: "STREAM-BEGIN The response remains",
+      content:
+        "I started the workspace validation in the background. While it runs, " +
+        "I'll explain how the foreground response remains uninterrupted",
     }, this.fields(target));
     await delay(30);
     this.emit("tasks.changed", {
@@ -109,19 +111,24 @@ export class ScriptedRuntime implements RuntimeAdapter {
         id: "e2e-task",
         type: "shell",
         status: "completed",
-        description: "Mock background wait",
-        result: "mock task completed",
+        description: "Validate workspace in background",
+        result: "workspace validation passed",
       }],
     }, { memberId: target, target: "status", done: true });
     await delay(30);
     this.emit("conversation.delta", {
       messageId,
-      content: " uninterrupted through STREAM-END",
+      content:
+        ". Once the response is complete, the background result can appear " +
+        "without splitting this message.",
     }, this.fields(target));
     this.emitMessage(
       target,
       messageId,
-      "STREAM-BEGIN The response remains uninterrupted through STREAM-END",
+      "I started the workspace validation in the background. While it runs, " +
+        "I'll explain how the foreground response remains uninterrupted. " +
+        "Once the response is complete, the background result can appear " +
+        "without splitting this message.",
     );
     this.emitIdle(target);
   }
@@ -132,8 +139,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
         id: "e2e-prior-task",
         type: "shell",
         status: "completed",
-        description: "Prior background task",
-        result: "completed",
+        description: "Validate workspace in background",
+        result: "workspace validation passed",
       }],
     }, { memberId: target, target: "status", done: true });
     await observationPause();
@@ -150,13 +157,17 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-read",
         success: true,
-        result: { output: "done", exitCode: 0 },
+        result: { output: "workspace valid", exitCode: 0 },
       },
     }, this.fields(target, true));
     await observationPause();
     this.emitBusy(target, "e2e-tool-authorship-turn");
     await observationPause();
-    this.emitMessage(target, "e2e-tool-authorship-message", "TOOL-AUTHOR-OK");
+    this.emitMessage(
+      target,
+      "e2e-tool-authorship-message",
+      "The background validation completed successfully with exit code 0.",
+    );
     this.emitIdle(target);
   }
 
@@ -164,24 +175,30 @@ export class ScriptedRuntime implements RuntimeAdapter {
     this.emitBusy(target, "e2e-reasoning-turn");
     this.emit("activity.delta", {
       reasoningId: "e2e-reasoning-one",
-      content: "REASONING-ONE-BEGIN\nREASONING-ONE-DETAIL",
+      content:
+        "The completion event arrived while the foreground response was still active.\n" +
+        "I should keep the response contiguous and queue the background update.",
     }, this.fields(target));
     await delay(120);
     this.emit("activity.reasoning", {
       reasoningId: "e2e-reasoning-one",
-      content: "REASONING-ONE-BEGIN\nREASONING-ONE-DETAIL",
+      content:
+        "The completion event arrived while the foreground response was still active.\n" +
+        "I should keep the response contiguous and queue the background update.",
     }, this.fields(target, true));
     this.emit("activity.delta", {
       reasoningId: "e2e-reasoning-two",
-      content: "REASONING-TWO-BEGIN\nREASONING-TWO-DETAIL",
+      content:
+        "Next, I need to inspect the completed command before composing the final answer.\n" +
+        "The tool result confirms that the workspace validation succeeded.",
     }, this.fields(target));
     await delay(40);
     this.emit("activity.event", {
       eventType: "tool.execution_start",
       data: {
         toolCallId: "e2e-reasoning-tool",
-        toolName: "reasoning_tool",
-        arguments: { query: "mock reasoning lookup" },
+        toolName: "read_powershell",
+        arguments: { shellId: "e2e-task" },
       },
     }, this.fields(target));
     this.emit("activity.event", {
@@ -189,7 +206,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-reasoning-tool",
         success: true,
-        result: { output: "mock reasoning result" },
+        result: { output: "workspace valid", exitCode: 0 },
       },
     }, this.fields(target, true));
     this.emit("tasks.changed", {
@@ -197,16 +214,23 @@ export class ScriptedRuntime implements RuntimeAdapter {
         id: "e2e-reasoning-task",
         type: "shell",
         status: "completed",
-        description: "Reasoning background task",
-        result: "reasoning task completed",
+        description: "Refresh validation metadata",
+        result: "metadata refresh completed",
       }],
     }, { memberId: target, target: "status", done: true });
     await delay(40);
     this.emit("activity.reasoning", {
       reasoningId: "e2e-reasoning-two",
-      content: "REASONING-TWO-BEGIN\nREASONING-TWO-DETAIL",
+      content:
+        "Next, I need to inspect the completed command before composing the final answer.\n" +
+        "The tool result confirms that the workspace validation succeeded.",
     }, this.fields(target, true));
-    this.emitMessage(target, "e2e-reasoning-message", "REASONING-FINAL-RESPONSE");
+    this.emitMessage(
+      target,
+      "e2e-reasoning-message",
+      "The event order is correct: reasoning stays together, the tool remains visible, " +
+        "and the background update follows the final answer.",
+    );
     this.emitIdle(target);
   }
 
@@ -218,7 +242,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       requestId,
       request: {
         kind: "shell",
-        fullCommandText: "Write-Output E2E_PERMISSION",
+        fullCommandText: "Write-Output 'observation approved'",
         managedApprovalRequired: false,
       },
     }, { memberId: target, target: "status", done: false });
@@ -273,13 +297,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
     const id = randomUUID();
-    if (content.includes("E2E_TASK_DEFERRAL")) {
+    if (content.includes("Run a background workspace validation")) {
       void this.taskDeferral(target);
-    } else if (content.includes("E2E_TOOL_AUTHORSHIP")) {
+    } else if (content.includes("Read the completed validation output")) {
       void this.toolAuthorship(target);
-    } else if (content.includes("E2E_REASONING_FOLDS")) {
+    } else if (content.includes("Investigate the event-ordering issue")) {
       void this.reasoningFolds(target);
-    } else if (content.includes("E2E_PERMISSION")) {
+    } else if (content.includes("Run a harmless PowerShell command")) {
       this.permission(target);
     } else {
       this.emitBusy(target, `turn-${id}`);
@@ -297,7 +321,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       this.emitMessage(
         pending.target,
         "e2e-permission-message",
-        approved ? "PERMISSION-APPROVED" : "PERMISSION-DENIED",
+        approved
+          ? "The approved PowerShell command completed successfully."
+          : "The PowerShell command was not approved.",
       );
       this.emitIdle(pending.target);
     });
