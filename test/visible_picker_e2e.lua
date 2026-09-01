@@ -16,7 +16,10 @@ local telescope_path =
   assert(vim.env.NATIVE_COPILOT_E2E_TELESCOPE, 'NATIVE_COPILOT_E2E_TELESCOPE is required')
 local plenary_path =
   assert(vim.env.NATIVE_COPILOT_E2E_PLENARY, 'NATIVE_COPILOT_E2E_PLENARY is required')
+local blink_path =
+  assert(vim.env.NATIVE_COPILOT_E2E_BLINK, 'NATIVE_COPILOT_E2E_BLINK is required')
 
+vim.opt.runtimepath:prepend(blink_path)
 vim.opt.runtimepath:prepend(plenary_path)
 vim.opt.runtimepath:prepend(telescope_path)
 vim.opt.runtimepath:prepend(root)
@@ -27,6 +30,22 @@ require('telescope').setup({
     layout_config = {
       vertical = { width = 0.95, height = 0.95, preview_height = 0.6 },
       horizontal = { width = 0.95, height = 0.95, preview_width = 0.6 },
+    },
+  },
+})
+require('blink.cmp').setup({
+  completion = {
+    menu = { auto_show = true },
+    list = { selection = { preselect = false, auto_insert = false } },
+  },
+  sources = {
+    default = { 'native_copilot' },
+    providers = {
+      native_copilot = {
+        name = 'Copilot',
+        module = 'native_copilot.blink',
+        async = true,
+      },
     },
   },
 })
@@ -58,7 +77,7 @@ native.setup({
   workspace = root,
   database_path = database_path,
   runtime_command_resolver = nil,
-  frontend = { completion = 'native', picker = 'telescope' },
+  frontend = { completion = 'blink', picker = 'telescope' },
 })
 native.open({ reuse_current_tab = true })
 
@@ -113,8 +132,10 @@ end
 
 local function submit(content, lhs, mode)
   local buf = assert(prompt(), 'prompt buffer was not found')
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { content })
-  if not lhs then return vim.api.nvim_buf_call(buf, native.submit_prompt) end
+  if not lhs then
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { content })
+    return vim.api.nvim_buf_call(buf, native.submit_prompt)
+  end
   local win
   for _, candidate in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_get_buf(candidate) == buf then
@@ -124,9 +145,15 @@ local function submit(content, lhs, mode)
   end
   assert(win and vim.api.nvim_win_is_valid(win), 'prompt window was not found')
   vim.api.nvim_set_current_win(win)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '' })
+  vim.api.nvim_win_set_cursor(win, { 1, 0 })
   if mode == 'i' then vim.cmd('startinsert') end
-  local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
-  return vim.api.nvim_input(keys) > 0
+  vim.api.nvim_input(content)
+  vim.defer_fn(function()
+    local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
+    vim.api.nvim_input(keys)
+  end, 100)
+  return true
 end
 
 local function choose_where(predicate)
