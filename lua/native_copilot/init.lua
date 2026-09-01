@@ -127,6 +127,8 @@ local state = {
   prompt_queue_sequence = 0,
   session_metrics = {},
   schedules = {},
+  resume_request_id = nil,
+  resume_cursor_animation_restore = nil,
 }
 
 local function update_conversation_label(member_id)
@@ -147,6 +149,18 @@ end
 
 local function notify(message, level)
   vim.notify(message, level or vim.log.levels.INFO, { title = 'Native Copilot' })
+end
+
+local function restore_resume_cursor_animation(delay)
+  local restore = state.resume_cursor_animation_restore
+  state.resume_cursor_animation_restore = nil
+  state.resume_request_id = nil
+  if not restore then return end
+  if delay then
+    vim.defer_fn(restore, delay)
+  else
+    restore()
+  end
 end
 
 local function is_ui_open()
@@ -1722,8 +1736,14 @@ local function picker(title, entries, choose, picker_options)
       actions.select_default:replace(function()
         local selection = action_state.get_selected_entry()
         if restore_eventignore then restore_eventignore() end
+        local selection_restore = restore_cursor_animation
+        restore_cursor_animation = nil
         actions.close(prompt_buf)
-        if selection then choose(selection.value) end
+        if selection then
+          choose(selection.value, selection_restore)
+        elseif selection_restore then
+          vim.defer_fn(selection_restore, 100)
+        end
       end)
       return true
     end,
@@ -2271,12 +2291,23 @@ function M._on_event(message)
       displayed_entries = {}
       for index = #entries, 1, -1 do table.insert(displayed_entries, entries[index]) end
     end
-    picker('Resume Copilot session', displayed_entries, function(item)
+    picker('Resume Copilot session', displayed_entries, function(item, restore_cursor_animation)
       if item.session.inUse then
+        if restore_cursor_animation then vim.defer_fn(restore_cursor_animation, 100) end
         notify('That Copilot session is active in another process.', vim.log.levels.WARN)
         return
       end
-      send('session.resume', { sessionId = item.session.sessionId })
+      state.resume_cursor_animation_restore = restore_cursor_animation
+      state.resume_request_id = send('session.resume', { sessionId = item.session.sessionId })
+      if not state.resume_request_id then
+        restore_resume_cursor_animation()
+      elseif restore_cursor_animation then
+        vim.defer_fn(function()
+          if state.resume_cursor_animation_restore == restore_cursor_animation then
+            restore_resume_cursor_animation()
+          end
+        end, 60000)
+      end
     end, {
       preserve_order = true,
       sorting_strategy = 'ascending',
@@ -2632,6 +2663,9 @@ function M._on_event(message)
     if state.prompt_calls[message.requestId] then
       fail_prompt(message.requestId, payload.message)
     end
+    if message.requestId and message.requestId == state.resume_request_id then
+      restore_resume_cursor_animation()
+    end
     notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
     return
   elseif message.type == 'fleet.requested' then
@@ -2655,6 +2689,7 @@ function M._on_event(message)
       M.show_member(state.selected)
       focus_prompt()
     end
+    restore_resume_cursor_animation(100)
     return
   elseif message.type == 'session.loading' then
     -- Only the Standard session is reloaded; concurrent Fleets are untouched.
