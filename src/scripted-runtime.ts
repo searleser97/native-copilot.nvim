@@ -144,7 +144,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         toolName: "powershell",
         arguments: {
           command: "Get-Content validation-result.txt",
-          description: "Read completed validation output",
+          description:
+            "Read completed validation output and summarize only the final status without " +
+            "including the verbose command transcript or unrelated diagnostic details",
         },
       },
     }, this.fields(target));

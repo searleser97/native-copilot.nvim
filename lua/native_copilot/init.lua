@@ -67,6 +67,7 @@ local defaults = {
   stream_flush_ms = 80,
   follow_bottom = true,
   bottom_padding = 2,
+  tool_summary_max_length = 120,
   timestamp_format = '%H:%M:%S',
   conversation = {
     user_label = '👨',
@@ -733,9 +734,9 @@ local function tool_timeline_detail(tool_name, arguments, status)
   local name = (tool_name or ''):lower()
   local detail
   if name == 'task' then
-    detail = json_value(arguments.prompt)
-      or json_value(arguments.description)
+    detail = json_value(arguments.description)
       or json_value(arguments.summary)
+      or json_value(arguments.prompt)
   elseif name == 'write_agent' or name:find('^send_to_') then
     detail = json_value(arguments.message) or json_value(arguments.content)
       or json_value(arguments.description)
@@ -761,8 +762,11 @@ local function tool_timeline_detail(tool_name, arguments, status)
   if type(detail) ~= 'string' or detail == '' then
     return status == 'running' and 'processing…' or status
   end
-  detail = detail:gsub('[\r\n]+', ' ')
-  if #detail > 180 then detail = detail:sub(1, 177) .. '...' end
+  detail = detail:gsub('%s+', ' '):gsub('^%s+', ''):gsub('%s+$', '')
+  local max_length = math.max(4, tonumber(options.tool_summary_max_length) or 120)
+  if vim.fn.strchars(detail) > max_length then
+    detail = vim.fn.strcharpart(detail, 0, max_length - 3) .. '...'
+  end
   return detail
 end
 

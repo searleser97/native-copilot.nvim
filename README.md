@@ -49,6 +49,7 @@ require("native_copilot").setup({
   stream_flush_ms = 80,
   follow_bottom = true,
   bottom_padding = 2,
+  tool_summary_max_length = 120,
   timestamp_format = '%H:%M:%S',
   conversation = {
     user_label = '👨',
@@ -408,7 +409,9 @@ Tasks without an originating Tool use a deterministic `task_<hash>` display ID i
 session-local handle. Canonical Task IDs remain available in activity details and are still used
 for progress and cancellation operations.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
-Tool name. Tool-specific fallbacks continue to show paths, patterns, queries, and agent prompts.
+Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
+characters; complete arguments remain available by pressing Enter on the row. Tool-specific
+fallbacks continue to show paths, patterns, queries, and shortened agent prompts/messages.
 The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
 session. Both values refresh from SDK usage events after every model call.
 

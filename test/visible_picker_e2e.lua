@@ -759,13 +759,13 @@ tick = function()
     local subagent_prompt =
       'Review the workspace validation and report only actionable findings.'
     if not check(
-      occurrence_count(content, subagent_prompt) == 1
-        and (line_containing(content, subagent_prompt) or ''):find(
+      occurrence_count(content, subagent_prompt) == 0
+        and (line_containing(content, 'Review workspace validation') or ''):find(
           '[cli-review-tool]',
           1,
           true
         ),
-      '/resume rendered the initial sub-agent prompt once in the task tool details'
+      '/resume rendered the concise task description instead of the full prompt inline'
     ) then
       finish()
       return

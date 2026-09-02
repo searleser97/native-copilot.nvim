@@ -351,7 +351,7 @@ tick = function()
     local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
     local tool_row = copilot_header
       and content:find(
-        '🟢 powershell — Read completed validation output',
+        '🟢 powershell — Read completed validation output and summarize only the final status',
         copilot_header,
         true
       )
@@ -382,6 +382,13 @@ tick = function()
     if not check(
       not tool_line:find('[e2e-read]', 1, true),
       'synchronous PowerShell summary renders without an unnecessary Tool ID'
+    ) then
+      return
+    end
+    if not check(
+      tool_line:find('... · ', 1, true) ~= nil
+        and not tool_line:find('unrelated diagnostic details', 1, true),
+      'long Tool summaries are truncated inline'
     ) then
       return
     end
