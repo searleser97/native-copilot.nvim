@@ -883,6 +883,9 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   local terminal = status ~= 'running'
   item.timeline_id = item.timeline_id or ('tool:' .. call_id)
   if shell_tool(item.name) then
+    if not item.async then
+      buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
+    end
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
       identifier = call_id,
