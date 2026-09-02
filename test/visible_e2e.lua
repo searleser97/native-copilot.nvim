@@ -610,9 +610,17 @@ tick = function()
         true
       )
     local task_start = first_reply
-      and content:find(task_marker('cli-shell-7') .. ' started', first_reply, true)
+      and content:find(
+        task_marker('cli-shell-7', 'cli-shell') .. ' started',
+        first_reply,
+        true
+      )
     local task_complete = task_start
-      and content:find(task_marker('cli-shell-7') .. ' completed', task_start, true)
+      and content:find(
+        task_marker('cli-shell-7', 'cli-shell') .. ' completed',
+        task_start,
+        true
+      )
     local second_user = task_complete
       and content:find('Schedule an hourly workspace recheck, then cancel it.', task_complete, true)
     local schedule_created = second_user
