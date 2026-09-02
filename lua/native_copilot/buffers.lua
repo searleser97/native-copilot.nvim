@@ -252,12 +252,35 @@ end
 function M.prepare_history(member_id, event_time)
   local view = M.ensure_member(member_id).views.conversation
   local now = event_time or options.now()
+  vim.api.nvim_buf_clear_namespace(view.buf, timeline_namespace, 0, -1)
+  vim.api.nvim_buf_clear_namespace(view.buf, activity_namespace, 0, -1)
+  vim.api.nvim_buf_clear_namespace(view.buf, activity_body_namespace, 0, -1)
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(view.buf, 0, -1, false, {
       ('──────── %s ────────'):format(os.date(options.conversation.day_header_format, now)),
       '',
     })
   end)
+  view.pending = ''
+  view.flush_scheduled = false
+  view.streaming = false
+  view.activity_streaming = false
+  view.active_message = nil
+  view.response_active = false
+  view.response_started_at = nil
+  view.response_line_start = true
+  view.response_resume_after_actor = false
+  view.response_has_owned_timeline = false
+  view.awaiting_response = nil
+  view.message_heading = nil
+  view.last_activity = nil
+  view.activity_records = {}
+  view.timeline = {}
+  view.deferred_timeline = {
+    order = {},
+    items = {},
+  }
+  view.timeline_time_overrides = {}
   view.current_day = os.date('%Y-%m-%d', now)
   view.last_block_kind = nil
   view.history_prepared = true
