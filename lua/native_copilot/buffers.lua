@@ -738,9 +738,9 @@ function M.complete_activity(member_id, activity_id, content, event_time)
       touch_activity_heading(view, activity, 'Reasoning summary')
       view.active_activity = nil
       view.activity_streaming = false
-      refresh_folds(view)
       if not view.streaming then finalize_render(view) end
     end
+    refresh_folds(view)
   else
     M.append_activity_block(member_id, 'Reasoning summary', content, event_time)
     view.activity_records[activity_id] = {
