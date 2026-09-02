@@ -813,13 +813,25 @@ local function timeline_lines(item, now)
   local identity = item.show_identifier == false and ''
     or identifier
         and (
-        (kind == 'task' or kind == 'tool')
+        (kind == 'task' or kind == 'tool' or item.status_notice)
           and ('[%s]'):format(identifier)
         or ('[%s][%s]'):format(kind, identifier)
       )
     or ('[%s]'):format(kind)
   local identity_prefix = identity ~= '' and (identity .. ' ') or ''
   local event = item.event and (tostring(item.event) .. ' · ') or ''
+  if item.status_notice then
+    return {
+      ('%s%s%s%s%s · %s'):format(
+        content_indent,
+        identity_prefix,
+        event,
+        label,
+        suffix,
+        timestamp(now)
+      ),
+    }
+  end
   if item.actor_message then
     local actor_heading
     if item.actor or item.actor_label then
@@ -960,8 +972,8 @@ function M.upsert_timeline(member_id, item_id, item)
     view.activity_streaming = false
   end
   flush(view)
-  if item.actor_message
-    and (item.kind == 'task' or item.kind == 'tool')
+  if (item.actor_message or item.defer_until_idle)
+    and (item.kind == 'task' or item.kind == 'tool' or item.status_notice)
     and (view.streaming or view.active_message or view.awaiting_response)
   then
     local deferred = view.deferred_timeline

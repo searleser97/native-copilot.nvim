@@ -721,9 +721,29 @@ local function task_display_identifier(task)
   return ('%s_%s'):format(prefix, identifier_component(json_value(task.id) or 'unknown'))
 end
 
+local function task_runtime_identifier(task)
+  local task_type = json_value(task.type)
+  local prefix = task_type == 'shell' and 'shell'
+    or task_type == 'agent' and 'agent'
+    or task_type == 'factory' and 'factory'
+    or 'task'
+  return ('%s_%s'):format(prefix, identifier_component(json_value(task.id) or 'unknown'))
+end
+
 local function emit_task_event(member_id, task, event)
   local status = json_value(task.status) or 'idle'
-  local terminal_event = event == 'completed' or event == 'failed' or event == 'cancelled'
+  if event ~= 'started' then
+    buffers.upsert_timeline(member_id, ('task:%s:%s'):format(task.id, event), {
+      kind = 'task_status',
+      identifier = task_runtime_identifier(task),
+      event = event,
+      label = task_description(task),
+      status_notice = true,
+      defer_until_idle = event == 'completed' or event == 'failed' or event == 'cancelled',
+      created_at = json_value(task.created_at),
+    })
+    return
+  end
   buffers.upsert_timeline(member_id, ('task:%s:%s'):format(task.id, event), {
     kind = 'task',
     identifier = task_display_identifier(task),
@@ -732,9 +752,8 @@ local function emit_task_event(member_id, task, event)
       json_value(task.type) or 'task',
       task_description(task)
     ),
-    status = event == 'started' and 'completed' or status,
+    status = status,
     detail = task_terminal_detail(task, status),
-    actor_message = terminal_event,
     task = vim.deepcopy(task),
     created_at = json_value(task.created_at),
   })
@@ -831,6 +850,33 @@ local function result_has_async_handle(value)
   return false
 end
 
+local function render_shell_tool_call(member_id, item)
+  local task = type(item.background_task) == 'table' and item.background_task or nil
+  local status = task and json_value(task.status) or item.status
+  if not task and item.shell_id and status == 'completed' then status = 'running' end
+  local detail = tool_timeline_detail(item.name, item.details.arguments, status)
+  if item.shell_id then
+    detail = ('%s · [%s]'):format(detail, task_runtime_identifier({
+      id = item.shell_id,
+      type = 'shell',
+    }))
+  end
+  local details = vim.tbl_deep_extend('force', item.details or {}, {
+    backgroundTask = task or vim.NIL,
+  })
+  buffers.upsert_timeline(member_id, item.timeline_id, {
+    kind = 'tool',
+    identifier = item.task_id and item.id or nil,
+    show_identifier = item.task_id ~= nil,
+    label = item.name,
+    status = status,
+    detail = detail,
+    copilot_owned = not item.async,
+    details = details,
+    created_at = item.created_at,
+  })
+end
+
 local function update_tool_call(member_id, call_id, tool_name, status, details)
   local activity = state.tool_calls[member_id]
   if not activity then
@@ -893,33 +939,10 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   local terminal = status ~= 'running'
   item.timeline_id = item.timeline_id or ('tool:' .. call_id)
   if shell_tool(item.name) then
-    if not item.async then
+    if not item.async and status == 'running' then
       buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
     end
-    buffers.upsert_timeline(member_id, item.timeline_id, {
-      kind = 'tool',
-      identifier = call_id,
-      event = 'started',
-      label = item.name,
-      status = status == 'running' and 'running' or 'completed',
-      detail = tool_timeline_detail(item.name, item.details.arguments, status),
-      copilot_owned = not item.async,
-      details = item.details,
-      created_at = item.created_at,
-    })
-    if status == 'failed' or (status == 'completed' and not item.shell_id and not item.task_id) then
-      buffers.upsert_timeline(member_id, ('tool:%s:%s'):format(call_id, status), {
-        kind = 'tool',
-        identifier = call_id,
-        event = status,
-        label = item.name,
-        status = status,
-        detail = tool_timeline_detail(item.name, item.details.arguments, status),
-        copilot_owned = not item.async,
-        details = item.details,
-        created_at = json_value(item.details.created_at),
-      })
-    end
+    render_shell_tool_call(member_id, item)
   else
     if not item.async then
       buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
@@ -990,6 +1013,9 @@ local function claim_shell_tool(member_id, task)
   if not matched then return false end
   matched.task_id = task.id
   task.toolCallId = task.toolCallId or matched.id
+  matched.background_task = vim.deepcopy(task)
+  matched.shell_id = matched.shell_id or tostring(task.id)
+  render_shell_tool_call(member_id, matched)
   return true
 end
 
@@ -999,6 +1025,11 @@ local function associate_task_tool(member_id, task, allow_shell_claim)
   local tool = tool_call_id and activity and activity.items[tostring(tool_call_id)] or nil
   if tool then
     tool.task_id = task.id
+    if shell_tool(tool.name) then
+      tool.background_task = vim.deepcopy(task)
+      tool.shell_id = tool.shell_id or tostring(task.id)
+      render_shell_tool_call(member_id, tool)
+    end
     return true
   end
   return allow_shell_claim and claim_shell_tool(member_id, task) or false
@@ -1247,6 +1278,7 @@ local function render_task_detail()
     local fields = item.kind == 'tool'
         and {
           { 'Arguments', details.arguments },
+          { 'Background task', details.backgroundTask },
           { 'Result', details.result },
           { 'Error', details.error },
         }

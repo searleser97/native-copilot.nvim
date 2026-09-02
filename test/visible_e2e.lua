@@ -89,9 +89,18 @@ local function line_with_after(buf, needle, after_row)
   end
 end
 
-local function task_marker(id, tool_call_id)
-  if tool_call_id then return '[' .. tool_call_id .. ']' end
-  return '[shell_' .. id .. ']'
+local function line_at(content, offset)
+  local start = (content:sub(1, offset):match('.*()\n') or 0) + 1
+  local finish = content:find('\n', offset, true) or (#content + 1)
+  return content:sub(start, finish - 1)
+end
+
+local function tool_marker(id)
+  return '[' .. id .. ']'
+end
+
+local function task_marker(id, task_type)
+  return ('[%s_%s]'):format(task_type or 'shell', id)
 end
 
 local function has_quoted_environment(content)
@@ -364,25 +373,24 @@ tick = function()
     local stream_begin =
       content:find('I started the workspace validation in the background.', 1, true)
     local stream_end = content:find('without splitting this message.', stream_begin or 1, true)
-    local task_header = content:find('📝 · ', stream_end or 1, true)
     local task_complete =
       content:find(
-        task_marker('e2e-task', 'e2e-async-shell') .. ' completed',
-        task_header or 1,
+        task_marker('e2e-task') .. ' completed',
+        stream_end or 1,
         true
       )
-    if not (stream_begin and stream_end and task_header and task_complete) then
+    if not (stream_begin and stream_end and task_complete) then
       schedule_tick()
       return
     end
-    if not check(stream_begin < stream_end and stream_end < task_header, 'task completion deferred after reply') then
+    if not check(stream_begin < stream_end and stream_end < task_complete, 'task completion deferred after reply') then
       return
     end
     if not check(
       select(
         2,
         content:gsub(
-          vim.pesc(task_marker('e2e-task', 'e2e-async-shell') .. ' completed'),
+          vim.pesc(task_marker('e2e-task') .. ' completed'),
           ''
         )
       ) == 1,
@@ -390,9 +398,29 @@ tick = function()
     ) then
       return
     end
+    local task_complete_line = line_at(content, task_complete)
+    if not check(
+      not task_complete_line:find('🟢', 1, true)
+        and not task_complete_line:find('🟡', 1, true),
+      'task completion rendered as a lightweight status notice'
+    ) then
+      return
+    end
+    if not check(
+      content:find(
+        tool_marker('e2e-async-shell') .. ' powershell — Validate workspace in background'
+          .. ' · '
+          .. task_marker('e2e-task'),
+        1,
+        true
+      ) ~= nil,
+      'background shell metadata stayed on the original Tool row'
+    ) then
+      return
+    end
     if not check(
       not content:find(
-        task_marker('e2e-task', 'e2e-async-shell') .. ' moved to background',
+        task_marker('e2e-task') .. ' moved to background',
         1,
         true
       ),
@@ -421,27 +449,24 @@ tick = function()
     local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
     local tool_row = copilot_header
       and content:find(
-        '🟢 [e2e-read] started · powershell — Read completed validation output and summarize only the final status',
+        '🟢 powershell — Read completed validation output and summarize only the final status',
         copilot_header,
         true
       )
-    local tool_complete = tool_row
-      and content:find('[e2e-read] completed · powershell', tool_row, true)
-    local reply = tool_complete
+    local reply = tool_row
       and content:find(
         'The background validation completed successfully with exit code 0.',
-        tool_complete,
+        tool_row,
         true
       )
-    if not (copilot_header and tool_row and tool_complete and reply) then
+    if not (copilot_header and tool_row and reply) then
       schedule_tick()
       return
     end
     if not check(
       copilot_header < tool_row
-        and tool_row < tool_complete
-        and tool_complete < reply,
-      'foreground shell Tool rendered separate started and completed rows'
+        and tool_row < reply,
+      'foreground synchronous shell Tool updated one row in place'
     ) then
       return
     end
@@ -453,8 +478,8 @@ tick = function()
       return
     end
     if not check(
-      tool_line:find('[e2e-read]', 1, true) ~= nil,
-      'PowerShell Tool row keeps its native call ID'
+      not tool_line:find('[e2e-read]', 1, true),
+      'ordinary synchronous PowerShell Tool hides its unnecessary call ID'
     ) then
       return
     end
@@ -516,13 +541,13 @@ tick = function()
   elseif phase == 'reasoning-complete' then
     local reasoning_task_start =
       content:find(
-        task_marker('e2e-reasoning-task', 'e2e-reasoning-background') .. ' started',
+        tool_marker('e2e-reasoning-background') .. ' powershell',
         1,
         true
       )
     local reasoning_task_promoted = reasoning_task_start
       and content:find(
-        task_marker('e2e-reasoning-task', 'e2e-reasoning-background')
+        task_marker('e2e-reasoning-task')
           .. ' moved to background',
         reasoning_task_start,
         true
@@ -542,11 +567,10 @@ tick = function()
       and content:find('🟢 read_powershell', second_reasoning, true)
     local final_response = tool_row
       and content:find('The event order is correct:', tool_row, true)
-    local task_header = final_response and content:find('📝 · ', final_response, true)
-    local task_row = task_header
+    local task_row = final_response
       and content:find(
-        task_marker('e2e-reasoning-task', 'e2e-reasoning-background') .. ' completed',
-        task_header,
+        task_marker('e2e-reasoning-task') .. ' completed',
+        final_response,
         true
       )
     if not (
@@ -573,13 +597,21 @@ tick = function()
         2,
         content:gsub(
           vim.pesc(
-            task_marker('e2e-reasoning-task', 'e2e-reasoning-background')
+            task_marker('e2e-reasoning-task')
               .. ' moved to background'
           ),
           ''
         )
       ) == 1,
       'sync-to-background transition rendered once'
+    ) then
+      return
+    end
+    local promoted_line = line_at(content, reasoning_task_promoted)
+    if not check(
+      not promoted_line:find('🟢', 1, true)
+        and not promoted_line:find('🟡', 1, true),
+      'background promotion rendered without a status icon'
     ) then
       return
     end
@@ -730,13 +762,13 @@ tick = function()
       )
     local task_start = first_reply
       and content:find(
-        task_marker('cli-shell-7', 'cli-shell') .. ' started',
+        tool_marker('cli-shell') .. ' powershell',
         first_reply,
         true
       )
     local task_complete = task_start
       and content:find(
-        task_marker('cli-shell-7', 'cli-shell') .. ' completed',
+        task_marker('cli-shell-7') .. ' completed',
         task_start,
         true
       )
@@ -754,7 +786,7 @@ tick = function()
       )
     local agent_task = final_reply
       and content:find(
-        task_marker('cli-reviewer', 'cli-review-tool') .. ' completed',
+        task_marker('cli-reviewer', 'agent') .. ' completed',
         final_reply,
         true
       )

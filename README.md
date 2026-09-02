@@ -409,13 +409,14 @@ when the response completes. Reasoning summaries omit timestamps. Customize the 
 with `timestamp_format`, using an `os.date` format string. The conversation starts with a local-date
 divider and adds another before the first newly rendered item after midnight.
 `conversation.day_header_format` controls that divider without repeating the date on every row.
-Shell Tool rows and longer-lived asynchronous Tool rows expose their native call ID. When an SDK
-Task can be correlated with its originating Tool, later lifecycle rows reuse that call ID without
-rewriting the original Tool row. Uncorrelated Tasks use their concrete runtime identity, such as
-`shell_<shell-id>` or `agent_<agent-id>`. A transition from `executionMode: "sync"` to
-`executionMode: "background"` produces a separate `moved to background` row; no transition is
-inferred when the first observed snapshot is already background-managed. Canonical Task IDs remain
-available in activity details and are still used for progress and cancellation operations.
+Shell Tool rows update in place and omit their native call ID while they remain ordinary synchronous
+invocations. When an SDK Task is correlated with a Tool, that original row gains the Tool call ID,
+the concrete Task ID, and the latest background metadata in its detail pane. Lightweight,
+non-clickable lifecycle notices use the concrete runtime identity, such as `shell_<shell-id>` or
+`agent_<agent-id>`, without a status icon. A transition from `executionMode: "sync"` to
+`executionMode: "background"` produces a separate `moved to background` notice; no transition is
+inferred when the first observed snapshot is already background-managed. The original Tool row
+remains the clickable source for arguments, results, and correlated background details.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
 Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific
