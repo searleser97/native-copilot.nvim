@@ -315,7 +315,7 @@ tick = function()
       'i'
     )
     if not check(
-      insert_submitted == true and text(prompt_buf) == '',
+      insert_submitted == true and text(assert(prompt())) == '',
       'insert-mode Ctrl-S submitted through the public prompt API'
     ) then
       return
