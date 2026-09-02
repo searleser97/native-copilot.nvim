@@ -731,12 +731,19 @@ local function tool_timeline_detail(tool_name, arguments, status)
   end
 
   local name = (tool_name or ''):lower()
-  local detail = json_value(arguments.description) or json_value(arguments.summary)
-  if not detail and name == 'task' then
+  local detail
+  if name == 'task' then
     detail = json_value(arguments.prompt)
-  elseif not detail and (name == 'write_agent' or name:find('^send_to_')) then
+      or json_value(arguments.description)
+      or json_value(arguments.summary)
+  elseif name == 'write_agent' or name:find('^send_to_') then
     detail = json_value(arguments.message) or json_value(arguments.content)
-  elseif not detail
+      or json_value(arguments.description)
+      or json_value(arguments.summary)
+  else
+    detail = json_value(arguments.description) or json_value(arguments.summary)
+  end
+  if not detail
     and (name == 'view' or name == 'read' or name == 'read_file' or name == 'read-file')
   then
     detail = json_value(arguments.path)
