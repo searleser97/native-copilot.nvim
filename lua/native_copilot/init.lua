@@ -866,8 +866,7 @@ local function render_shell_tool_call(member_id, item)
   })
   buffers.upsert_timeline(member_id, item.timeline_id, {
     kind = 'tool',
-    identifier = item.task_id and item.id or nil,
-    show_identifier = item.task_id ~= nil,
+    show_identifier = false,
     label = item.name,
     status = status,
     detail = detail,

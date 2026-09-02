@@ -410,8 +410,9 @@ with `timestamp_format`, using an `os.date` format string. The conversation star
 divider and adds another before the first newly rendered item after midnight.
 `conversation.day_header_format` controls that divider without repeating the date on every row.
 Shell Tool rows update in place and omit their native call ID while they remain ordinary synchronous
-invocations. When an SDK Task is correlated with a Tool, that original row gains the Tool call ID,
-the concrete Task ID, and the latest background metadata in its detail pane. Lightweight,
+invocations. When an SDK Task is correlated with a Tool, that original row gains the concrete Task
+ID at the end of the row and the latest background metadata in its detail pane; the redundant native
+Tool call ID remains hidden. Lightweight,
 non-clickable lifecycle notices use the concrete runtime identity, such as `shell_<shell-id>` or
 `agent_<agent-id>`, without a status icon. A transition from `executionMode: "sync"` to
 `executionMode: "background"` produces a separate `moved to background` notice; no transition is

@@ -408,13 +408,23 @@ tick = function()
     end
     if not check(
       content:find(
-        tool_marker('e2e-async-shell') .. ' powershell — Validate workspace in background'
+        'powershell — Validate workspace in background'
           .. ' · '
           .. task_marker('e2e-task'),
         1,
         true
       ) ~= nil,
       'background shell metadata stayed on the original Tool row'
+    ) then
+      return
+    end
+    local background_tool_line = line_at(
+      content,
+      content:find('powershell — Validate workspace in background', 1, true)
+    )
+    if not check(
+      not background_tool_line:find('[e2e-async-shell]', 1, true),
+      'correlated background shell hides its redundant Tool call ID'
     ) then
       return
     end
@@ -762,7 +772,7 @@ tick = function()
       )
     local task_start = first_reply
       and content:find(
-        tool_marker('cli-shell') .. ' powershell',
+        'powershell — Validate the workspace · ' .. task_marker('cli-shell-7'),
         first_reply,
         true
       )
