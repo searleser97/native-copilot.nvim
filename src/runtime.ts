@@ -163,22 +163,6 @@ interface LiveSession {
   unsubscribe: () => void;
 }
 
-export function detachAsyncPowerShellArgs(toolName: string, toolArgs: unknown): unknown {
-  if (
-    toolName !== "powershell"
-    || typeof toolArgs !== "object"
-    || toolArgs === null
-    || Array.isArray(toolArgs)
-  ) {
-    return toolArgs;
-  }
-  const args = toolArgs as Record<string, unknown>;
-  if (args.mode !== "async" || Object.hasOwn(args, "detach")) {
-    return toolArgs;
-  }
-  return { ...args, detach: true };
-}
-
 interface EnvironmentProbe {
   component: string;
   load: (session: CopilotSession) => Promise<unknown[]>;
@@ -1239,13 +1223,6 @@ export class CopilotRuntime {
     const config = nativeSessionScaffold(this.policy);
     config.onPermissionRequest = this.permissionHandler(permission, uiTarget);
     config.onMcpAuthRequest = this.mcpAuthHandler(uiTarget);
-    config.hooks = {
-      ...config.hooks,
-      onPreToolUse: (input) => {
-        const modifiedArgs = detachAsyncPowerShellArgs(input.toolName, input.toolArgs);
-        return modifiedArgs === input.toolArgs ? undefined : { modifiedArgs };
-      },
-    };
     return config;
   }
 
