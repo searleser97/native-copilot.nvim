@@ -409,12 +409,13 @@ when the response completes. Reasoning summaries omit timestamps. Customize the 
 with `timestamp_format`, using an `os.date` format string. The conversation starts with a local-date
 divider and adds another before the first newly rendered item after midnight.
 `conversation.day_header_format` controls that divider without repeating the date on every row.
-Tool rows expose their native call ID only when the call creates or represents longer-lived
-asynchronous work; ordinary synchronous calls omit it because their lifecycle is updated in place.
-Related Task rows use `task_<tool-call-id>` so one search finds both sides of the lifecycle.
-Tasks without an originating Tool use a deterministic `task_<hash>` display ID instead of a short
-session-local handle. Canonical Task IDs remain available in activity details and are still used
-for progress and cancellation operations.
+Shell Tool rows and longer-lived asynchronous Tool rows expose their native call ID. When an SDK
+Task can be correlated with its originating Tool, later lifecycle rows reuse that call ID without
+rewriting the original Tool row. Uncorrelated Tasks use their concrete runtime identity, such as
+`shell_<shell-id>` or `agent_<agent-id>`. A transition from `executionMode: "sync"` to
+`executionMode: "background"` produces a separate `moved to background` row; no transition is
+inferred when the first observed snapshot is already background-managed. Canonical Task IDs remain
+available in activity details and are still used for progress and cancellation operations.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
 Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific

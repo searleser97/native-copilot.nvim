@@ -80,7 +80,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
           command: "Write-Output 'workspace valid'",
           description: "Validate workspace in background",
           mode: "async",
-          detach: true,
         },
       },
     }, this.fields(target));
@@ -99,6 +98,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
         type: "shell",
         status: "running",
         description: "Validate workspace in background",
+        startedAt: new Date().toISOString(),
+        command: "Write-Output 'workspace valid'",
+        attachmentMode: "attached",
+        executionMode: "background",
+        canPromoteToBackground: false,
       }],
     }, { memberId: target, target: "status", done: true });
     this.emit("conversation.delta", {
@@ -179,8 +183,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         arguments: {
           command: "Write-Output 'metadata refreshed'",
           description: "Refresh validation metadata",
-          mode: "async",
-          detach: true,
+          mode: "sync",
         },
       },
     }, this.fields(target));
@@ -198,6 +201,25 @@ export class ScriptedRuntime implements RuntimeAdapter {
         type: "shell",
         status: "running",
         description: "Refresh validation metadata",
+        startedAt: new Date().toISOString(),
+        command: "Write-Output 'metadata refreshed'",
+        attachmentMode: "attached",
+        executionMode: "sync",
+        canPromoteToBackground: true,
+      }],
+    }, { memberId: target, target: "status", done: true });
+    await observationPause();
+    this.emit("tasks.changed", {
+      tasks: [{
+        id: "e2e-reasoning-task",
+        type: "shell",
+        status: "running",
+        description: "Refresh validation metadata",
+        startedAt: new Date().toISOString(),
+        command: "Write-Output 'metadata refreshed'",
+        attachmentMode: "attached",
+        executionMode: "background",
+        canPromoteToBackground: false,
       }],
     }, { memberId: target, target: "status", done: true });
     await observationPause();

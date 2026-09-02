@@ -90,8 +90,8 @@ local function line_with_after(buf, needle, after_row)
 end
 
 local function task_marker(id, tool_call_id)
-  if tool_call_id then return '[task_' .. tool_call_id .. ']' end
-  return '[task_' .. vim.fn.sha256(('standard\0%s'):format(id)):sub(1, 16) .. ']'
+  if tool_call_id then return '[' .. tool_call_id .. ']' end
+  return '[shell_' .. id .. ']'
 end
 
 local function has_quoted_environment(content)
@@ -352,6 +352,16 @@ tick = function()
     ) then
       return
     end
+    if not check(
+      not content:find(
+        task_marker('e2e-task', 'e2e-async-shell') .. ' moved to background',
+        1,
+        true
+      ),
+      'initially background shell did not invent a promotion transition'
+    ) then
+      return
+    end
     local conversation_windows = vim.fn.win_findbuf(buf)
     if #conversation_windows > 0 then
       manual_scroll_top = vim.api.nvim_win_call(conversation_windows[1], function()
@@ -469,8 +479,19 @@ tick = function()
         1,
         true
       )
+    local reasoning_task_promoted = reasoning_task_start
+      and content:find(
+        task_marker('e2e-reasoning-task', 'e2e-reasoning-background')
+          .. ' moved to background',
+        reasoning_task_start,
+        true
+      )
     local first_reasoning =
-      content:find('The completion event arrived while the foreground response was still active.', 1, true)
+      content:find(
+        'The completion event arrived while the foreground response was still active.',
+        reasoning_task_promoted or 1,
+        true
+      )
     local second_reasoning = content:find(
       'Next, I need to inspect the completed command before composing the final answer.',
       first_reasoning or 1,
@@ -489,6 +510,7 @@ tick = function()
       )
     if not (
       reasoning_task_start
+      and reasoning_task_promoted
       and first_reasoning
       and second_reasoning
       and tool_row
@@ -506,7 +528,24 @@ tick = function()
       return
     end
     if not check(
+      select(
+        2,
+        content:gsub(
+          vim.pesc(
+            task_marker('e2e-reasoning-task', 'e2e-reasoning-background')
+              .. ' moved to background'
+          ),
+          ''
+        )
+      ) == 1,
+      'sync-to-background transition rendered once'
+    ) then
+      return
+    end
+    if not check(
       reasoning_task_start < first_reasoning
+        and reasoning_task_start < reasoning_task_promoted
+        and reasoning_task_promoted < first_reasoning
         and first_reasoning < second_reasoning
         and second_reasoning < tool_row
         and tool_row < final_response
