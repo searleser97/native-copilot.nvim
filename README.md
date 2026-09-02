@@ -419,10 +419,10 @@ status icon. A transition from `executionMode: "sync"` to
 `executionMode: "background"` produces a separate `moved to background` notice; no transition is
 inferred when the first observed snapshot is already background-managed. The original Tool row
 remains the clickable source for arguments, results, and correlated background details.
-A shell ID returned by a completed synchronous invocation remains visible for lookup but does not
-by itself keep the Tool row in the running state. Likewise, a `running` Task snapshot with
-`executionMode: "sync"` does not override a terminal Tool event; Task status becomes authoritative
-only after the shell is explicitly asynchronous or background-managed.
+Shell IDs remain internal for ordinary synchronous invocations and become visible as
+`[shell_cmd_<shell-id>]` only when the invocation is explicitly asynchronous or background-managed.
+A `running` Task snapshot with `executionMode: "sync"` does not override a terminal Tool event;
+Task status becomes authoritative only after the shell is background-managed.
 Shell lifecycle behavior is enabled exclusively by `tool.execution_start.shellToolInfo`; Tool
 names and shell-like arguments or results never classify an invocation as a shell launcher.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the

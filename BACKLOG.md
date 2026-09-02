@@ -73,10 +73,11 @@ without also displaying the actor emoji. Keep the emoji on full `Task` participa
 
 **Status:** Completed
 
-Use concise searchable identifiers for correlated lifecycle events. Native Tool call IDs remain
-internal because Tool rows are clickable through extmark metadata. Managed Tasks use concrete
-runtime identities such as `[shell_cmd_<shell-id>]` and `[agent_<agent-id>]`. Other event kinds
-retain their typed identifier format. Do not surround event labels with Markdown `**` markers.
+Use concise searchable identifiers for correlated lifecycle events. Native Tool call IDs and
+ordinary synchronous shell IDs remain internal because Tool rows are clickable through extmark
+metadata. Background-managed Tasks use concrete runtime identities such as
+`[shell_cmd_<shell-id>]` and `[agent_<agent-id>]`. Other event kinds retain their typed identifier
+format. Do not surround event labels with Markdown `**` markers.
 
 **Acceptance criteria**
 

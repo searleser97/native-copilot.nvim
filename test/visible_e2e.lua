@@ -497,8 +497,8 @@ tick = function()
       return
     end
     if not check(
-      tool_line:find(task_marker('e2e-sync-shell'), 1, true) ~= nil,
-      'completed synchronous PowerShell keeps its shell ID without remaining active'
+      not tool_line:find(task_marker('e2e-sync-shell'), 1, true),
+      'ordinary synchronous PowerShell hides its internal shell ID'
     ) then
       return
     end

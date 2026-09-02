@@ -835,7 +835,7 @@ local function render_shell_tool_call(member_id, item)
   local status = task and json_value(task.status) or item.status
   if not task and item.async and status == 'completed' then status = 'running' end
   local detail = tool_timeline_detail(item.name, item.details.arguments, status)
-  if item.shell_id then
+  if item.shell_id and (item.async or task) then
     detail = ('%s · [%s]'):format(detail, task_runtime_identifier({
       id = item.shell_id,
       type = 'shell',
