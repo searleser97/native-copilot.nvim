@@ -73,9 +73,11 @@ without also displaying the actor emoji. Keep the emoji on full `Task` participa
 
 **Status:** Completed
 
-Use concise searchable identifiers for correlated lifecycle events. Tool rows use the native call
-ID directly, Task rows use a deterministic `[task_<hash>]` display ID, and other event kinds retain
-their typed identifier format. Do not surround event labels with Markdown `**` markers.
+Use concise searchable identifiers for correlated lifecycle events. Asynchronous Tool rows use the
+native call ID directly, related Task rows use `[task_<tool-call-id>]`, and standalone Tasks use a
+deterministic `[task_<hash>]` display ID. Ordinary synchronous Tools omit IDs because their
+lifecycle updates in place. Other event kinds retain their typed identifier format. Do not
+surround event labels with Markdown `**` markers.
 
 **Acceptance criteria**
 

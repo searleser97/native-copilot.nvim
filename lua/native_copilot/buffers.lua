@@ -810,13 +810,15 @@ local function timeline_lines(item, now)
   local identifier = item.identifier ~= nil
       and tostring(item.identifier):gsub('[\r\n]+', ' ')
     or nil
-  local identity = identifier
-      and (
+  local identity = item.show_identifier == false and ''
+    or identifier
+        and (
         (kind == 'task' or kind == 'tool')
           and ('[%s]'):format(identifier)
         or ('[%s][%s]'):format(kind, identifier)
       )
     or ('[%s]'):format(kind)
+  local identity_prefix = identity ~= '' and (identity .. ' ') or ''
   local event = item.event and (tostring(item.event) .. ' · ') or ''
   if item.actor_message then
     local actor_heading
@@ -830,10 +832,10 @@ local function timeline_lines(item, now)
     return {
       ('%s · %s'):format(actor_heading, timestamp(now)),
       '',
-      ('%s%s %s %s%s%s'):format(
+      ('%s%s %s%s%s%s'):format(
         content_indent,
         status_symbols[status] or status_symbols.unknown,
-        identity,
+        identity_prefix,
         event,
         label,
         suffix
@@ -843,11 +845,11 @@ local function timeline_lines(item, now)
   local actor = item.actor or (kind ~= 'task' and actor_symbols[kind] or nil)
   local actor_prefix = actor and (actor .. ' ') or ''
   return {
-    ('%s%s%s %s %s%s%s · %s'):format(
+    ('%s%s%s %s%s%s%s · %s'):format(
       prefix,
       actor_prefix,
       status_symbols[status] or status_symbols.unknown,
-      identity,
+      identity_prefix,
       event,
       label,
       suffix,
@@ -1171,6 +1173,7 @@ function M.timeline_item_at_cursor(buf, row)
           and (
             (identifier and line:find('[' .. identifier .. ']', 1, true))
             or line:find('[' .. tostring(item.kind or 'activity'), 1, true)
+            or item.show_identifier == false
           )
         then
           local distance = math.abs((record.start_row or zero_row) - zero_row)

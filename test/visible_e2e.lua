@@ -82,7 +82,15 @@ local function line_with(buf, needle)
   end
 end
 
-local function task_marker(id)
+local function line_with_after(buf, needle, after_row)
+  local lines = vim.api.nvim_buf_get_lines(buf, after_row or 0, -1, false)
+  for index, line in ipairs(lines) do
+    if line:find(needle, 1, true) then return (after_row or 0) + index end
+  end
+end
+
+local function task_marker(id, tool_call_id)
+  if tool_call_id then return '[task_' .. tool_call_id .. ']' end
   return '[task_' .. vim.fn.sha256(('standard\0%s'):format(id)):sub(1, 16) .. ']'
 end
 
@@ -298,7 +306,11 @@ tick = function()
     local stream_end = content:find('without splitting this message.', stream_begin or 1, true)
     local task_header = content:find('📝 · ', stream_end or 1, true)
     local task_complete =
-      content:find(task_marker('e2e-task') .. ' completed', task_header or 1, true)
+      content:find(
+        task_marker('e2e-task', 'e2e-async-shell') .. ' completed',
+        task_header or 1,
+        true
+      )
     if not (stream_begin and stream_end and task_header and task_complete) then
       schedule_tick()
       return
@@ -307,7 +319,13 @@ tick = function()
       return
     end
     if not check(
-      select(2, content:gsub(vim.pesc(task_marker('e2e-task') .. ' completed'), '')) == 1,
+      select(
+        2,
+        content:gsub(
+          vim.pesc(task_marker('e2e-task', 'e2e-async-shell') .. ' completed'),
+          ''
+        )
+      ) == 1,
       'task completion rendered once'
     ) then
       return
@@ -332,7 +350,7 @@ tick = function()
     local tool_prompt = content:find('Read the completed validation output', 1, true)
     local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
     local tool_row = copilot_header
-      and content:find('[e2e-read] read_powershell', copilot_header, true)
+      and content:find('🟢 read_powershell', copilot_header, true)
     local reply = tool_row
       and content:find(
         'The background validation completed successfully with exit code 0.',
@@ -407,7 +425,11 @@ tick = function()
     schedule_tick()
   elseif phase == 'reasoning-complete' then
     local reasoning_task_start =
-      content:find(task_marker('e2e-reasoning-task') .. ' started', 1, true)
+      content:find(
+        task_marker('e2e-reasoning-task', 'e2e-reasoning-background') .. ' started',
+        1,
+        true
+      )
     local first_reasoning =
       content:find('The completion event arrived while the foreground response was still active.', 1, true)
     local second_reasoning = content:find(
@@ -416,12 +438,16 @@ tick = function()
       true
     )
     local tool_row = second_reasoning
-      and content:find('[e2e-reasoning-tool] read_powershell', second_reasoning, true)
+      and content:find('🟢 read_powershell', second_reasoning, true)
     local final_response = tool_row
       and content:find('The event order is correct:', tool_row, true)
     local task_header = final_response and content:find('📝 · ', final_response, true)
     local task_row = task_header
-      and content:find(task_marker('e2e-reasoning-task') .. ' completed', task_header, true)
+      and content:find(
+        task_marker('e2e-reasoning-task', 'e2e-reasoning-background') .. ' completed',
+        task_header,
+        true
+      )
     if not (
       reasoning_task_start
       and first_reasoning
@@ -460,7 +486,7 @@ tick = function()
       buf,
       'Closing the fold from this third paragraph must collapse the complete reasoning block.'
     )
-    local tool_line = line_with(buf, '[e2e-reasoning-tool] read_powershell')
+    local tool_line = line_with_after(buf, '🟢 read_powershell', second_row)
     local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
@@ -572,7 +598,7 @@ tick = function()
     local reasoning =
       content:find('I should inspect the project structure first.', user_message or 1, true)
     local tool_row = reasoning
-      and content:find('[cli-list-files] glob', reasoning, true)
+      and content:find('🟢 glob', reasoning, true)
     local instruction = tool_row
       and content:find('[instruction] Repository instructions', tool_row, true)
     local permission = instruction
@@ -601,7 +627,7 @@ tick = function()
       )
     local agent_task = final_reply
       and content:find(
-        task_marker('cli-review-tool') .. ' completed',
+        task_marker('cli-reviewer', 'cli-review-tool') .. ' completed',
         final_reply,
         true
       )

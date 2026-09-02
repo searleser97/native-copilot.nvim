@@ -690,8 +690,11 @@ end
 local function task_display_identifier(member_id, task)
   local source = json_value(task.toolCallId)
     or json_value(task.tool_call_id)
-    or json_value(task.id)
-    or 'unknown'
+  if source then
+    local normalized = tostring(source):gsub('[^%w_.:-]+', '_')
+    return 'task_' .. normalized
+  end
+  source = json_value(task.id) or 'unknown'
   local digest = vim.fn.sha256(('%s\0%s'):format(member_id or 'standard', tostring(source)))
   return 'task_' .. digest:sub(1, 16)
 end
@@ -779,6 +782,26 @@ local function shell_start_label(arguments)
   return ('[shell] %s'):format(tostring(description):gsub('[\r\n]+', ' '))
 end
 
+local function result_has_async_handle(value)
+  value = json_value(value)
+  if type(value) ~= 'table' then return false end
+  for key, nested in pairs(value) do
+    if key == 'agent_id'
+      or key == 'agentId'
+      or key == 'run_id'
+      or key == 'runId'
+      or key == 'shell_id'
+      or key == 'shellId'
+      or key == 'task_id'
+      or key == 'taskId'
+    then
+      return json_value(nested) ~= nil
+    end
+    if type(nested) == 'table' and result_has_async_handle(nested) then return true end
+  end
+  return false
+end
+
 local function update_tool_call(member_id, call_id, tool_name, status, details)
   local activity = state.tool_calls[member_id]
   if not activity then
@@ -816,6 +839,12 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     )
   item.async = item.async or async_mode
   item.async_shell = item.async and shell_tool(item.name)
+  local normalized_name = tostring(item.name or ''):lower()
+  item.correlated = item.correlated
+    or item.async
+    or normalized_name == 'task'
+    or normalized_name == 'run_factory'
+    or result_has_async_handle(item.details.result)
   if item.async_shell and status == 'completed' then
     local function shell_id(value)
       value = json_value(value)
@@ -852,7 +881,8 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     end
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
-      identifier = call_id,
+      identifier = item.correlated and call_id or nil,
+      show_identifier = item.correlated,
       label = item.name,
       status = status,
       detail = tool_timeline_detail(item.name, item.details.arguments, status),
@@ -920,6 +950,7 @@ local function claim_async_shell_tool(member_id, task)
     or (task_command == nil and pending_count == 1 and fallback or nil)
   if not fallback then return false end
   fallback.task_id = task.id
+  task.toolCallId = task.toolCallId or fallback.id
   buffers.upsert_timeline(member_id, fallback.timeline_id, {
     kind = 'task',
     identifier = task_display_identifier(member_id, task),

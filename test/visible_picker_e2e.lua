@@ -774,7 +774,7 @@ tick = function()
       'Also verify that the validation result includes the constrained layout.'
     if not check(
       occurrence_count(content, followup_prompt) == 1
-        and (line_containing(content, followup_prompt) or ''):find(
+        and not (line_containing(content, followup_prompt) or ''):find(
           '[cli-write-reviewer]',
           1,
           true
