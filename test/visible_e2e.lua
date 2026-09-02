@@ -494,6 +494,12 @@ tick = function()
       return
     end
     if not check(
+      tool_line:find(task_marker('e2e-sync-shell'), 1, true) ~= nil,
+      'completed synchronous PowerShell keeps its shell ID without remaining active'
+    ) then
+      return
+    end
+    if not check(
       tool_line:find('... · ', 1, true) ~= nil
         and not tool_line:find('unrelated diagnostic details', 1, true),
       'long Tool summaries are truncated inline'

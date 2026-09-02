@@ -159,7 +159,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-read",
         success: true,
-        result: { output: "workspace valid", exitCode: 0 },
+        result: {
+          output: "workspace valid",
+          exitCode: 0,
+          shellId: "e2e-sync-shell",
+        },
       },
     }, this.fields(target, true));
     await observationPause();
