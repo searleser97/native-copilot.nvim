@@ -132,12 +132,13 @@ local function viewport_at_bottom(view, win)
   end)
 end
 
-local function follow_bottom(view)
+local function follow_bottom(view, move_cursor)
   if not options.follow_bottom or view.id ~= 'conversation' then return end
   local last_line = vim.api.nvim_buf_line_count(view.buf)
   for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
     if vim.api.nvim_win_is_valid(win) and view.follow_windows[win] ~= false then
       view.following_update = true
+      local cursor = not move_cursor and vim.api.nvim_win_get_cursor(win) or nil
       pcall(vim.api.nvim_win_set_cursor, win, { last_line, 0 })
       pcall(vim.api.nvim_win_call, win, function()
         vim.cmd('normal! zb')
@@ -149,6 +150,19 @@ local function follow_bottom(view)
           vim.cmd(('execute "normal! %d\\<C-E>"'):format(padding))
         end
       end)
+      if cursor then
+        local cursor_line = math.min(cursor[1], last_line)
+        local cursor_text = vim.api.nvim_buf_get_lines(
+          view.buf,
+          cursor_line - 1,
+          cursor_line,
+          false
+        )[1] or ''
+        pcall(vim.api.nvim_win_set_cursor, win, {
+          cursor_line,
+          math.min(cursor[2], #cursor_text),
+        })
+      end
       view.follow_windows[win] = true
       view.following_update = false
     end
@@ -1512,7 +1526,7 @@ function M.on_shown(buf)
           end
         end
         configure_folds(view)
-        follow_bottom(view)
+        follow_bottom(view, true)
         return
       end
     end

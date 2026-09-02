@@ -397,11 +397,12 @@ interval with `stream_flush_ms`. Conversation content uses a three-space margin,
 Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permissions. Participant
 headers, day dividers, and environment loading/status rows remain unindented.
 
-Conversation windows follow the final line when opened, switched, reopened, or updated by streaming
-output, keeping `bottom_padding` display rows below it. Set `bottom_padding = 0` for a flush bottom
-edge, or `follow_bottom = false` to preserve the current viewport instead. Following pauses when
-you scroll far enough upward that the transcript end leaves the window and resumes when you return
-to the bottom.
+Conversation windows move to the final line when opened, switched, or reopened. Subsequent
+streaming and timeline updates always preserve the user's cursor; the viewport follows new output
+only while doing so does not displace that cursor. `bottom_padding` controls the preferred display
+rows below followed output, and `follow_bottom = false` disables automatic viewport following.
+Following pauses when the transcript end leaves the window and resumes when you return to the
+bottom.
 
 Conversation turns and timeline rows show local timestamps. A timeline row receives a new timestamp
 only when its visible state changes, and a streamed Copilot response receives its final timestamp

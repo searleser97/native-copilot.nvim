@@ -20,7 +20,9 @@ local phase = 'ready'
 local results = {}
 local last_trace = 0
 local manual_scroll_top
+local manual_scroll_cursor
 local conversation_height_before_scroll
+local reasoning_cursor
 local completed = false
 local tick
 
@@ -448,6 +450,7 @@ tick = function()
         vim.api.nvim_win_set_height(conversation_windows[1], 8)
         vim.api.nvim_win_set_cursor(conversation_windows[1], { 1, 0 })
         vim.cmd('normal! zt')
+        manual_scroll_cursor = vim.api.nvim_win_get_cursor(conversation_windows[1])
         return vim.fn.winsaveview().topline
       end)
     end
@@ -517,9 +520,12 @@ tick = function()
     end
     local conversation_windows = vim.fn.win_findbuf(buf)
     local preserved_scroll
+    local preserved_cursor
     if #conversation_windows > 0 then
       preserved_scroll = vim.api.nvim_win_call(conversation_windows[1], function()
         local preserved = vim.fn.winsaveview().topline == manual_scroll_top
+        preserved_cursor =
+          vim.deep_equal(vim.api.nvim_win_get_cursor(conversation_windows[1]), manual_scroll_cursor)
         if conversation_height_before_scroll then
           vim.api.nvim_win_set_height(
             conversation_windows[1],
@@ -540,9 +546,19 @@ tick = function()
     ) then
       return
     end
+    if not check(
+      preserved_cursor == true,
+      'new output preserves the conversation cursor'
+    ) then
+      return
+    end
     phase = 'resume-follow'
     schedule_tick()
   elseif phase == 'resume-follow' then
+    local conversation_windows = vim.fn.win_findbuf(buf)
+    if #conversation_windows > 0 then
+      reasoning_cursor = vim.api.nvim_win_get_cursor(conversation_windows[1])
+    end
     submit(
       'Investigate the event-ordering issue, use the available result, and explain your conclusion.'
     )
@@ -681,7 +697,7 @@ tick = function()
     local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
-    local bottom_margin
+    local cursor_preserved
     if
       first_row
       and second_row
@@ -692,7 +708,8 @@ tick = function()
       and #windows > 0
     then
       fold = vim.api.nvim_win_call(windows[1], function()
-        bottom_margin = vim.api.nvim_win_get_height(windows[1]) - vim.fn.winline()
+        cursor_preserved =
+          vim.deep_equal(vim.api.nvim_win_get_cursor(windows[1]), reasoning_cursor)
         vim.api.nvim_win_set_cursor(windows[1], { third_paragraph_row, 0 })
         local closed_from_third = pcall(vim.cmd, 'normal! zc')
         local first_start = vim.fn.foldclosed(first_row)
@@ -757,8 +774,8 @@ tick = function()
       return
     end
     if not check(
-      bottom_margin and bottom_margin >= 2,
-      'conversation viewport keeps padding below the final line'
+      cursor_preserved == true,
+      'streaming and lifecycle updates preserve the conversation cursor'
     ) then
       return
     end
