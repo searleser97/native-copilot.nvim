@@ -20,6 +20,7 @@ local phase = 'ready'
 local results = {}
 local last_trace = 0
 local manual_scroll_top
+local conversation_height_before_scroll
 local completed = false
 local tick
 
@@ -309,6 +310,8 @@ tick = function()
     local conversation_windows = vim.fn.win_findbuf(buf)
     if #conversation_windows > 0 then
       manual_scroll_top = vim.api.nvim_win_call(conversation_windows[1], function()
+        conversation_height_before_scroll = vim.api.nvim_win_get_height(conversation_windows[1])
+        vim.api.nvim_win_set_height(conversation_windows[1], 8)
         vim.api.nvim_win_set_cursor(conversation_windows[1], { 1, 0 })
         vim.cmd('normal! zt')
         return vim.fn.winsaveview().topline
@@ -351,6 +354,12 @@ tick = function()
     if #conversation_windows > 0 then
       preserved_scroll = vim.api.nvim_win_call(conversation_windows[1], function()
         local preserved = vim.fn.winsaveview().topline == manual_scroll_top
+        if conversation_height_before_scroll then
+          vim.api.nvim_win_set_height(
+            conversation_windows[1],
+            conversation_height_before_scroll
+          )
+        end
         vim.api.nvim_win_set_cursor(
           conversation_windows[1],
           { vim.api.nvim_buf_line_count(buf), 0 }
