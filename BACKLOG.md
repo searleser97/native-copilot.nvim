@@ -86,6 +86,7 @@ retain their typed identifier format. Do not surround event labels with Markdown
 - Lifecycle event labels are not wrapped in Markdown bold markers.
 - Start and terminal events display the same runtime identifier.
 - Detail lookup and lifecycle correlation continue to work for every supported event type.
+- Shell lifecycle classification uses SDK `shellToolInfo` capability metadata rather than Tool names.
 
 ### NC-006: Distinguish compact lifecycle rows without blockquotes
 

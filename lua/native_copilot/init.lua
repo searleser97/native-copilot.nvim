@@ -823,15 +823,6 @@ local function agent_tool_prompt(tool_name, arguments)
   end
 end
 
-local function shell_tool(name)
-  name = tostring(name or ''):lower()
-  return name == 'powershell'
-    or name == 'bash'
-    or name == 'shell'
-    or name == 'local_shell'
-    or name == 'local-shell'
-end
-
 local function render_shell_tool_call(member_id, item)
   local candidate = type(item.background_task) == 'table' and item.background_task or nil
   local task = candidate
@@ -892,6 +883,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   item.name = tool_name or item.name
   item.status = status
   item.details = vim.tbl_deep_extend('force', item.details or {}, details or {})
+  item.is_shell = item.is_shell or type(item.details.shellToolInfo) == 'table'
   item.created_at = item.created_at or json_value(item.details.created_at)
   local arguments = item.details.arguments
   local async_mode = type(arguments) == 'table'
@@ -901,7 +893,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       or json_value(arguments.detach) == true
     )
   item.async = item.async or async_mode
-  if shell_tool(item.name) and status == 'completed' then
+  if item.is_shell and status == 'completed' then
     local function shell_id(value)
       value = json_value(value)
       if type(value) == 'table' then
@@ -919,7 +911,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   end
   local terminal = status ~= 'running'
   item.timeline_id = item.timeline_id or ('tool:' .. call_id)
-  if shell_tool(item.name) then
+  if item.is_shell then
     if not item.async and status == 'running' then
       buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
     end
@@ -969,7 +961,7 @@ local function claim_shell_tool(member_id, task)
   local pending_count = 0
   for _, item in pairs(activity.items) do
     if item
-      and shell_tool(item.name)
+      and item.is_shell
       and item.status ~= 'failed'
       and not item.task_id
     then
@@ -1007,7 +999,7 @@ local function associate_task_tool(member_id, task, allow_shell_claim)
   local tool = tool_call_id and activity and activity.items[tostring(tool_call_id)] or nil
   if tool then
     tool.task_id = task.id
-    if shell_tool(tool.name) then
+    if tool.is_shell then
       if json_value(task.executionMode) == 'background' or tool.async then
         tool.background_task = vim.deepcopy(task)
       end
@@ -2227,6 +2219,7 @@ local function history_event(member_id, event, context)
     end
     update_tool_call(member_id, call_id, data.toolName, 'running', {
       arguments = data.arguments,
+      shellToolInfo = data.shellToolInfo,
       created_at = event_time,
     })
   elseif event.type == 'tool.execution_complete' then
@@ -3070,6 +3063,7 @@ function M._on_event(message)
       local tool_name = data.toolName or data.mcpToolName or 'tool'
       update_tool_call(member_id, call_id, tool_name, 'running', {
         arguments = data.arguments,
+        shellToolInfo = data.shellToolInfo,
       })
     elseif event_type == 'tool.execution_complete' then
       local call_id = data.toolCallId or message.id

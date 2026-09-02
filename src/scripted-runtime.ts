@@ -76,6 +76,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-async-shell",
         toolName: "powershell",
+        shellToolInfo: {
+          possiblePaths: [],
+          hasWriteFileRedirection: false,
+        },
         arguments: {
           command: "Write-Output 'workspace valid'",
           description: "Validate workspace in background",
@@ -146,6 +150,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-read",
         toolName: "powershell",
+        shellToolInfo: {
+          possiblePaths: ["validation-result.txt"],
+          hasWriteFileRedirection: false,
+        },
         arguments: {
           command: "Get-Content validation-result.txt",
           description:
@@ -197,6 +205,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-reasoning-background",
         toolName: "powershell",
+        shellToolInfo: {
+          possiblePaths: [],
+          hasWriteFileRedirection: false,
+        },
         arguments: {
           command: "Write-Output 'metadata refreshed'",
           description: "Refresh validation metadata",
@@ -638,6 +650,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
           data: {
             toolCallId: "cli-shell",
             toolName: "powershell",
+            shellToolInfo: {
+              possiblePaths: [],
+              hasWriteFileRedirection: false,
+            },
             arguments: {
               command: "npm run check",
               description: "Validate the workspace",
