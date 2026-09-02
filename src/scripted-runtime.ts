@@ -166,6 +166,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
         },
       },
     }, this.fields(target, true));
+    this.emit("tasks.changed", {
+      tasks: [{
+        id: "e2e-sync-shell",
+        type: "shell",
+        status: "running",
+        description:
+          "Read completed validation output and summarize only the final status",
+        command: "Get-Content validation-result.txt",
+        executionMode: "sync",
+        attachmentMode: "attached",
+        canPromoteToBackground: true,
+      }],
+    }, { memberId: target, target: "status", done: true });
     await observationPause();
     this.emitBusy(target, "e2e-tool-authorship-turn");
     await observationPause();

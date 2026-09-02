@@ -419,7 +419,9 @@ non-clickable lifecycle notices use the concrete runtime identity, such as `shel
 inferred when the first observed snapshot is already background-managed. The original Tool row
 remains the clickable source for arguments, results, and correlated background details.
 A shell ID returned by a completed synchronous invocation remains visible for lookup but does not
-by itself keep the Tool row in the running state.
+by itself keep the Tool row in the running state. Likewise, a `running` Task snapshot with
+`executionMode: "sync"` does not override a terminal Tool event; Task status becomes authoritative
+only after the shell is explicitly asynchronous or background-managed.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
 Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific

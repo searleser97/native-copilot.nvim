@@ -500,6 +500,12 @@ tick = function()
       return
     end
     if not check(
+      tool_line:find('🟢', 1, true) ~= nil,
+      'running synchronous task snapshot does not override Tool completion'
+    ) then
+      return
+    end
+    if not check(
       tool_line:find('... · ', 1, true) ~= nil
         and not tool_line:find('unrelated diagnostic details', 1, true),
       'long Tool summaries are truncated inline'

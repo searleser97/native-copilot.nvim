@@ -851,7 +851,14 @@ local function result_has_async_handle(value)
 end
 
 local function render_shell_tool_call(member_id, item)
-  local task = type(item.background_task) == 'table' and item.background_task or nil
+  local candidate = type(item.background_task) == 'table' and item.background_task or nil
+  local task = candidate
+    and (
+      json_value(candidate.executionMode) == 'background'
+      or item.async
+    )
+    and candidate
+    or nil
   local status = task and json_value(task.status) or item.status
   if not task and item.async and status == 'completed' then status = 'running' end
   local detail = tool_timeline_detail(item.name, item.details.arguments, status)
@@ -1012,7 +1019,9 @@ local function claim_shell_tool(member_id, task)
   if not matched then return false end
   matched.task_id = task.id
   task.toolCallId = task.toolCallId or matched.id
-  matched.background_task = vim.deepcopy(task)
+  if json_value(task.executionMode) == 'background' or matched.async then
+    matched.background_task = vim.deepcopy(task)
+  end
   matched.shell_id = matched.shell_id or tostring(task.id)
   render_shell_tool_call(member_id, matched)
   return true
@@ -1025,7 +1034,9 @@ local function associate_task_tool(member_id, task, allow_shell_claim)
   if tool then
     tool.task_id = task.id
     if shell_tool(tool.name) then
-      tool.background_task = vim.deepcopy(task)
+      if json_value(task.executionMode) == 'background' or tool.async then
+        tool.background_task = vim.deepcopy(task)
+      end
       tool.shell_id = tool.shell_id or tostring(task.id)
       render_shell_tool_call(member_id, tool)
     end
