@@ -33,6 +33,7 @@ local quote_indent = content_indent .. '>'
 local options = {
   stream_flush_ms = 80,
   follow_bottom = true,
+  bottom_padding = 2,
   timestamp_format = '%H:%M:%S',
   now = os.time,
   conversation = {
@@ -130,6 +131,13 @@ local function follow_bottom(view)
       pcall(vim.api.nvim_win_set_cursor, win, { last_line, 0 })
       pcall(vim.api.nvim_win_call, win, function()
         vim.cmd('normal! zb')
+        local padding = math.max(
+          0,
+          math.min(options.bottom_padding or 0, vim.api.nvim_win_get_height(win) - 1)
+        )
+        if padding > 0 then
+          vim.cmd(('execute "normal! %d\\<C-E>"'):format(padding))
+        end
       end)
     end
   end

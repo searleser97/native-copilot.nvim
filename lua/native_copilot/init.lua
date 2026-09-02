@@ -66,6 +66,7 @@ local defaults = {
   overview_max_agents = 4,
   stream_flush_ms = 80,
   follow_bottom = true,
+  bottom_padding = 2,
   timestamp_format = '%H:%M:%S',
   conversation = {
     user_label = '👨',
@@ -3034,6 +3035,7 @@ function M.setup(user_options)
   buffers.setup({
     stream_flush_ms = options.stream_flush_ms,
     follow_bottom = options.follow_bottom,
+    bottom_padding = options.bottom_padding,
     timestamp_format = options.timestamp_format,
     conversation = options.conversation,
   })

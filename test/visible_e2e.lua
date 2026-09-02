@@ -416,6 +416,7 @@ tick = function()
     local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
+    local bottom_margin
     if
       first_row
       and second_row
@@ -426,6 +427,7 @@ tick = function()
       and #windows > 0
     then
       fold = vim.api.nvim_win_call(windows[1], function()
+        bottom_margin = vim.api.nvim_win_get_height(windows[1]) - vim.fn.winline()
         vim.api.nvim_win_set_cursor(windows[1], { third_paragraph_row, 0 })
         local closed_from_third = pcall(vim.cmd, 'normal! zc')
         local first_start = vim.fn.foldclosed(first_row)
@@ -487,6 +489,12 @@ tick = function()
       return
     end
     if not check(fold.reopened == -1, 'reasoning fold opens and closes through native fold commands') then
+      return
+    end
+    if not check(
+      bottom_margin and bottom_margin >= 2,
+      'conversation viewport keeps padding below the final line'
+    ) then
       return
     end
     if profile == 'manual-permissions' then

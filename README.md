@@ -48,6 +48,7 @@ require("native_copilot").setup({
   runtime_command_resolver = nil,
   stream_flush_ms = 80,
   follow_bottom = true,
+  bottom_padding = 2,
   timestamp_format = '%H:%M:%S',
   conversation = {
     user_label = '👨',
@@ -389,7 +390,8 @@ Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permis
 headers, day dividers, and environment loading/status rows remain unindented.
 
 Conversation windows follow the final line when opened, switched, reopened, or updated by streaming
-output. Set `follow_bottom = false` to preserve the current viewport instead.
+output, keeping `bottom_padding` display rows below it. Set `bottom_padding = 0` for a flush bottom
+edge, or `follow_bottom = false` to preserve the current viewport instead.
 
 Conversation turns and timeline rows show local timestamps. A timeline row receives a new timestamp
 only when its visible state changes, and a streamed Copilot response receives its final timestamp
