@@ -3059,6 +3059,13 @@ function M.setup(user_options)
   vim.api.nvim_create_autocmd('BufWinEnter', {
     callback = function(args) buffers.on_shown(args.buf) end,
   })
+  vim.api.nvim_create_autocmd({ 'CursorMoved', 'WinScrolled' }, {
+    callback = function(args)
+      local win = args.event == 'WinScrolled' and tonumber(args.match)
+        or vim.api.nvim_get_current_win()
+      buffers.on_view_moved(win)
+    end,
+  })
   vim.api.nvim_create_autocmd('TabClosed', {
     callback = function()
       if state.tab and not vim.api.nvim_tabpage_is_valid(state.tab) then

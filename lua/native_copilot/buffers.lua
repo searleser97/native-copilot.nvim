@@ -123,11 +123,21 @@ local function visible(buf)
   return #vim.fn.win_findbuf(buf) > 0
 end
 
+local function viewport_at_bottom(view, win)
+  if not vim.api.nvim_win_is_valid(win) or vim.api.nvim_win_get_buf(win) ~= view.buf then
+    return false
+  end
+  return vim.api.nvim_win_call(win, function()
+    return vim.fn.line('w$') >= vim.api.nvim_buf_line_count(view.buf)
+  end)
+end
+
 local function follow_bottom(view)
   if not options.follow_bottom or view.id ~= 'conversation' then return end
   local last_line = vim.api.nvim_buf_line_count(view.buf)
   for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
-    if vim.api.nvim_win_is_valid(win) then
+    if vim.api.nvim_win_is_valid(win) and view.follow_windows[win] ~= false then
+      view.following_update = true
       pcall(vim.api.nvim_win_set_cursor, win, { last_line, 0 })
       pcall(vim.api.nvim_win_call, win, function()
         vim.cmd('normal! zb')
@@ -139,6 +149,8 @@ local function follow_bottom(view)
           vim.cmd(('execute "normal! %d\\<C-E>"'):format(padding))
         end
       end)
+      view.follow_windows[win] = true
+      view.following_update = false
     end
   end
 end
@@ -259,6 +271,8 @@ local function create_buffer(name, member_id, view_id)
       items = {},
     },
     timeline_time_overrides = {},
+    follow_windows = {},
+    following_update = false,
   }
 end
 
@@ -1458,13 +1472,30 @@ function M.on_shown(buf)
         if view.id == 'conversation' then
           entry.unread = 0
           for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-            if vim.api.nvim_win_is_valid(win) then vim.wo[win].cursorline = false end
+            if vim.api.nvim_win_is_valid(win) then
+              vim.wo[win].cursorline = false
+              view.follow_windows[win] = true
+            end
           end
         end
         configure_folds(view)
         follow_bottom(view)
         return
       end
+    end
+  end
+end
+
+function M.on_view_moved(win)
+  if not win or not vim.api.nvim_win_is_valid(win) then return end
+  local buf = vim.api.nvim_win_get_buf(win)
+  for _, entry in pairs(registry) do
+    local view = entry.views.conversation
+    if view.buf == buf then
+      if not view.following_update then
+        view.follow_windows[win] = viewport_at_bottom(view, win)
+      end
+      return
     end
   end
 end

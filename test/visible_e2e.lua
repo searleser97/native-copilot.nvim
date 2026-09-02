@@ -19,6 +19,7 @@ local started_at = vim.uv.now()
 local phase = 'ready'
 local results = {}
 local last_trace = 0
+local manual_scroll_top
 local completed = false
 local tick
 
@@ -305,6 +306,14 @@ tick = function()
     ) then
       return
     end
+    local conversation_windows = vim.fn.win_findbuf(buf)
+    if #conversation_windows > 0 then
+      manual_scroll_top = vim.api.nvim_win_call(conversation_windows[1], function()
+        vim.api.nvim_win_set_cursor(conversation_windows[1], { 1, 0 })
+        vim.cmd('normal! zt')
+        return vim.fn.winsaveview().topline
+      end)
+    end
     submit('Read the completed validation output and summarize the result.')
     phase = 'tool'
     schedule_tick()
@@ -334,6 +343,25 @@ tick = function()
     if not check(
       not tool_line:find('The background validation completed successfully', 1, true),
       'foreground tool and Copilot reply use separate lines'
+    ) then
+      return
+    end
+    local conversation_windows = vim.fn.win_findbuf(buf)
+    local preserved_scroll
+    if #conversation_windows > 0 then
+      preserved_scroll = vim.api.nvim_win_call(conversation_windows[1], function()
+        local preserved = vim.fn.winsaveview().topline == manual_scroll_top
+        vim.api.nvim_win_set_cursor(
+          conversation_windows[1],
+          { vim.api.nvim_buf_line_count(buf), 0 }
+        )
+        vim.cmd('normal! zb')
+        return preserved
+      end)
+    end
+    if not check(
+      preserved_scroll == true,
+      'new output preserves a conversation viewport that the user scrolled upward'
     ) then
       return
     end
