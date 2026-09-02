@@ -100,6 +100,11 @@ Runtime state is stored at:
 %LOCALAPPDATA%\nvim-data\native-copilot\state.sqlite
 ```
 
+New Standard SDK sessions use IDs shaped like
+`native-copilot-<workspace-hash>-<instance-id>-standard`. Fleet sessions retain both their Fleet
+and member components because those values are independently meaningful. Older persisted
+`-standard-standard` sessions remain available through `/resume`.
+
 The built-in `github-mcp-server` authenticates through `gh auth token` at session startup. The
 token is read directly from the GitHub CLI credential store, passed to the SDK in memory, and is
 never written to plugin configuration, logs, SQLite, or conversation buffers.

@@ -771,6 +771,10 @@ export function instanceSessionId(
   return `native-copilot-${projectKey(workspace)}-${instanceId}-${scope}-${memberId}`;
 }
 
+export function standardSessionId(workspace: string, instanceId: string): string {
+  return `native-copilot-${projectKey(workspace)}-${instanceId}-standard`;
+}
+
 export function githubCliAuthToken(): Promise<string> {
   return new Promise((resolveToken, rejectToken) => {
     execFile(
@@ -2066,7 +2070,7 @@ export class CopilotRuntime {
         STANDARD_TARGET,
         STANDARD_TARGET,
         undefined,
-        instanceSessionId(this.workspace, this.instanceId, "standard", "standard"),
+        standardSessionId(this.workspace, this.instanceId),
         this.standardSessionConfig(),
         new Set(),
       );
