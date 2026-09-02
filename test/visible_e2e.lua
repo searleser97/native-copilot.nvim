@@ -551,7 +551,8 @@ tick = function()
   elseif phase == 'reasoning-complete' then
     local reasoning_task_start =
       content:find(
-        tool_marker('e2e-reasoning-background') .. ' powershell',
+        'powershell — Refresh validation metadata · '
+          .. task_marker('e2e-reasoning-task'),
         1,
         true
       )
