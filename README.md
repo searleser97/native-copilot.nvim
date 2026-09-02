@@ -412,9 +412,9 @@ divider and adds another before the first newly rendered item after midnight.
 Shell Tool rows update in place and omit their native call ID while they remain ordinary synchronous
 invocations. When an SDK Task is correlated with a Tool, that original row gains the concrete Task
 ID at the end of the row and the latest background metadata in its detail pane; the redundant native
-Tool call ID remains hidden. Lightweight,
-non-clickable lifecycle notices use the concrete runtime identity, such as `shell_<shell-id>` or
-`agent_<agent-id>`, without a status icon. A transition from `executionMode: "sync"` to
+Tool call ID remains hidden. Non-clickable lifecycle notices render as Task-authored messages and
+use the concrete runtime identity, such as `shell_cmd_<shell-id>` or `agent_<agent-id>`, without a
+status icon. A transition from `executionMode: "sync"` to
 `executionMode: "background"` produces a separate `moved to background` notice; no transition is
 inferred when the first observed snapshot is already background-managed. The original Tool row
 remains the clickable source for arguments, results, and correlated background details.

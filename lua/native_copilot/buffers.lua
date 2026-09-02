@@ -820,7 +820,7 @@ local function timeline_lines(item, now)
     or ('[%s]'):format(kind)
   local identity_prefix = identity ~= '' and (identity .. ' ') or ''
   local event = item.event and (tostring(item.event) .. ' · ') or ''
-  if item.status_notice then
+  if item.status_notice and not item.actor_message then
     return {
       ('%s%s%s%s%s · %s'):format(
         content_indent,
@@ -833,20 +833,26 @@ local function timeline_lines(item, now)
     }
   end
   if item.actor_message then
+    local actor_kind = item.actor_kind or kind
     local actor_heading
     if item.actor or item.actor_label then
-      local actor = item.actor or (kind == 'tool' and '🛠️' or actor_symbols[kind]) or '💬'
+      local actor = item.actor
+        or (actor_kind == 'tool' and '🛠️' or actor_symbols[actor_kind])
+        or '💬'
       actor_heading = item.actor_label and (actor .. ' ' .. item.actor_label) or actor
     else
-      local option_name = actor_option_names[kind]
-      actor_heading = option_name and options.conversation[option_name] or kind
+      local option_name = actor_option_names[actor_kind]
+      actor_heading = option_name and options.conversation[option_name] or actor_kind
     end
+    local status_prefix = item.status_notice
+        and ''
+      or ((status_symbols[status] or status_symbols.unknown) .. ' ')
     return {
       ('%s · %s'):format(actor_heading, timestamp(now)),
       '',
-      ('%s%s %s%s%s%s'):format(
+      ('%s%s%s%s%s%s'):format(
         content_indent,
-        status_symbols[status] or status_symbols.unknown,
+        status_prefix,
         identity_prefix,
         event,
         label,
@@ -972,7 +978,7 @@ function M.upsert_timeline(member_id, item_id, item)
     view.activity_streaming = false
   end
   flush(view)
-  if (item.actor_message or item.defer_until_idle)
+  if (item.defer_until_idle or (item.actor_message and not item.status_notice))
     and (item.kind == 'task' or item.kind == 'tool' or item.status_notice)
     and (view.streaming or view.active_message or view.awaiting_response)
   then
@@ -1072,7 +1078,7 @@ function M.upsert_timeline(member_id, item_id, item)
   if item.kind == 'environment' then view.history_environment_started = true end
 
   local timeline_highlight
-  if item.actor_message and item.kind == 'task' then
+  if item.actor_message and (item.actor_kind or item.kind) == 'task' then
     timeline_highlight = 'NativeCopilotTaskMessage'
   elseif not item.actor_message and (item.kind == 'task' or item.kind == 'tool') then
     timeline_highlight = 'NativeCopilotActorHeader'

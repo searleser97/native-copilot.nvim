@@ -100,7 +100,7 @@ local function tool_marker(id)
 end
 
 local function task_marker(id, task_type)
-  return ('[%s_%s]'):format(task_type or 'shell', id)
+  return ('[%s_%s]'):format(task_type or 'shell_cmd', id)
 end
 
 local function has_quoted_environment(content)
@@ -402,7 +402,14 @@ tick = function()
     if not check(
       not task_complete_line:find('🟢', 1, true)
         and not task_complete_line:find('🟡', 1, true),
-      'task completion rendered as a lightweight status notice'
+      'Task-authored completion omitted a redundant status icon'
+    ) then
+      return
+    end
+    local task_complete_heading = content:sub(1, task_complete):match('([^\n]*)\n\n[^\n]*$')
+    if not check(
+      task_complete_heading and task_complete_heading:find('📝 · ', 1, true) ~= nil,
+      'task completion rendered under the Task actor'
     ) then
       return
     end
@@ -634,7 +641,14 @@ tick = function()
     if not check(
       not promoted_line:find('🟢', 1, true)
         and not promoted_line:find('🟡', 1, true),
-      'background promotion rendered without a status icon'
+      'Task-authored background promotion omitted a status icon'
+    ) then
+      return
+    end
+    local promoted_heading = content:sub(1, reasoning_task_promoted):match('([^\n]*)\n\n[^\n]*$')
+    if not check(
+      promoted_heading and promoted_heading:find('📝 · ', 1, true) ~= nil,
+      'background promotion rendered under the Task actor'
     ) then
       return
     end

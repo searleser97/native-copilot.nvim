@@ -714,7 +714,7 @@ local function task_display_identifier(task)
     return identifier_component(source)
   end
   local task_type = json_value(task.type)
-  local prefix = task_type == 'shell' and 'shell'
+  local prefix = task_type == 'shell' and 'shell_cmd'
     or task_type == 'agent' and 'agent'
     or task_type == 'factory' and 'factory'
     or 'task'
@@ -723,7 +723,7 @@ end
 
 local function task_runtime_identifier(task)
   local task_type = json_value(task.type)
-  local prefix = task_type == 'shell' and 'shell'
+  local prefix = task_type == 'shell' and 'shell_cmd'
     or task_type == 'agent' and 'agent'
     or task_type == 'factory' and 'factory'
     or 'task'
@@ -735,6 +735,8 @@ local function emit_task_event(member_id, task, event)
   if event ~= 'started' then
     buffers.upsert_timeline(member_id, ('task:%s:%s'):format(task.id, event), {
       kind = 'task_status',
+      actor_kind = 'task',
+      actor_message = true,
       identifier = task_runtime_identifier(task),
       event = event,
       label = task_description(task),
