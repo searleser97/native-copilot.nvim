@@ -645,6 +645,13 @@ tick = function()
     ) then
       return
     end
+    local reader_line = line_at(content, tool_row)
+    if not check(
+      not reader_line:find('[e2e-reasoning-tool]', 1, true),
+      'read_powershell hides its internal Tool call ID'
+    ) then
+      return
+    end
     local promoted_heading = content:sub(1, reasoning_task_promoted):match('([^\n]*)\n\n[^\n]*$')
     if not check(
       promoted_heading and promoted_heading:find('📝 · ', 1, true) ~= nil,

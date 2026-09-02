@@ -422,6 +422,8 @@ A shell ID returned by a completed synchronous invocation remains visible for lo
 by itself keep the Tool row in the running state. Likewise, a `running` Task snapshot with
 `executionMode: "sync"` does not override a terminal Tool event; Task status becomes authoritative
 only after the shell is explicitly asynchronous or background-managed.
+Observer Tools such as `read_powershell`, `stop_powershell`, and `read_agent` never expose their
+internal Tool call IDs merely because their arguments or results reference a managed task.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
 Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific

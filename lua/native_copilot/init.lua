@@ -832,6 +832,13 @@ local function shell_tool(name)
     or name == 'local-shell'
 end
 
+local function task_observer_tool(name)
+  name = tostring(name or ''):lower()
+  return name == 'read_powershell'
+    or name == 'stop_powershell'
+    or name == 'read_agent'
+end
+
 local function result_has_async_handle(value)
   value = json_value(value)
   if type(value) ~= 'table' then return false end
@@ -922,12 +929,18 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     )
   item.async = item.async or async_mode
   local normalized_name = tostring(item.name or ''):lower()
+  local observes_task = task_observer_tool(item.name)
   item.correlated = item.correlated
-    or item.async
-    or shell_tool(item.name)
-    or normalized_name == 'task'
-    or normalized_name == 'run_factory'
-    or result_has_async_handle(item.details.result)
+    or (
+      not observes_task
+      and (
+        item.async
+        or shell_tool(item.name)
+        or normalized_name == 'task'
+        or normalized_name == 'run_factory'
+        or result_has_async_handle(item.details.result)
+      )
+    )
   if shell_tool(item.name) and status == 'completed' then
     local function shell_id(value)
       value = json_value(value)
@@ -957,8 +970,8 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     end
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
-      identifier = item.correlated and call_id or nil,
-      show_identifier = item.correlated,
+      identifier = item.correlated and not observes_task and call_id or nil,
+      show_identifier = item.correlated and not observes_task,
       label = item.name,
       status = status,
       detail = tool_timeline_detail(item.name, item.details.arguments, status),

@@ -275,7 +275,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
       data: {
         toolCallId: "e2e-reasoning-tool",
         success: true,
-        result: { output: "workspace valid", exitCode: 0 },
+        result: {
+          output: "workspace valid",
+          exitCode: 0,
+          shellId: "e2e-reasoning-task",
+        },
       },
     }, this.fields(target, true));
     this.emit("tasks.changed", {
