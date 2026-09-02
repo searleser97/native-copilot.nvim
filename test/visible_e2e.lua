@@ -317,6 +317,9 @@ tick = function()
         return vim.fn.winsaveview().topline
       end)
     end
+    phase = 'manual-scroll'
+    schedule_tick()
+  elseif phase == 'manual-scroll' then
     submit('Read the completed validation output and summarize the result.')
     phase = 'tool'
     schedule_tick()
