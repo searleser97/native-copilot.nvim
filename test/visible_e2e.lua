@@ -406,16 +406,32 @@ tick = function()
       line_with(buf, 'The completion event arrived while the foreground response was still active.')
     local second_row =
       line_with(buf, 'Next, I need to inspect the completed command before composing the final answer.')
+    local second_paragraph_row =
+      line_with(buf, 'I should preserve this second paragraph inside the same reasoning fold.')
+    local third_paragraph_row = line_with(
+      buf,
+      'Closing the fold from this third paragraph must collapse the complete reasoning block.'
+    )
     local tool_line = line_with(buf, '[tool][e2e-reasoning-tool] read_powershell')
     local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
-    if first_row and second_row and tool_line and final_row and #windows > 0 then
+    if
+      first_row
+      and second_row
+      and second_paragraph_row
+      and third_paragraph_row
+      and tool_line
+      and final_row
+      and #windows > 0
+    then
       fold = vim.api.nvim_win_call(windows[1], function()
-        vim.cmd('normal! zx')
-        vim.cmd('normal! zM')
+        vim.api.nvim_win_set_cursor(windows[1], { third_paragraph_row, 0 })
+        local closed_from_third = pcall(vim.cmd, 'normal! zc')
         local first_start = vim.fn.foldclosed(first_row)
         local second_start = vim.fn.foldclosed(second_row)
+        local second_paragraph_start = vim.fn.foldclosed(second_paragraph_row)
+        local third_paragraph_start = vim.fn.foldclosed(third_paragraph_row)
         local fold_end = vim.fn.foldclosedend(first_row)
         local tool_start = vim.fn.foldclosed(tool_line)
         local final_start = vim.fn.foldclosed(final_row)
@@ -423,33 +439,42 @@ tick = function()
         return {
           first_start = first_start,
           second_start = second_start,
+          second_paragraph_start = second_paragraph_start,
+          third_paragraph_start = third_paragraph_start,
           fold_end = fold_end,
           tool_start = tool_start,
           final_start = final_start,
+          closed_from_third = closed_from_third,
           reopened = vim.fn.foldclosed(first_row),
         }
       end)
     end
     if fold then
       append_trace({
-        ('fold first=%s second=%s end=%s tool=%s final=%s reopened=%s'):format(
+        ('fold first=%s second=%s paragraph2=%s paragraph3=%s end=%s tool=%s final=%s closed_from_third=%s reopened=%s'):format(
           fold.first_start,
           fold.second_start,
+          fold.second_paragraph_start,
+          fold.third_paragraph_start,
           fold.fold_end,
           fold.tool_start,
           fold.final_start,
+          fold.closed_from_third,
           fold.reopened
         ),
       })
     end
     if not check(
       fold
+        and fold.closed_from_third
         and fold.first_start > 0
         and fold.first_start == fold.second_start
+        and fold.first_start == fold.second_paragraph_start
+        and fold.first_start == fold.third_paragraph_start
         and fold.fold_end < tool_line
         and fold.tool_start == -1
         and fold.final_start == -1,
-      'consecutive reasoning summaries share a fold that excludes Tool and response rows'
+      'folding from a later reasoning paragraph collapses the complete reasoning block'
     ) then
       return
     end

@@ -155,6 +155,47 @@ local function configure_folds(view)
   end
 end
 
+local function refresh_folds(view)
+  if view.id ~= 'conversation' then return end
+  for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_call(win, function()
+        local cursor = vim.api.nvim_win_get_cursor(win)
+        local closed = {}
+        local line = 1
+        local line_count = vim.api.nvim_buf_line_count(view.buf)
+        while line <= line_count do
+          local start_line = vim.fn.foldclosed(line)
+          if start_line >= 0 then
+            table.insert(closed, start_line)
+            line = vim.fn.foldclosedend(line) + 1
+          else
+            line = line + 1
+          end
+        end
+        vim.cmd('silent! normal! zx')
+        for _, start_line in ipairs(closed) do
+          if vim.fn.foldclosed(start_line) < 0 then
+            vim.api.nvim_win_set_cursor(win, { start_line, 0 })
+            vim.cmd('silent! normal! zc')
+          end
+        end
+        local cursor_line = math.min(cursor[1], vim.api.nvim_buf_line_count(view.buf))
+        local cursor_text = vim.api.nvim_buf_get_lines(
+          view.buf,
+          cursor_line - 1,
+          cursor_line,
+          false
+        )[1] or ''
+        vim.api.nvim_win_set_cursor(win, {
+          cursor_line,
+          math.min(cursor[2], #cursor_text),
+        })
+      end)
+    end
+  end
+end
+
 local function create_buffer(name, member_id, view_id)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, ('native-copilot://%s/%s'):format(member_id, view_id))
@@ -697,6 +738,7 @@ function M.complete_activity(member_id, activity_id, content, event_time)
       touch_activity_heading(view, activity, 'Reasoning summary')
       view.active_activity = nil
       view.activity_streaming = false
+      refresh_folds(view)
       if not view.streaming then finalize_render(view) end
     end
   else
@@ -726,6 +768,7 @@ function M.append_activity_block(member_id, heading, content, event_time)
   touch_activity_heading(view, view.active_activity, heading)
   view.active_activity = nil
   view.activity_streaming = false
+  refresh_folds(view)
   if not view.streaming then finalize_render(view) end
 end
 

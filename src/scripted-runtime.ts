@@ -213,7 +213,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       reasoningId: "e2e-reasoning-two",
       content:
         "Next, I need to inspect the completed command before composing the final answer.\n" +
-        "The tool result confirms that the workspace validation succeeded.",
+        "The tool result confirms that the workspace validation succeeded.\n\n" +
+        "I should preserve this second paragraph inside the same reasoning fold.\n\n" +
+        "Closing the fold from this third paragraph must collapse the complete reasoning block.",
     }, this.fields(target));
     await delay(40);
     this.emit("activity.event", {
@@ -246,7 +248,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       reasoningId: "e2e-reasoning-two",
       content:
         "Next, I need to inspect the completed command before composing the final answer.\n" +
-        "The tool result confirms that the workspace validation succeeded.",
+        "The tool result confirms that the workspace validation succeeded.\n\n" +
+        "I should preserve this second paragraph inside the same reasoning fold.\n\n" +
+        "Closing the fold from this third paragraph must collapse the complete reasoning block.",
     }, this.fields(target, true));
     this.emitMessage(
       target,
