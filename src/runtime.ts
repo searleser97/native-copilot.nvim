@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, isAbsolute, relative, resolve } from "node:path";
@@ -758,14 +758,6 @@ export function nativeSessionScaffold(policy: NativePolicy): SessionConfig {
   return config;
 }
 
-function projectKey(workspace: string): string {
-  return createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0, 12);
-}
-
-export function nativeSessionId(workspace: string, sessionInstanceId: string): string {
-  return `native-copilot-${projectKey(workspace)}-${sessionInstanceId}`;
-}
-
 export function githubCliAuthToken(): Promise<string> {
   return new Promise((resolveToken, rejectToken) => {
     execFile(
@@ -949,7 +941,6 @@ export class CopilotRuntime {
   private client: CopilotClient | undefined;
   private knownSessionIds = new Set<string>();
   private readonly live = new Map<string, LiveSession>();
-  private readonly instanceId = randomUUID();
   // The single canonical native policy parsed once from the resolved main Copilot
   // command. Both the Standard supervisor and every Fleet member inherit it; agent
   // settings only overlay or restrict it, so there is one source of truth.
@@ -1619,7 +1610,7 @@ export class CopilotRuntime {
     target: string,
     memberId: string,
     fleetId: string | undefined,
-    sessionId: string,
+    sessionId: string | undefined,
     config: SessionConfig,
     recipients: Set<string>,
     resumeExisting = false,
@@ -1636,18 +1627,16 @@ export class CopilotRuntime {
     );
     const client = await this.ensureClient();
     let session: CopilotSession;
-    if (resumeExisting || this.knownSessionIds.has(sessionId)) {
+    if (sessionId && (resumeExisting || this.knownSessionIds.has(sessionId))) {
       try {
         session = await client.resumeSession(sessionId, { ...config, suppressResumeEvent: true });
-        this.knownSessionIds.add(sessionId);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const missing = message.includes("Session not found:");
         if (!resumeExisting || !missing || this.db.hasConversationActivity(runId, memberId)) {
           throw error;
         }
-        session = await client.createSession({ ...config, sessionId });
-        this.knownSessionIds.add(sessionId);
+        session = await client.createSession(config);
         this.emit(
           "session.recreated",
           { message: "The previous session had no conversation and was recreated." },
@@ -1655,9 +1644,10 @@ export class CopilotRuntime {
         );
       }
     } else {
-      session = await client.createSession({ ...config, sessionId });
-      this.knownSessionIds.add(sessionId);
+      session = await client.createSession(config);
     }
+    const actualSessionId = session.sessionId;
+    this.knownSessionIds.add(actualSessionId);
     const live: LiveSession = {
       session,
       runId,
@@ -1680,7 +1670,7 @@ export class CopilotRuntime {
     };
     live.unsubscribe = session.on((event) => this.handleSessionEvent(live, event));
     this.live.set(target, live);
-    this.db.upsertSession(runId, memberId, sessionId, "connected");
+    this.db.upsertSession(runId, memberId, actualSessionId, "connected");
     const history = await session.getEvents();
     // Skip the history replay for an in-process reconnect: the UI buffer for this
     // target is retained across the reconnect (peer/mutation changes never reset a
@@ -1735,7 +1725,7 @@ export class CopilotRuntime {
     }
     this.emit(
       "member.state",
-      { state: "idle", sessionId },
+      { state: "idle", sessionId: actualSessionId },
       { runId, memberId: target, target: "status" },
     );
     try {
@@ -1778,8 +1768,7 @@ export class CopilotRuntime {
       qualifiedTarget(fleetId, memberId),
       memberId,
       fleetId,
-      storedSessionId
-        ?? nativeSessionId(this.workspace, randomUUID()),
+      storedSessionId,
       this.memberConfig(member, tools, context.mcpServers, qualifiedTarget(fleetId, memberId)),
       member.recipients,
     );
@@ -2066,7 +2055,7 @@ export class CopilotRuntime {
         STANDARD_TARGET,
         STANDARD_TARGET,
         undefined,
-        nativeSessionId(this.workspace, this.instanceId),
+        undefined,
         this.standardSessionConfig(),
         new Set(),
       );
@@ -2948,8 +2937,7 @@ export class CopilotRuntime {
       this.db
         .fleetRun(context.runId, this.workspace)
         ?.sessions.find((session) => session.memberId === memberId)
-        ?.sessionId ??
-      nativeSessionId(this.workspace, randomUUID());
+        ?.sessionId;
     if (existing) {
       existing.unsubscribe();
       this.live.delete(target);
