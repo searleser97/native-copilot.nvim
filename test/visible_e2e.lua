@@ -350,7 +350,11 @@ tick = function()
     local tool_prompt = content:find('Read the completed validation output', 1, true)
     local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
     local tool_row = copilot_header
-      and content:find('🟢 read_powershell', copilot_header, true)
+      and content:find(
+        '🟢 powershell — Read completed validation output',
+        copilot_header,
+        true
+      )
     local reply = tool_row
       and content:find(
         'The background validation completed successfully with exit code 0.',
@@ -372,6 +376,12 @@ tick = function()
     if not check(
       not tool_line:find('The background validation completed successfully', 1, true),
       'foreground tool and Copilot reply use separate lines'
+    ) then
+      return
+    end
+    if not check(
+      not tool_line:find('[e2e-read]', 1, true),
+      'synchronous PowerShell summary renders without an unnecessary Tool ID'
     ) then
       return
     end

@@ -141,8 +141,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
       eventType: "tool.execution_start",
       data: {
         toolCallId: "e2e-read",
-        toolName: "read_powershell",
-        arguments: { shellId: "e2e-task" },
+        toolName: "powershell",
+        arguments: {
+          command: "Get-Content validation-result.txt",
+          description: "Read completed validation output",
+        },
       },
     }, this.fields(target));
     this.emit("activity.event", {

@@ -407,6 +407,8 @@ Related Task rows use `task_<tool-call-id>` so one search finds both sides of th
 Tasks without an originating Tool use a deterministic `task_<hash>` display ID instead of a short
 session-local handle. Canonical Task IDs remain available in activity details and are still used
 for progress and cancellation operations.
+When an invocation provides `description` or `summary`, that human-readable text appears beside the
+Tool name. Tool-specific fallbacks continue to show paths, patterns, queries, and agent prompts.
 The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
 session. Both values refresh from SDK usage events after every model call.
 
