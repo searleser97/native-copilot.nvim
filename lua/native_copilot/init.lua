@@ -2163,7 +2163,8 @@ local function history_notification(member_id, event, event_time)
       or 'completed'
     history_task(member_id, {
       id = tostring(kind.agentId or event.id),
-      type = kind.agentType or 'agent',
+      type = 'agent',
+      agentType = kind.agentType,
       description = kind.description or kind.prompt or 'Background agent',
       prompt = kind.prompt,
     }, status, event_time)
@@ -2255,7 +2256,8 @@ local function history_event(member_id, event, context)
     history_task(member_id, {
       id = tostring(event.agentId or data.toolCallId or event.id),
       toolCallId = data.toolCallId,
-      type = data.agentName or 'agent',
+      type = 'agent',
+      agentType = data.agentName,
       description = data.agentDescription or data.agentDisplayName or 'Background agent',
       prompt = agent_tool_prompt('task', arguments),
       model = data.model,
@@ -2264,7 +2266,8 @@ local function history_event(member_id, event, context)
     history_task(member_id, {
       id = tostring(event.agentId or data.toolCallId or event.id),
       toolCallId = data.toolCallId,
-      type = data.agentName or 'agent',
+      type = 'agent',
+      agentType = data.agentName,
       error = data.error,
     }, event.type == 'subagent.failed' and 'failed'
       or data.cancelled == true and 'cancelled'
