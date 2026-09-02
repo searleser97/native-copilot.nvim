@@ -377,6 +377,9 @@ tick = function()
     ) then
       return
     end
+    phase = 'resume-follow'
+    schedule_tick()
+  elseif phase == 'resume-follow' then
     submit(
       'Investigate the event-ordering issue, use the available result, and explain your conclusion.'
     )
