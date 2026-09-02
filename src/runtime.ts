@@ -762,17 +762,8 @@ function projectKey(workspace: string): string {
   return createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0, 12);
 }
 
-export function instanceSessionId(
-  workspace: string,
-  instanceId: string,
-  scope: string,
-  memberId: string,
-): string {
-  return `native-copilot-${projectKey(workspace)}-${instanceId}-${scope}-${memberId}`;
-}
-
-export function standardSessionId(workspace: string, instanceId: string): string {
-  return `native-copilot-${projectKey(workspace)}-${instanceId}-standard`;
+export function nativeSessionId(workspace: string, sessionInstanceId: string): string {
+  return `native-copilot-${projectKey(workspace)}-${sessionInstanceId}`;
 }
 
 export function githubCliAuthToken(): Promise<string> {
@@ -1778,12 +1769,17 @@ export class CopilotRuntime {
       throw new Error(`Unknown fleet member "${memberId}" in fleet "${fleetId}".`);
     }
     const tools = this.createPeerMessageTools(fleetId, member);
+    const storedSessionId = this.db
+      .fleetRun(context.runId, this.workspace)
+      ?.sessions.find((session) => session.memberId === memberId)
+      ?.sessionId;
     return this.connectSession(
       context.runId,
       qualifiedTarget(fleetId, memberId),
       memberId,
       fleetId,
-      instanceSessionId(this.workspace, this.instanceId, fleetId, memberId),
+      storedSessionId
+        ?? nativeSessionId(this.workspace, randomUUID()),
       this.memberConfig(member, tools, context.mcpServers, qualifiedTarget(fleetId, memberId)),
       member.recipients,
     );
@@ -2070,7 +2066,7 @@ export class CopilotRuntime {
         STANDARD_TARGET,
         STANDARD_TARGET,
         undefined,
-        standardSessionId(this.workspace, this.instanceId),
+        nativeSessionId(this.workspace, this.instanceId),
         this.standardSessionConfig(),
         new Set(),
       );
@@ -2949,7 +2945,11 @@ export class CopilotRuntime {
     const existing = this.live.get(target);
     const sessionId =
       existing?.session.sessionId ??
-      instanceSessionId(this.workspace, this.instanceId, fleetId, memberId);
+      this.db
+        .fleetRun(context.runId, this.workspace)
+        ?.sessions.find((session) => session.memberId === memberId)
+        ?.sessionId ??
+      nativeSessionId(this.workspace, randomUUID());
     if (existing) {
       existing.unsubscribe();
       this.live.delete(target);
