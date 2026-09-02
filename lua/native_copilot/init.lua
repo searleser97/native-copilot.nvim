@@ -122,7 +122,6 @@ local state = {
   permission_prompt_open = false,
   tool_calls = {},
   prompt_calls = {},
-  active_prompts = {},
   queued_prompts = {},
   prompt_queue_paused = {},
   prompt_queue_edit = nil,
@@ -256,9 +255,6 @@ local function fail_prompt(request_id, detail)
   if not call then return end
   local member_id = call.member_id
   state.prompt_calls[request_id] = nil
-  if state.active_prompts[member_id] == request_id then
-    state.active_prompts[member_id] = nil
-  end
   local failure = detail or 'Prompt submission failed'
   if not buffers.fail_response(member_id, failure) then
     buffers.append_activity_block(member_id, 'Error', failure)
@@ -323,7 +319,6 @@ local function dispatch_prompt(member_id, content)
   local request_id = send('prompt.send', { target = member_id, content = content })
   if not request_id then return false end
   state.prompt_calls[request_id] = { member_id = member_id }
-  state.active_prompts[member_id] = request_id
   return true
 end
 
@@ -343,7 +338,6 @@ local function can_dispatch_prompt(member_id)
   local entry = buffers.get_member(member_id)
   return entry
     and (entry.state == 'idle' or entry.state == 'standby')
-    and not state.active_prompts[member_id]
     and not state.prompt_queue_paused[member_id]
 end
 
@@ -364,14 +358,11 @@ end
 
 local function finish_foreground_turn(member_id)
   buffers.finish_response(member_id)
-  local request_id = state.active_prompts[member_id]
-  if request_id then state.prompt_calls[request_id] = nil end
-  state.active_prompts[member_id] = nil
   buffers.set_state(member_id, 'idle')
   dispatch_next_prompt(member_id)
 end
 
-local function submit_prompt_content()
+local function submit_prompt_content(queue_only)
   local content = vim.trim(table.concat(prompt_lines(), '\n'))
   if content == '' then
     notify('The prompt is empty.', vim.log.levels.WARN)
@@ -457,10 +448,10 @@ local function submit_prompt_content()
     end
     invoke_command(state.selected, command.name, command.input)
   else
-    if can_dispatch_prompt(state.selected) and #(state.queued_prompts[state.selected] or {}) == 0 then
-      dispatch_prompt(state.selected, content)
-    else
+    if queue_only then
       enqueue_prompt(state.selected, content)
+    else
+      dispatch_prompt(state.selected, content)
     end
   end
   return true
@@ -478,7 +469,22 @@ function M.submit_prompt()
     )
     return false
   end
-  return submit_prompt_content()
+  return submit_prompt_content(false)
+end
+
+function M.enqueue_prompt()
+  if
+    not state.prompt_buf
+    or not vim.api.nvim_buf_is_valid(state.prompt_buf)
+    or vim.api.nvim_get_current_buf() ~= state.prompt_buf
+  then
+    notify(
+      'Prompt queueing is only available from the Native Copilot prompt buffer.',
+      vim.log.levels.WARN
+    )
+    return false
+  end
+  return submit_prompt_content(true)
 end
 
 local function ensure_prompt_buffer()
@@ -501,6 +507,10 @@ local function ensure_prompt_buffer()
   vim.keymap.set('i', '<C-s>', M.submit_prompt, {
     buffer = buf,
     desc = 'Send prompt to selected Copilot',
+  })
+  vim.keymap.set({ 'n', 'i' }, '<C-q>', M.enqueue_prompt, {
+    buffer = buf,
+    desc = 'Queue prompt for selected Copilot',
   })
   vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,
@@ -889,14 +899,27 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
       identifier = call_id,
-      event = status == 'failed' and 'failed to start' or 'started',
+      event = 'started',
       label = item.name,
-      status = status,
+      status = status == 'running' and 'running' or 'completed',
       detail = tool_timeline_detail(item.name, item.details.arguments, status),
       copilot_owned = not item.async,
       details = item.details,
       created_at = item.created_at,
     })
+    if status == 'failed' or (status == 'completed' and not item.shell_id and not item.task_id) then
+      buffers.upsert_timeline(member_id, ('tool:%s:%s'):format(call_id, status), {
+        kind = 'tool',
+        identifier = call_id,
+        event = status,
+        label = item.name,
+        status = status,
+        detail = tool_timeline_detail(item.name, item.details.arguments, status),
+        copilot_owned = not item.async,
+        details = item.details,
+        created_at = json_value(item.details.created_at),
+      })
+    end
   else
     if not item.async then
       buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
@@ -1371,7 +1394,6 @@ local function reset_member(member_id, preserve_buffers)
   state.environment[member_id] = nil
   state.tool_calls[member_id] = nil
   state.session_metrics[member_id] = nil
-  state.active_prompts[member_id] = nil
   state.queued_prompts[member_id] = nil
   state.prompt_queue_paused[member_id] = nil
   state.command_requests[member_id] = nil
@@ -2993,6 +3015,7 @@ function M._on_event(message)
         or nil,
     }, message.id)
   elseif message.type == 'prompt.accepted' then
+    if message.requestId then state.prompt_calls[message.requestId] = nil end
     -- The user turn is rendered immediately; writing starts only with the SDK turn-start event.
   elseif message.type == 'conversation.delta' then
     buffers.append_conversation_delta(member_id, payload.messageId or message.id, payload.content or '')

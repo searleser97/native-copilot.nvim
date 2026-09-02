@@ -310,7 +310,7 @@ tick = function()
       return
     end
     local insert_submitted = submit(
-      'Run a background workspace validation and keep explaining while it finishes.',
+      'Start a foreground turn that waits for steering.',
       '<C-s>',
       'i'
     )
@@ -320,6 +320,44 @@ tick = function()
     ) then
       return
     end
+    phase = 'steering-running'
+    schedule_tick()
+  elseif phase == 'steering-running' then
+    if not content:find('The foreground turn is waiting for steering.', 1, true) then
+      schedule_tick()
+      return
+    end
+    if not check(
+      submit('Steer the active foreground turn now.') == true,
+      'busy Copilot accepted an immediate steering submission'
+    ) then
+      return
+    end
+    phase = 'steering-complete'
+    schedule_tick()
+  elseif phase == 'steering-complete' then
+    local steering_prompt = content:find('Steer the active foreground turn now.', 1, true)
+    local steering_reply = steering_prompt
+      and content:find(
+        'The foreground turn accepted the steering prompt immediately.',
+        steering_prompt,
+        true
+      )
+    if not steering_reply then
+      schedule_tick()
+      return
+    end
+    local queue = find_buffer(function(candidate)
+      return text(candidate):find('Steer the active foreground turn now.', 1, true) ~= nil
+        and vim.b[candidate].native_copilot_prompt_queue == true
+    end)
+    if not check(
+      queue == nil,
+      'immediate steering bypassed the explicit FIFO prompt queue'
+    ) then
+      return
+    end
+    submit('Run a background workspace validation and keep explaining while it finishes.')
     phase = 'task'
     schedule_tick()
   elseif phase == 'task' then
@@ -387,20 +425,23 @@ tick = function()
         copilot_header,
         true
       )
-    local reply = tool_row
+    local tool_complete = tool_row
+      and content:find('[e2e-read] completed · powershell', tool_row, true)
+    local reply = tool_complete
       and content:find(
         'The background validation completed successfully with exit code 0.',
-        tool_row,
+        tool_complete,
         true
       )
-    if not (copilot_header and tool_row and reply) then
+    if not (copilot_header and tool_row and tool_complete and reply) then
       schedule_tick()
       return
     end
     if not check(
       copilot_header < tool_row
-        and tool_row < reply,
-      'foreground tool rendered inside Copilot block'
+        and tool_row < tool_complete
+        and tool_complete < reply,
+      'foreground shell Tool rendered separate started and completed rows'
     ) then
       return
     end

@@ -124,6 +124,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `/fleet <objective>` | Ask Standard Copilot to design and start a task-specific Fleet |
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
+| `<C-q>` in `AI Prompt` | Explicitly queue the prompt for FIFO delivery after the active turn |
 | `<Enter>` in an overview pane | Select that member as the prompt recipient |
 | `<Enter>` on an inline `[task]`, `[tool]`, or `[schedule]` row | Open details in a floating pane |
 | `<Enter>` in the prompt queue | Pause the queue and edit the selected prompt in `AI Prompt` |
@@ -172,11 +173,10 @@ for failed tools and tasks. The active Copilot heading begins only after the SDK
 cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
 responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
-`🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted
-while Copilot is busy stay in a FIFO pane between
-the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
-Every dispatched SDK message uses immediate delivery so it can steer an interaction that still has
-tracked background work instead of waiting behind that work's completion notification.
+`🟢` when approved or `🚫` when denied, without a separate Permission section. Normal prompt
+submission always uses immediate SDK delivery, including while Copilot is busy, so it can steer the
+active interaction. Press `<C-q>` to place a prompt explicitly in the FIFO pane instead; that pane
+supports pausing, editing, and cancelling before dispatch.
 Slash commands are rendered as normal `👨` turns rather than duplicated `[command]` rows; their
 text output remains under `🤖`, and any work they start is represented by the resulting
 task, tool, environment, or schedule rows. Use `/tasks` or

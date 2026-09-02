@@ -865,7 +865,19 @@ tick = function()
       memberId = 'standard',
       payload = { state = 'busy' },
     })
-    local queued, queue_error = pcall(submit, 'Keep this prompt queued in compact mode.')
+    local prompt_buf = assert(prompt(), 'prompt buffer was not found')
+    vim.api.nvim_buf_set_lines(
+      prompt_buf,
+      0,
+      -1,
+      false,
+      { 'Keep this prompt queued in compact mode.' }
+    )
+    local queued, queue_error = pcall(
+      vim.api.nvim_buf_call,
+      prompt_buf,
+      native.enqueue_prompt
+    )
     local queue = find_buffer(function(buf)
       return text(buf):find('Queued prompts — FIFO', 1, true) ~= nil
     end)

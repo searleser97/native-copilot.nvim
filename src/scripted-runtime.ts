@@ -36,6 +36,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
   private sessionListCount = 0;
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private stopped = false;
+  private readonly steerableTurns = new Set<string>();
 
   constructor(
     private readonly workspace: string,
@@ -366,7 +367,23 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
     const id = randomUUID();
-    if (content.includes("Run a background workspace validation")) {
+    if (content.includes("Start a foreground turn that waits for steering")) {
+      this.steerableTurns.add(target);
+      this.emitBusy(target, `turn-${id}`);
+      this.emit("conversation.delta", {
+        messageId: "e2e-steerable-message",
+        content: "The foreground turn is waiting for steering.",
+      }, this.fields(target));
+    } else if (content.includes("Steer the active foreground turn now")) {
+      if (this.steerableTurns.delete(target)) {
+        this.emitMessage(
+          target,
+          "e2e-steerable-message",
+          "The foreground turn accepted the steering prompt immediately.",
+        );
+        this.emitIdle(target);
+      }
+    } else if (content.includes("Run a background workspace validation")) {
       void this.taskDeferral(target);
     } else if (content.includes("Read the completed validation output")) {
       void this.toolAuthorship(target);
