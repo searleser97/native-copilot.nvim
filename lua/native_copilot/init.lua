@@ -3061,8 +3061,10 @@ function M.setup(user_options)
   })
   vim.api.nvim_create_autocmd({ 'CursorMoved', 'WinScrolled' }, {
     callback = function(args)
-      local win = args.event == 'WinScrolled' and tonumber(args.match)
-        or vim.api.nvim_get_current_win()
+      local win = args.event == 'WinScrolled' and tonumber(args.match) or nil
+      if not win or not vim.api.nvim_win_is_valid(win) then
+        win = vim.api.nvim_get_current_win()
+      end
       buffers.on_view_moved(win)
     end,
   })
