@@ -1382,7 +1382,7 @@ end
 
 function M.fail_response(member_id, detail)
   local view = M.ensure_member(member_id).views.conversation
-  if not view.awaiting_response and not view.active_message then return end
+  if not view.awaiting_response and not view.active_message then return false end
   flush(view)
   touch_message_heading(view, 'failed', detail or 'failed')
   view.awaiting_response = nil
@@ -1395,6 +1395,7 @@ function M.fail_response(member_id, detail)
   view.streaming = false
   flush_deferred_timeline(member_id, view)
   finalize_render(view)
+  return true
 end
 
 function M.complete_conversation(member_id, message_id, content, event_time)

@@ -168,13 +168,15 @@ transitions from startup to `ready`. Foreground tools use `[tool]` rows. File re
 also show their target path or query directly in the compact row, making on-demand reads of nested
 instruction files such as `CLAUDE.md` visible without opening details. Other arguments remain in the
 `<Enter>` floating detail pane together with complete results and errors, including failure details
-for failed tools and tasks. The active Copilot
-heading cycles through `writing.`, `writing..`, and
+for failed tools and tasks. The active Copilot heading begins only after the SDK reports that the assistant turn started, then
+cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
 responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
 `🟢` when approved or `🚫` when denied, without a separate Permission section. Prompts submitted
 while Copilot is busy stay in a FIFO pane between
 the conversation and input. That pane supports pausing, editing, and cancelling before dispatch.
+Every dispatched SDK message uses immediate delivery so it can steer an interaction that still has
+tracked background work instead of waiting behind that work's completion notification.
 Slash commands are rendered as normal `👨` turns rather than duplicated `[command]` rows; their
 text output remains under `🤖`, and any work they start is represented by the resulting
 task, tool, environment, or schedule rows. Use `/tasks` or

@@ -1121,7 +1121,7 @@ export class CopilotRuntime {
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
     try {
-      const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "enqueue" });
+      const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "immediate" });
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
@@ -3142,7 +3142,7 @@ export class CopilotRuntime {
     const id = randomUUID();
     this.db.enqueueMessage(id, runId, "user", live.memberId, "user", content);
     try {
-      const sdkMessageId = await live.session.send({ prompt: content, mode: "enqueue" });
+      const sdkMessageId = await live.session.send({ prompt: content, mode: "immediate" });
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
@@ -3178,7 +3178,7 @@ export class CopilotRuntime {
         "Process this durable message from another fleet member. Respond or act as appropriate, " +
         "and use the relevant send_to_<agent> tool if another member needs a direct answer.";
       try {
-        await live.session.send({ prompt, mode: "enqueue" });
+        await live.session.send({ prompt, mode: "immediate" });
         this.db.completeMessage(message.id);
         this.emit(
           "mailbox.delivered",

@@ -259,7 +259,10 @@ local function fail_prompt(request_id, detail)
   if state.active_prompts[member_id] == request_id then
     state.active_prompts[member_id] = nil
   end
-  buffers.fail_response(member_id, detail or 'Prompt submission failed')
+  local failure = detail or 'Prompt submission failed'
+  if not buffers.fail_response(member_id, failure) then
+    buffers.append_activity_block(member_id, 'Error', failure)
+  end
   dispatch_next_prompt(member_id)
 end
 
@@ -321,7 +324,6 @@ local function dispatch_prompt(member_id, content)
   if not request_id then return false end
   state.prompt_calls[request_id] = { member_id = member_id }
   state.active_prompts[member_id] = request_id
-  buffers.begin_response(member_id, request_id)
   return true
 end
 
@@ -2973,7 +2975,6 @@ function M._on_event(message)
       payload.eventId or message.id
     )
     buffers.append_block(member_id, 'conversation', 'You', content)
-    buffers.begin_response(member_id, 'scheduled:' .. tostring(payload.eventId or message.id))
   elseif message.type == 'prompt.queued' then
     -- Runtime acknowledgement; locally queued prompts are not sent until they reach the FIFO head.
   elseif message.type == 'prompt.failed' then
@@ -2989,7 +2990,7 @@ function M._on_event(message)
         or nil,
     }, message.id)
   elseif message.type == 'prompt.accepted' then
-    -- The user turn is rendered immediately on submission so queued work is visible without delay.
+    -- The user turn is rendered immediately; writing starts only with the SDK turn-start event.
   elseif message.type == 'conversation.delta' then
     buffers.append_conversation_delta(member_id, payload.messageId or message.id, payload.content or '')
   elseif message.type == 'conversation.message' then

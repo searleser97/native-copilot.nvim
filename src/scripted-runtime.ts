@@ -352,6 +352,12 @@ export class ScriptedRuntime implements RuntimeAdapter {
       void this.reasoningFolds(target);
     } else if (content.includes("Run a harmless PowerShell command")) {
       this.permission(target);
+    } else if (content.includes("Delay the assistant turn start")) {
+      void delay(150).then(() => {
+        this.emitBusy(target, `turn-${id}`);
+        this.emitMessage(target, `message-${id}`, "The delayed assistant turn started normally.");
+        this.emitIdle(target);
+      });
     } else {
       this.emitBusy(target, `turn-${id}`);
       this.emitMessage(target, `message-${id}`, `SCRIPTED-REPLY: ${content}`);

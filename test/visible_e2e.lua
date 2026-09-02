@@ -287,6 +287,28 @@ tick = function()
         },
       },
     })
+    submit('Delay the assistant turn start so the pending UI can be checked.')
+    local pending_content = text(buf)
+    if not check(
+      pending_content:find('Delay the assistant turn start', 1, true)
+        and not pending_content:find('🤖 · writing', 1, true),
+      'prompt submission waited for SDK turn start before showing writing'
+    ) then
+      return
+    end
+    phase = 'delayed-turn-start'
+    schedule_tick()
+  elseif phase == 'delayed-turn-start' then
+    if not content:find('The delayed assistant turn started normally.', 1, true) then
+      schedule_tick()
+      return
+    end
+    if not check(
+      content:find('🤖 · ', 1, true) and not content:find('🤖 · writing', 1, true),
+      'delayed SDK turn completed without leaving a writing indicator'
+    ) then
+      return
+    end
     local insert_submitted = submit(
       'Run a background workspace validation and keep explaining while it finishes.',
       '<C-s>',
