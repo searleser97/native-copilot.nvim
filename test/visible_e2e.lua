@@ -339,7 +339,7 @@ tick = function()
     local steering_prompt = content:find('Steer the active foreground turn now.', 1, true)
     local steering_reply = steering_prompt
       and content:find(
-        'The foreground turn accepted the steering prompt immediately.',
+        'SCRIPTED-REPLY: Steer the active foreground turn now.',
         steering_prompt,
         true
       )
