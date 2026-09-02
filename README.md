@@ -411,8 +411,9 @@ divider and adds another before the first newly rendered item after midnight.
 `conversation.day_header_format` controls that divider without repeating the date on every row.
 Shell Tool rows update in place and omit their native call ID while they remain ordinary synchronous
 invocations. When an SDK Task is correlated with a Tool, that original row gains the concrete Task
-ID at the end of the row and the latest background metadata in its detail pane; the redundant native
-Tool call ID remains hidden. Non-clickable lifecycle notices render as Task-authored messages and
+ID at the end of the row and the latest background metadata in its detail pane. Native Tool call IDs
+remain internal for every Tool row; extmark metadata preserves clickability without displaying them.
+Non-clickable lifecycle notices render as Task-authored messages and
 use the concrete runtime identity, such as `shell_cmd_<shell-id>` or `agent_<agent-id>`, without a
 status icon. A transition from `executionMode: "sync"` to
 `executionMode: "background"` produces a separate `moved to background` notice; no transition is
@@ -422,8 +423,6 @@ A shell ID returned by a completed synchronous invocation remains visible for lo
 by itself keep the Tool row in the running state. Likewise, a `running` Task snapshot with
 `executionMode: "sync"` does not override a terminal Tool event; Task status becomes authoritative
 only after the shell is explicitly asynchronous or background-managed.
-Observer Tools such as `read_powershell`, `stop_powershell`, and `read_agent` never expose their
-internal Tool call IDs merely because their arguments or results reference a managed task.
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
 Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific

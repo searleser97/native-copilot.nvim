@@ -67,22 +67,21 @@ without also displaying the actor emoji. Keep the emoji on full `Task` participa
 
 - Compact task start rows do not include the actor emoji.
 - Full task completion, failure, and cancellation participant headers retain the Task actor emoji.
-- Task status indicators and correlation identifiers remain unchanged.
+- Task-authored lifecycle messages omit redundant status indicators and retain runtime identifiers.
 
 ### NC-005: Standardize lifecycle event labels
 
 **Status:** Completed
 
-Use concise searchable identifiers for correlated lifecycle events. Asynchronous Tool rows use the
-native call ID directly, related Task rows use `[task_<tool-call-id>]`, and standalone Tasks use a
-deterministic `[task_<hash>]` display ID. Ordinary synchronous Tools omit IDs because their
-lifecycle updates in place. Other event kinds retain their typed identifier format. Do not
-surround event labels with Markdown `**` markers.
+Use concise searchable identifiers for correlated lifecycle events. Native Tool call IDs remain
+internal because Tool rows are clickable through extmark metadata. Managed Tasks use concrete
+runtime identities such as `[shell_cmd_<shell-id>]` and `[agent_<agent-id>]`. Other event kinds
+retain their typed identifier format. Do not surround event labels with Markdown `**` markers.
 
 **Acceptance criteria**
 
-- Correlated rows render identifiers such as `[task_a94a8fe5ccb19ba6]`, `[toolu_123]`, and
-  `[schedule][41]`.
+- Correlated rows render identifiers such as `[shell_cmd_2]`, `[agent_cli-reviewer]`, and
+  `[schedule][41]`; Tool rows never expose `[toolu_...]`.
 - Synthetic `#T-`, `#C-`, and `#S-` prefixes are removed.
 - Lifecycle event labels are not wrapped in Markdown bold markers.
 - Start and terminal events display the same runtime identifier.

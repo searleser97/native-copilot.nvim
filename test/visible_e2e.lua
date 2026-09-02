@@ -95,10 +95,6 @@ local function line_at(content, offset)
   return content:sub(start, finish - 1)
 end
 
-local function tool_marker(id)
-  return '[' .. id .. ']'
-end
-
 local function task_marker(id, task_type)
   return ('[%s_%s]'):format(task_type or 'shell_cmd', id)
 end
@@ -431,7 +427,7 @@ tick = function()
     )
     if not check(
       not background_tool_line:find('[e2e-async-shell]', 1, true),
-      'correlated background shell hides its redundant Tool call ID'
+      'background shell hides its internal Tool call ID'
     ) then
       return
     end
@@ -648,7 +644,7 @@ tick = function()
     local reader_line = line_at(content, tool_row)
     if not check(
       not reader_line:find('[e2e-reasoning-tool]', 1, true),
-      'read_powershell hides its internal Tool call ID'
+      'Tool timeline rows hide internal Tool call IDs'
     ) then
       return
     end

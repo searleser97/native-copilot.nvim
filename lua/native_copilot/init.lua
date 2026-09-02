@@ -832,33 +832,6 @@ local function shell_tool(name)
     or name == 'local-shell'
 end
 
-local function task_observer_tool(name)
-  name = tostring(name or ''):lower()
-  return name == 'read_powershell'
-    or name == 'stop_powershell'
-    or name == 'read_agent'
-end
-
-local function result_has_async_handle(value)
-  value = json_value(value)
-  if type(value) ~= 'table' then return false end
-  for key, nested in pairs(value) do
-    if key == 'agent_id'
-      or key == 'agentId'
-      or key == 'run_id'
-      or key == 'runId'
-      or key == 'shell_id'
-      or key == 'shellId'
-      or key == 'task_id'
-      or key == 'taskId'
-    then
-      return json_value(nested) ~= nil
-    end
-    if type(nested) == 'table' and result_has_async_handle(nested) then return true end
-  end
-  return false
-end
-
 local function render_shell_tool_call(member_id, item)
   local candidate = type(item.background_task) == 'table' and item.background_task or nil
   local task = candidate
@@ -928,19 +901,6 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       or json_value(arguments.detach) == true
     )
   item.async = item.async or async_mode
-  local normalized_name = tostring(item.name or ''):lower()
-  local observes_task = task_observer_tool(item.name)
-  item.correlated = item.correlated
-    or (
-      not observes_task
-      and (
-        item.async
-        or shell_tool(item.name)
-        or normalized_name == 'task'
-        or normalized_name == 'run_factory'
-        or result_has_async_handle(item.details.result)
-      )
-    )
   if shell_tool(item.name) and status == 'completed' then
     local function shell_id(value)
       value = json_value(value)
@@ -970,8 +930,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
     end
     buffers.upsert_timeline(member_id, item.timeline_id, {
       kind = 'tool',
-      identifier = item.correlated and not observes_task and call_id or nil,
-      show_identifier = item.correlated and not observes_task,
+      show_identifier = false,
       label = item.name,
       status = status,
       detail = tool_timeline_detail(item.name, item.details.arguments, status),
