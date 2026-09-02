@@ -760,7 +760,11 @@ tick = function()
       'Review the workspace validation and report only actionable findings.'
     if not check(
       occurrence_count(content, subagent_prompt) == 1
-        and (line_containing(content, subagent_prompt) or ''):find('[tool]', 1, true),
+        and (line_containing(content, subagent_prompt) or ''):find(
+          '[cli-review-tool]',
+          1,
+          true
+        ),
       '/resume rendered the initial sub-agent prompt once in the task tool details'
     ) then
       finish()
@@ -770,7 +774,11 @@ tick = function()
       'Also verify that the validation result includes the constrained layout.'
     if not check(
       occurrence_count(content, followup_prompt) == 1
-        and (line_containing(content, followup_prompt) or ''):find('[tool]', 1, true),
+        and (line_containing(content, followup_prompt) or ''):find(
+          '[cli-write-reviewer]',
+          1,
+          true
+        ),
       '/resume rendered a running sub-agent follow-up in write_agent tool details'
     ) then
       finish()

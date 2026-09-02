@@ -401,6 +401,9 @@ when the response completes. Reasoning summaries omit timestamps. Customize the 
 with `timestamp_format`, using an `os.date` format string. The conversation starts with a local-date
 divider and adds another before the first newly rendered item after midnight.
 `conversation.day_header_format` controls that divider without repeating the date on every row.
+Tool rows use their native call ID as one searchable token, while Task rows use a deterministic
+`task_<hash>` display ID instead of short session-local task handles. Canonical Task IDs remain
+available in activity details and are still used for progress and cancellation operations.
 The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
 session. Both values refresh from SDK usage events after every model call.
 

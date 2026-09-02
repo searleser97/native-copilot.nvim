@@ -807,8 +807,15 @@ local function timeline_lines(item, now)
   local prefix = (kind == 'environment' or kind == 'instruction') and ''
     or compact_lifecycle and content_indent
     or (quote_indent .. ' ')
-  local identity = item.identifier ~= nil
-      and ('[%s][%s]'):format(kind, tostring(item.identifier):gsub('[\r\n]+', ' '))
+  local identifier = item.identifier ~= nil
+      and tostring(item.identifier):gsub('[\r\n]+', ' ')
+    or nil
+  local identity = identifier
+      and (
+        (kind == 'task' or kind == 'tool')
+          and ('[%s]'):format(identifier)
+        or ('[%s][%s]'):format(kind, identifier)
+      )
     or ('[%s]'):format(kind)
   local event = item.event and (tostring(item.event) .. ' · ') or ''
   if item.actor_message then
@@ -1157,10 +1164,14 @@ function M.timeline_item_at_cursor(buf, row)
       for _, record in pairs(view.timeline) do
         local item = record.item
         local marker = item and tostring(item.label or '') or nil
+        local identifier = item and item.identifier ~= nil and tostring(item.identifier) or nil
         if marker
           and marker ~= ''
           and line:find(marker, 1, true)
-          and line:find('[' .. tostring(item.kind or 'activity'), 1, true)
+          and (
+            (identifier and line:find('[' .. identifier .. ']', 1, true))
+            or line:find('[' .. tostring(item.kind or 'activity'), 1, true)
+          )
         then
           local distance = math.abs((record.start_row or zero_row) - zero_row)
           if not nearest_distance or distance < nearest_distance then

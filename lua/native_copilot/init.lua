@@ -687,11 +687,20 @@ local function task_terminal_detail(task, status)
   end
 end
 
+local function task_display_identifier(member_id, task)
+  local source = json_value(task.toolCallId)
+    or json_value(task.tool_call_id)
+    or json_value(task.id)
+    or 'unknown'
+  local digest = vim.fn.sha256(('%s\0%s'):format(member_id or 'standard', tostring(source)))
+  return 'task_' .. digest:sub(1, 16)
+end
+
 local function emit_task_event(member_id, task, event)
   local status = json_value(task.status) or 'idle'
   buffers.upsert_timeline(member_id, ('task:%s:%s'):format(task.id, event), {
     kind = 'task',
-    identifier = task.id,
+    identifier = task_display_identifier(member_id, task),
     event = event,
     label = ('[%s] %s'):format(
       json_value(task.type) or 'task',
@@ -913,7 +922,7 @@ local function claim_async_shell_tool(member_id, task)
   fallback.task_id = task.id
   buffers.upsert_timeline(member_id, fallback.timeline_id, {
     kind = 'task',
-    identifier = task.id,
+    identifier = task_display_identifier(member_id, task),
     event = 'started',
     label = ('[shell] %s'):format(task_description(task)),
     status = 'completed',
@@ -2140,6 +2149,7 @@ local function history_event(member_id, event, context)
     local arguments = context.tool_arguments[tostring(data.toolCallId or '')]
     history_task(member_id, {
       id = tostring(event.agentId or data.toolCallId or event.id),
+      toolCallId = data.toolCallId,
       type = data.agentName or 'agent',
       description = data.agentDescription or data.agentDisplayName or 'Background agent',
       prompt = agent_tool_prompt('task', arguments),
@@ -2148,6 +2158,7 @@ local function history_event(member_id, event, context)
   elseif event.type == 'subagent.completed' or event.type == 'subagent.failed' then
     history_task(member_id, {
       id = tostring(event.agentId or data.toolCallId or event.id),
+      toolCallId = data.toolCallId,
       type = data.agentName or 'agent',
       error = data.error,
     }, event.type == 'subagent.failed' and 'failed'

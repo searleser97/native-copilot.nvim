@@ -60,8 +60,8 @@ block instead of appearing after the first user message.
 
 **Status:** Completed
 
-Compact task rows should use their status indicator and `[task][<runtime-id>]` identifier without
-also displaying the actor emoji. Keep the emoji on full `Task` participant headers.
+Compact task rows should use their status indicator and searchable `[task_<hash>]` identifier
+without also displaying the actor emoji. Keep the emoji on full `Task` participant headers.
 
 **Acceptance criteria**
 
@@ -73,13 +73,13 @@ also displaying the actor emoji. Keep the emoji on full `Task` participant heade
 
 **Status:** Completed
 
-Use a shared `[type][<runtime-id>]` format for task, tool, schedule, and other correlated lifecycle
-events. Remove synthetic identifier prefixes such as `#T-`, `#C-`, and `#S-`, and do not surround
-event labels with Markdown `**` markers.
+Use concise searchable identifiers for correlated lifecycle events. Tool rows use the native call
+ID directly, Task rows use a deterministic `[task_<hash>]` display ID, and other event kinds retain
+their typed identifier format. Do not surround event labels with Markdown `**` markers.
 
 **Acceptance criteria**
 
-- Correlated rows render identifiers such as `[task][0]`, `[tool][toolu_123]`, and
+- Correlated rows render identifiers such as `[task_a94a8fe5ccb19ba6]`, `[toolu_123]`, and
   `[schedule][41]`.
 - Synthetic `#T-`, `#C-`, and `#S-` prefixes are removed.
 - Lifecycle event labels are not wrapped in Markdown bold markers.
