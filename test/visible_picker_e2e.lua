@@ -167,6 +167,13 @@ local function has_quoted_environment(content)
   return false
 end
 
+local function has_quoted_instruction(content)
+  for line in content:gmatch('[^\n]+') do
+    if line:match('^%s*>%s+.*%[instruction%]') then return true end
+  end
+  return false
+end
+
 local function line_containing(content, needle)
   local lines = vim.split(content, '\n', { plain = true })
   for _, line in ipairs(lines) do
@@ -358,6 +365,14 @@ tick = function()
     if not check(
       not has_quoted_environment(content),
       'environment rows rendered without blockquote markers'
+    ) then
+      finish()
+      return
+    end
+    if not check(
+      content:find('[instruction] Live repository instructions', 1, true)
+        and not has_quoted_instruction(content),
+      'live instruction discovery used the unquoted instruction timeline'
     ) then
       finish()
       return
@@ -764,6 +779,14 @@ tick = function()
     if not check(
       not content:find('SUBAGENT INTERNAL RESPONSE MUST NOT RENDER AS STANDARD COPILOT', 1, true),
       '/resume kept sub-agent internal responses out of the root Copilot transcript'
+    ) then
+      finish()
+      return
+    end
+    if not check(
+      content:find('[instruction] Repository instructions', 1, true)
+        and not has_quoted_instruction(content),
+      '/resume restored instruction discovery without blockquote markers'
     ) then
       finish()
       return

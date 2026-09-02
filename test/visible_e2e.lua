@@ -87,6 +87,13 @@ local function has_quoted_environment(content)
   return false
 end
 
+local function has_quoted_instruction(content)
+  for line in content:gmatch('[^\n]+') do
+    if line:match('^%s*>%s+.*%[instruction%]') then return true end
+  end
+  return false
+end
+
 local function pass(label)
   results[#results + 1] = 'PASS ' .. label
 end
@@ -178,6 +185,13 @@ tick = function()
     if not check(
       not has_quoted_environment(content),
       'environment rows rendered without blockquote markers'
+    ) then
+      return
+    end
+    if not check(
+      content:find('[instruction] Live repository instructions', 1, true)
+        and not has_quoted_instruction(content),
+      'live instruction discovery used the unquoted instruction timeline'
     ) then
       return
     end
@@ -594,6 +608,12 @@ tick = function()
     if not check(
       not content:find('DUPLICATE EPHEMERAL CONTENT', 1, true),
       'CLI session replay omitted ephemeral streaming deltas'
+    ) then
+      return
+    end
+    if not check(
+      not has_quoted_instruction(content),
+      'CLI session replay rendered instruction discovery without blockquote markers'
     ) then
       return
     end

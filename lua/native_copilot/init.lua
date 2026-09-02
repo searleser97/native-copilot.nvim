@@ -2021,6 +2021,16 @@ local function history_task(member_id, task, status, event_time)
   merge_tasks(member_id, { task })
 end
 
+local function render_instruction_notification(member_id, event_id, kind, event_time)
+  buffers.upsert_timeline(member_id, 'instruction:' .. tostring(event_id), {
+    kind = 'instruction',
+    label = kind.description or kind.sourcePath or 'Instruction discovered',
+    status = 'completed',
+    detail = kind.triggerFile,
+    created_at = event_time,
+  })
+end
+
 local function history_notification(member_id, event, event_time)
   local data = type(event.data) == 'table' and event.data or {}
   local kind = type(data.kind) == 'table' and data.kind or {}
@@ -2051,24 +2061,21 @@ local function history_notification(member_id, event, event_time)
       error = kind.error,
     }, kind.status == 'failed' and 'failed' or 'completed', event_time)
   elseif kind.type == 'instruction_discovered' then
-    buffers.upsert_timeline(member_id, 'history-notification:' .. tostring(event.id), {
-      kind = 'instruction',
-      label = kind.description or kind.sourcePath or 'Instruction discovered',
-      status = 'completed',
-      detail = kind.triggerFile,
-      created_at = event_time,
-    })
+    render_instruction_notification(member_id, event.id, kind, event_time)
   elseif kind.type == 'new_inbox_message' then
     buffers.append_activity_block(
       member_id,
       'Inbox message',
-      kind.summary or ('New message from ' .. tostring(kind.senderName or 'another participant'))
+      kind.summary or ('New message from ' .. tostring(kind.senderName or 'another participant')),
+      event_time
     )
   elseif type(data.content) == 'string' and data.content ~= '' then
     local content = data.content
       :gsub('^%s*<system_notification>%s*', '')
       :gsub('%s*</system_notification>%s*$', '')
-    if content ~= '' then buffers.append_activity_block(member_id, 'System notification', content) end
+    if content ~= '' then
+      buffers.append_activity_block(member_id, 'System notification', content, event_time)
+    end
   end
 end
 
@@ -2940,6 +2947,16 @@ function M._on_event(message)
       member_id,
       payload.reasoningId or message.id,
       payload.content or ''
+    )
+  elseif message.type == 'system.notification' then
+    local event_timestamp = tonumber(json_value(payload.eventTimestamp))
+    history_notification(
+      member_id,
+      {
+        id = payload.eventId or message.id,
+        data = payload,
+      },
+      event_timestamp and math.floor(event_timestamp / 1000) or nil
     )
   elseif message.type == 'activity.event' then
     local event_type = payload.eventType or 'activity'

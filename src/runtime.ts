@@ -1965,6 +1965,17 @@ export class CopilotRuntime {
       case "session.error":
         this.emit("member.error", event.data, { ...fields, target: "activity", done: true });
         break;
+      case "system.notification":
+        this.emit(
+          "system.notification",
+          {
+            ...event.data,
+            eventId: event.id,
+            eventTimestamp: Date.parse(event.timestamp),
+          },
+          { ...fields, target: "activity", done: true },
+        );
+        break;
       case "tool.execution_start":
       case "tool.execution_complete":
       case "assistant.intent":

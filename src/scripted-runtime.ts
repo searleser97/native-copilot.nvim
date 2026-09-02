@@ -288,6 +288,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
         component,
         items: Array.from({ length: count }, (_, index) => ({ name: `${component}-${index}` })),
       }, { memberId: target, target: "status", done: true });
+      if (component === "Instructions") {
+        this.emit("system.notification", {
+          eventId: `e2e-live-instruction-${randomUUID()}`,
+          eventTimestamp: Date.now(),
+          kind: {
+            type: "instruction_discovered",
+            description: "Live repository instructions",
+            sourcePath: ".github/copilot-instructions.md",
+            triggerFile: "src/main.ts",
+            triggerTool: "view",
+          },
+        }, { memberId: target, target: "activity", done: true });
+      }
       await observationPause(250);
     }
     const mcpItems = this.profile === "allow-all"

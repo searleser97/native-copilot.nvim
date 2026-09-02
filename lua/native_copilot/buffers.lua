@@ -716,7 +716,7 @@ local function timeline_lines(item, now)
   detail = detail and tostring(detail):gsub('[\r\n]+', ' ') or nil
   local suffix = detail and detail ~= '' and (' — ' .. detail) or ''
   local compact_lifecycle = not item.actor_message and (kind == 'task' or kind == 'tool')
-  local prefix = kind == 'environment' and ''
+  local prefix = (kind == 'environment' or kind == 'instruction') and ''
     or compact_lifecycle and content_indent
     or (quote_indent .. ' ')
   local identity = item.identifier ~= nil
