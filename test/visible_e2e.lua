@@ -368,6 +368,9 @@ tick = function()
     phase = 'task'
     schedule_tick()
   elseif phase == 'task' then
+    local create_row = content:find('🟢 create — src/generated.ts', 1, true)
+    local edit_row = create_row
+      and content:find('🟢 edit — src/existing.ts', create_row, true)
     local stream_begin =
       content:find('I started the workspace validation in the background.', 1, true)
     local stream_end = content:find('without splitting this message.', stream_begin or 1, true)
@@ -377,8 +380,14 @@ tick = function()
         stream_end or 1,
         true
       )
-    if not (stream_begin and stream_end and task_complete) then
+    if not (create_row and edit_row and stream_begin and stream_end and task_complete) then
       schedule_tick()
+      return
+    end
+    if not check(
+      create_row < edit_row and edit_row < stream_begin,
+      'create and edit Tools show their target paths'
+    ) then
       return
     end
     if not check(stream_begin < stream_end and stream_end < task_complete, 'task completion deferred after reply') then
@@ -475,18 +484,8 @@ tick = function()
         tool_row,
         true
       )
-    local create_row = tool_row
-      and content:find('🟢 create — src/generated.ts', tool_row, true)
-    local edit_row = create_row
-      and content:find('🟢 edit — src/existing.ts', create_row, true)
-    if not (copilot_header and tool_row and create_row and edit_row and reply) then
+    if not (copilot_header and tool_row and reply) then
       schedule_tick()
-      return
-    end
-    if not check(
-      tool_row < create_row and create_row < edit_row and edit_row < reply,
-      'create and edit Tools show their target paths'
-    ) then
       return
     end
     if not check(
