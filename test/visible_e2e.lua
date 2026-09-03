@@ -24,6 +24,7 @@ local manual_scroll_cursor
 local conversation_height_before_scroll
 local reasoning_cursor
 local followed_cursor
+local processing_result_winbar_seen = false
 local completed = false
 local tick
 
@@ -48,6 +49,15 @@ native._on_event = function(message)
   if not ok then
     append_trace({ 'event_error=' .. tostring(failure):gsub('\n', '\\n') })
     error(failure)
+  end
+  local payload = message.payload or {}
+  if message.type == 'activity.event' and payload.eventType == 'tool.execution_complete' then
+    local entry = buffers.get_member(message.memberId or 'standard')
+    local windows = entry and vim.fn.win_findbuf(entry.views.conversation.buf) or {}
+    local winbar = #windows > 0 and vim.wo[windows[1]].winbar or ''
+    processing_result_winbar_seen =
+      processing_result_winbar_seen
+      or winbar:find('Status: Processing result · 0s', 1, true) ~= nil
   end
 end
 
@@ -572,25 +582,6 @@ tick = function()
     ) then
       return
     end
-    phase = 'tool-processing'
-    schedule_tick()
-  elseif phase == 'tool-processing' then
-    local tool_row =
-      content:find('powershell — Read completed validation output and summarize only the final status', 1, true)
-    local reply =
-      content:find('The background validation completed successfully with exit code 0.', 1, true)
-    if not tool_row or reply then
-      schedule_tick()
-      return
-    end
-    local conversation_windows = vim.fn.win_findbuf(buf)
-    local winbar = #conversation_windows > 0 and vim.wo[conversation_windows[1]].winbar or ''
-    if not check(
-      winbar:find('Status: Processing result · 0s', 1, true) ~= nil,
-      'winbar reports Copilot processing a completed Tool result'
-    ) then
-      return
-    end
     phase = 'tool'
     schedule_tick()
   elseif phase == 'tool' then
@@ -611,6 +602,12 @@ tick = function()
       )
     if not (copilot_header and tool_row and reply) then
       schedule_tick()
+      return
+    end
+    if not check(
+      processing_result_winbar_seen,
+      'winbar reports Copilot processing a completed Tool result'
+    ) then
       return
     end
     if not check(
