@@ -137,7 +137,7 @@ local function actor_sign_before(buf, needle)
   end
 end
 
-local function has_status_sign_on_empty_line(buf)
+local function has_sign_on_empty_line(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local marks = vim.api.nvim_buf_get_extmarks(
     buf,
@@ -150,12 +150,7 @@ local function has_status_sign_on_empty_line(buf)
     local details = mark[4] or {}
     local line = lines[mark[2] + 1] or ''
     local sign = details.sign_text and vim.trim(details.sign_text) or nil
-    if
-      (sign == '●' or sign == '✓' or sign == '✕' or sign == '○' or sign == '!' or sign == '?')
-      and line:match('^%s*$')
-    then
-      return true
-    end
+    if sign and line:match('^%s*$') then return true end
   end
   return false
 end
@@ -271,6 +266,12 @@ tick = function()
         and session_id < first_environment
         and content:find('\n\n[SessionId][e2e-standard-session]', 1, true),
       'new sessions rendered a separated identity marker before environment rows'
+    ) then
+      return
+    end
+    if not check(
+      not has_sign_on_empty_line(buf),
+      'environment lifecycle signs remained on their owning rows'
     ) then
       return
     end
@@ -916,7 +917,7 @@ tick = function()
     end
     if not check(
       not content:find('[permission]', 1, true)
-        and not has_status_sign_on_empty_line(buf),
+        and not has_sign_on_empty_line(buf),
       'interactive permission row and sign are removed after the decision'
     ) then
       return

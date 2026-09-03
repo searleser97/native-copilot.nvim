@@ -564,6 +564,7 @@ local function highlight_header(buf, row, line, group, sign)
     vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, 0, {
       sign_text = sign,
       sign_hl_group = group,
+      right_gravity = false,
       priority = 210,
     })
   end
@@ -1196,18 +1197,36 @@ function M.upsert_timeline(member_id, item_id, item)
       actor_kind == 'task' and '📝' or '💬'
     )
   end
+  local sign_text = actor_status_sign or (status_sign and status_sign.text or nil)
+  local sign_highlight = actor_status_sign and 'NativeCopilotActorHeader'
+    or (status_sign and status_sign.highlight or nil)
   record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
     id = record.extmark,
     end_row = start_row + #lines,
     end_col = 0,
     hl_group = timeline_highlight,
     hl_eol = timeline_highlight ~= nil,
-    sign_text = actor_status_sign or (status_sign and status_sign.text or nil),
-    sign_hl_group = actor_status_sign and 'NativeCopilotActorHeader'
-      or (status_sign and status_sign.highlight or nil),
-    right_gravity = true,
+    right_gravity = false,
     end_right_gravity = false,
   })
+  if sign_text then
+    record.sign_extmark = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      timeline_namespace,
+      start_row,
+      0,
+      {
+        id = record.sign_extmark,
+        sign_text = sign_text,
+        sign_hl_group = sign_highlight,
+        right_gravity = false,
+        priority = 210,
+      }
+    )
+  elseif record.sign_extmark then
+    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_extmark)
+    record.sign_extmark = nil
+  end
   record.line_count = #lines
   record.start_row = start_row
   record.created_at = record.created_at or now
@@ -1254,6 +1273,9 @@ function M.remove_timeline(member_id, item_id)
     { details = true }
   )
   pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.extmark)
+  if record.sign_extmark then
+    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_extmark)
+  end
   if record.item and record.item.kind == 'environment' then
     local rows = {}
     for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
