@@ -1270,6 +1270,9 @@ export class CopilotRuntime {
         this.pendingPermissions.set(pending.requestId, {
           target: live.target,
           respond: (result) => {
+            if (result.kind === "no-result") {
+              return;
+            }
             void live.session.rpc.permissions
               .handlePendingPermissionRequest({ requestId: pending.requestId, result })
               .catch((error: unknown) => {
