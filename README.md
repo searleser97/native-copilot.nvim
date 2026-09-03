@@ -173,8 +173,9 @@ instruction files such as `CLAUDE.md` visible without opening details. Other arg
 for failed tools and tasks. The active Copilot heading begins only after the SDK reports that the assistant turn started, then
 cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
-responses retain a failed gutter sign. Permission requests use a running gutter sign that updates
-to completed when approved or denied when rejected, without a separate Permission section. Normal prompt
+responses retain a failed gutter sign. Permission requests use a transient running gutter row while
+the picker is open; the row is removed after the user approves or rejects it and is not restored
+from session history. Normal prompt
 submission always uses immediate SDK delivery, including while Copilot is busy, so it can steer the
 active interaction. Press `<C-q>` to place a prompt explicitly in the FIFO pane instead; that pane
 supports pausing, editing, and cancelling before dispatch.

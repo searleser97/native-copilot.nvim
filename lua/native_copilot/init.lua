@@ -1926,15 +1926,7 @@ local function show_next_permission()
       requestId = pending.requestId,
       approved = approved,
     })
-    buffers.upsert_timeline(pending.member_id, pending.timeline_id, {
-      kind = 'permission',
-      label = pending.kind,
-      status = approved and 'completed' or 'denied',
-      detail = ('%s: %s'):format(
-        approved and 'approved once' or 'denied',
-        pending.detail
-      ),
-    })
+    buffers.remove_timeline(pending.member_id, pending.timeline_id)
     state.permission_prompt_open = false
     vim.schedule(show_next_permission)
   end)
@@ -2271,26 +2263,6 @@ local function history_event(member_id, event, context)
       or 'completed', event_time)
   elseif event.type == 'system.notification' then
     history_notification(member_id, event, event_time)
-  elseif event.type == 'permission.requested' then
-    context.permissions[tostring(data.requestId or event.id)] = data.permissionRequest or {}
-  elseif event.type == 'permission.completed' then
-    local request_id = tostring(data.requestId or '')
-    local request = context.permissions[request_id]
-    if request then
-      local result = type(data.result) == 'table' and data.result or {}
-      local approved = result.kind == 'approved' or result.kind == 'approved-for-session'
-      buffers.upsert_timeline(member_id, 'permission:' .. request_id, {
-        kind = 'permission',
-        label = request.kind or 'tool',
-        status = approved and 'completed' or 'denied',
-        detail = ('%s: %s'):format(
-          approved and 'approved' or 'denied',
-          tostring(permission_detail(request))
-        ),
-        created_at = event_time,
-      })
-      context.permissions[request_id] = nil
-    end
   elseif event.type == 'session.schedule_created' then
     update_schedule(member_id, data.id, 'created', data, event.id, event_time)
   elseif event.type == 'session.schedule_cancelled' then
@@ -3012,7 +2984,6 @@ function M._on_event(message)
       first_timestamp and math.floor(first_timestamp / 1000) or nil
     )
     local context = {
-      permissions = {},
       agent_messages = {},
       agent_tool_prompts = {},
       tool_arguments = {},

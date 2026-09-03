@@ -845,18 +845,16 @@ tick = function()
       resume_cli_session()
     end
   elseif phase == 'permission' then
-    if not (
-      content:find(
-        "[permission] shell — approved once: Write-Output 'observation approved'",
-        1,
-        true
-      )
-      and content:find('The approved PowerShell command completed successfully.', 1, true)
-    ) then
+    if not content:find('The approved PowerShell command completed successfully.', 1, true) then
       schedule_tick()
       return
     end
-    if not check(true, 'interactive permission approved through visible picker') then return end
+    if not check(
+      not content:find('[permission]', 1, true),
+      'interactive permission is removed from the transcript after the decision'
+    ) then
+      return
+    end
     resume_cli_session()
   elseif phase == 'resume' then
     local user_message =
@@ -867,12 +865,10 @@ tick = function()
       and content:find('glob', reasoning, true)
     local instruction = tool_row
       and content:find('[instruction] Repository instructions', tool_row, true)
-    local permission = instruction
-      and content:find('[permission] shell — approved: npm run check', instruction, true)
-    local first_reply = permission
+    local first_reply = instruction
       and content:find(
         'The workspace contains both the TypeScript host and the Neovim Lua client.',
-        permission,
+        instruction,
         true
       )
     local task_start = first_reply
@@ -913,7 +909,6 @@ tick = function()
       and first_reply
       and task_start
       and task_complete
-      and permission
       and second_user
       and schedule_created
       and schedule_cancelled
@@ -953,8 +948,7 @@ tick = function()
       user_message < reasoning
         and reasoning < tool_row
         and tool_row < instruction
-        and instruction < permission
-        and permission < first_reply
+        and instruction < first_reply
         and first_reply < task_start
         and task_start < task_complete
         and task_complete < second_user
