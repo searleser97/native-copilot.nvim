@@ -1059,7 +1059,7 @@ tick = function()
       session_id
         and tools
         and session_id < tools
-        and content:sub(agent_task, session_id):find(
+        and content:sub(agent_task, tools):find(
           '\n\n[SessionId][e2e-cli-session]',
           1,
           true
