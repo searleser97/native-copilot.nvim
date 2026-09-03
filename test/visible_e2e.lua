@@ -539,8 +539,8 @@ tick = function()
     if not check(
       tool_sign == '✓'
         and tool_sign_hl == 'NativeCopilotStatusCompleted'
-        and tool_number_hl == 'NativeCopilotStatusCompleted',
-      'completed Tool uses the colored completed gutter sign'
+        and tool_number_hl == nil,
+      'completed Tool colors only its gutter sign'
     ) then
       return
     end

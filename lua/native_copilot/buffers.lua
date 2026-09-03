@@ -1165,7 +1165,6 @@ function M.upsert_timeline(member_id, item_id, item)
     hl_eol = timeline_highlight ~= nil,
     sign_text = status_sign and status_sign.text or nil,
     sign_hl_group = status_sign and status_sign.highlight or nil,
-    number_hl_group = status_sign and status_sign.highlight or nil,
     right_gravity = true,
     end_right_gravity = false,
   })

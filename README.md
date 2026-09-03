@@ -160,9 +160,9 @@ The conversation is also the chronological activity timeline. Background tasks, 
 initialization, foreground tools, schedules, and permission decisions appear as compact timeline
 rows. Environment rows are unquoted. Lifecycle status appears in a one-cell Neovim sign column:
 yellow/orange `●` is processing or waiting, green `✓` completed or approved, red `✕` failed,
-gray/blue `○` cancelled, red `!` denied, and `?` unknown. Signs and enabled line numbers use
-matching theme-aware diagnostic colors. Each row keeps a stable position and updates in place, so
-completion does not reorder earlier work.
+gray/blue `○` cancelled, red `!` denied, and `?` unknown. Signs use theme-aware diagnostic colors
+while line numbers retain their normal highlight. Each row keeps a stable position and updates in
+place, so completion does not reorder earlier work.
 
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
