@@ -110,7 +110,7 @@ local function status_sign_at(buf, needle)
       for _, mark in ipairs(marks) do
         local details = mark[4] or {}
         if details.sign_text then
-          return details.sign_text, details.sign_hl_group, details.number_hl_group
+          return vim.trim(details.sign_text), details.sign_hl_group, details.number_hl_group
         end
       end
     end
