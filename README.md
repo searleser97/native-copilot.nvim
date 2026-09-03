@@ -433,7 +433,8 @@ names and shell-like arguments or results never classify an invocation as a shel
 When an invocation provides `description` or `summary`, that human-readable text appears beside the
 Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_max_length`
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific
-fallbacks continue to show paths, patterns, queries, and shortened agent prompts/messages.
+fallbacks continue to show paths for file reads, creates, and edits; patterns and queries for
+searches; and shortened agent prompts/messages.
 The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
 session. Both values refresh from SDK usage events after every model call.
 

@@ -475,8 +475,18 @@ tick = function()
         tool_row,
         true
       )
-    if not (copilot_header and tool_row and reply) then
+    local create_row = tool_row
+      and content:find('🟢 create — src/generated.ts', tool_row, true)
+    local edit_row = create_row
+      and content:find('🟢 edit — src/existing.ts', create_row, true)
+    if not (copilot_header and tool_row and create_row and edit_row and reply) then
       schedule_tick()
+      return
+    end
+    if not check(
+      tool_row < create_row and create_row < edit_row and edit_row < reply,
+      'create and edit Tools show their target paths'
+    ) then
       return
     end
     if not check(

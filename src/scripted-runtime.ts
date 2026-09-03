@@ -96,6 +96,27 @@ export class ScriptedRuntime implements RuntimeAdapter {
         result: { shellId: "e2e-task" },
       },
     }, this.fields(target, true));
+    for (const [toolCallId, toolName, path] of [
+      ["e2e-create", "create", "src/generated.ts"],
+      ["e2e-edit", "edit", "src/existing.ts"],
+    ] as const) {
+      this.emit("activity.event", {
+        eventType: "tool.execution_start",
+        data: {
+          toolCallId,
+          toolName,
+          arguments: { path },
+        },
+      }, this.fields(target));
+      this.emit("activity.event", {
+        eventType: "tool.execution_complete",
+        data: {
+          toolCallId,
+          success: true,
+          result: { path },
+        },
+      }, this.fields(target, true));
+    }
     this.emit("tasks.changed", {
       tasks: [{
         id: "e2e-task",

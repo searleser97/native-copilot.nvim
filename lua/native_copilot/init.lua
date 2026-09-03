@@ -786,7 +786,14 @@ local function tool_timeline_detail(tool_name, arguments, status)
     detail = json_value(arguments.description) or json_value(arguments.summary)
   end
   if not detail
-    and (name == 'view' or name == 'read' or name == 'read_file' or name == 'read-file')
+    and (
+      name == 'view'
+      or name == 'read'
+      or name == 'read_file'
+      or name == 'read-file'
+      or name == 'create'
+      or name == 'edit'
+    )
   then
     detail = json_value(arguments.path)
       or json_value(arguments.filePath)
