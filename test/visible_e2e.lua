@@ -118,6 +118,23 @@ local function status_sign_at(buf, needle)
   end
 end
 
+local function has_status_sign_on_empty_line(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local marks = vim.api.nvim_buf_get_extmarks(
+    buf,
+    -1,
+    { 0, 0 },
+    { -1, -1 },
+    { details = true }
+  )
+  for _, mark in ipairs(marks) do
+    local details = mark[4] or {}
+    local line = lines[mark[2] + 1] or ''
+    if details.sign_text and line:match('^%s*$') then return true end
+  end
+  return false
+end
+
 local function task_marker(id, task_type)
   return ('[%s_%s]'):format(task_type or 'shell_cmd', id)
 end
@@ -850,8 +867,9 @@ tick = function()
       return
     end
     if not check(
-      not content:find('[permission]', 1, true),
-      'interactive permission is removed from the transcript after the decision'
+      not content:find('[permission]', 1, true)
+        and not has_status_sign_on_empty_line(buf),
+      'interactive permission row and sign are removed after the decision'
     ) then
       return
     end

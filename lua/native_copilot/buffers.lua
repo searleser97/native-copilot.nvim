@@ -1218,6 +1218,7 @@ function M.remove_timeline(member_id, item_id)
     record.extmark,
     { details = true }
   )
+  pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.extmark)
   if record.item and record.item.kind == 'environment' then
     local rows = {}
     for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
