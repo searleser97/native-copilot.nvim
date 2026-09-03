@@ -149,7 +149,13 @@ local function has_status_sign_on_empty_line(buf)
   for _, mark in ipairs(marks) do
     local details = mark[4] or {}
     local line = lines[mark[2] + 1] or ''
-    if details.sign_text and line:match('^%s*$') then return true end
+    local sign = details.sign_text and vim.trim(details.sign_text) or nil
+    if
+      (sign == '●' or sign == '✓' or sign == '✕' or sign == '○' or sign == '!' or sign == '?')
+      and line:match('^%s*$')
+    then
+      return true
+    end
   end
   return false
 end
