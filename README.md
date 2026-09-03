@@ -383,24 +383,24 @@ Restarting Neovim surfaces persisted state but does not automatically restart a 
 ## Rendering and observability
 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
-renderer dependency. User, Copilot, and Task turns default to emoji-only `👨`, `🤖`, and `📝`
-headers, without a redundant document title. Their labels, along with Tool and Scheduler headings,
-are configurable through `conversation` setup options. Inline
+renderer dependency. User, Copilot, and Task turns place emoji-only `👨`, `🤖`, and `📝` actor
+signs in the gutter, while the header text retains the timestamp or Copilot's animated `writing...`
+state. Their signs, along with Tool and Scheduler headings, are configurable through `conversation`
+setup options and must fit within Neovim's two-cell sign width. Inline
 reasoning remains part of each conversation buffer as unlabeled text using Neovim's `Comment`
 highlight group. Each reasoning section is a native fold that starts open and supports normal
 fold commands such as `zc`, `zo`, and `za`. Errors remain visible in their related activity rows
 and detail panes.
 The buffers retain normal Neovim navigation, search, yank, folds, marks, and window mappings.
 
-Participant headers use colorscheme-aware highlight groups: `NativeCopilotUserHeader` links to
-`DiagnosticInfo`, `NativeCopilotAssistantHeader` links to `Special`, and timestamps or writing
-state use `NativeCopilotHeaderMeta`, linked to `Comment`. Override any group after setup with
+Participant signs use colorscheme-aware highlight groups: `NativeCopilotUserHeader` links to
+`DiagnosticInfo`, `NativeCopilotAssistantHeader` links to `Special`, and timestamps or writing state
+use `NativeCopilotHeaderMeta`, linked to `Comment`. Override any group after setup with
 `vim.api.nvim_set_hl()` to choose explicit colors.
 
 Streaming deltas are batched and appended only to the changed buffer tail. Configure the batching
-interval with `stream_flush_ms`. Conversation content uses a three-space margin, including user and
-Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permissions. Participant
-headers, day dividers, and environment loading/status rows remain unindented.
+interval with `stream_flush_ms`. Conversation content is flush with the buffer text column; actor
+and lifecycle identity remains in the dedicated sign column.
 
 Conversation windows move to the final line when opened, switched, or reopened. Subsequent
 streaming and timeline updates preserve the cursor line while it remains visible. When continued

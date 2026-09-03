@@ -37,7 +37,7 @@ local header_highlight_namespace =
 local user_message_namespace = vim.api.nvim_create_namespace('native_copilot_user_message')
 local task_message_namespace = vim.api.nvim_create_namespace('native_copilot_task_message')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
-local content_indent = '   '
+local content_indent = ''
 local quote_indent = content_indent .. '>'
 local options = {
   stream_flush_ms = 80,
@@ -550,22 +550,42 @@ local function append(view, text, final)
   end
 end
 
-local function highlight_header(buf, row, line, group)
+local function actor_sign(label, fallback)
+  label = tostring(label or '')
+  return vim.fn.strdisplaywidth(label) <= 2 and label or fallback
+end
+
+local function highlight_header(buf, row, line, group, sign)
   local separator = line:find(' · ', 1, true)
-  if not separator then return end
   vim.api.nvim_buf_clear_namespace(buf, header_highlight_namespace, row, row + 1)
-  vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, 0, {
-    end_row = row,
-    end_col = separator - 1,
-    hl_group = group,
-    priority = 210,
-  })
-  vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, separator - 1, {
-    end_row = row,
-    end_col = #line,
-    hl_group = 'NativeCopilotHeaderMeta',
-    priority = 210,
-  })
+  if sign then
+    vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, 0, {
+      sign_text = sign,
+      sign_hl_group = group,
+      priority = 210,
+    })
+  end
+  if separator then
+    vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, 0, {
+      end_row = row,
+      end_col = separator - 1,
+      hl_group = group,
+      priority = 210,
+    })
+    vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, separator - 1, {
+      end_row = row,
+      end_col = #line,
+      hl_group = 'NativeCopilotHeaderMeta',
+      priority = 210,
+    })
+  else
+    vim.api.nvim_buf_set_extmark(buf, header_highlight_namespace, row, 0, {
+      end_row = row,
+      end_col = #line,
+      hl_group = 'NativeCopilotHeaderMeta',
+      priority = 210,
+    })
+  end
 end
 
 function M.append_block(member_id, view_id, heading, content, event_time)
@@ -575,16 +595,18 @@ function M.append_block(member_id, view_id, heading, content, event_time)
   prepare_pending_block(view, 1)
   local line_count = vim.api.nvim_buf_line_count(view.buf)
   local display_heading
+  local header_line
+  local sign
   if view_id == 'conversation' and heading == 'You' then
-    display_heading = options.conversation.user_label
+    sign = actor_sign(options.conversation.user_label, '👨')
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   elseif view_id == 'conversation' and heading == 'Copilot' then
-    display_heading = options.conversation.copilot_label
+    sign = actor_sign(options.conversation.copilot_label, '🤖')
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   elseif view_id == 'conversation' and heading == 'Task' then
-    display_heading = options.conversation.task_label
+    sign = actor_sign(options.conversation.task_label, '📝')
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   else
@@ -592,7 +614,8 @@ function M.append_block(member_id, view_id, heading, content, event_time)
     display_heading = ('%s%s %s'):format(content_indent, level, heading)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   end
-  append(view, ('%s · %s\n\n%s\n'):format(display_heading, timestamp(now), content), true)
+  header_line = sign and timestamp(now) or ('%s · %s'):format(display_heading, timestamp(now))
+  append(view, ('%s\n\n%s\n'):format(header_line, content), true)
   if view_id == 'conversation' then view.last_block_kind = 'message' end
   if
     view_id == 'conversation'
@@ -600,7 +623,7 @@ function M.append_block(member_id, view_id, heading, content, event_time)
   then
     local lines = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, -1, false)
     for index, line in ipairs(lines) do
-      if line:find(display_heading .. ' · ', 1, true) == 1 then
+      if line == header_line then
         local heading_row = line_count + index - 2
         highlight_header(
           view.buf,
@@ -608,7 +631,8 @@ function M.append_block(member_id, view_id, heading, content, event_time)
           line,
           heading == 'You' and 'NativeCopilotUserHeader'
             or heading == 'Copilot' and 'NativeCopilotAssistantHeader'
-            or 'NativeCopilotActorHeader'
+            or 'NativeCopilotActorHeader',
+          sign
         )
         if heading == 'You' then
           vim.api.nvim_buf_set_extmark(view.buf, user_message_namespace, heading_row, 0, {
@@ -645,14 +669,17 @@ local function continue_copilot_actor(view, event_time)
   end
   prepare_pending_block(view, 1)
   flush(view)
-  local heading = ('%s · %s'):format(
-    options.conversation.copilot_label,
-    timestamp(event_time or options.now())
-  )
+  local heading = timestamp(event_time or options.now())
   local heading_row = vim.api.nvim_buf_line_count(view.buf) - 1
   append(view, heading .. '\n\n', false)
   flush(view)
-  highlight_header(view.buf, heading_row, heading, 'NativeCopilotAssistantHeader')
+  highlight_header(
+    view.buf,
+    heading_row,
+    heading,
+    'NativeCopilotAssistantHeader',
+    actor_sign(options.conversation.copilot_label, '🤖')
+  )
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.last_block_kind = 'header'
@@ -914,19 +941,8 @@ local function timeline_lines(item, now)
     }
   end
   if item.actor_message then
-    local actor_kind = item.actor_kind or kind
-    local actor_heading
-    if item.actor or item.actor_label then
-      local actor = item.actor
-        or (actor_kind == 'tool' and '🛠️' or actor_symbols[actor_kind])
-        or '💬'
-      actor_heading = item.actor_label and (actor .. ' ' .. item.actor_label) or actor
-    else
-      local option_name = actor_option_names[actor_kind]
-      actor_heading = option_name and options.conversation[option_name] or actor_kind
-    end
     return {
-      ('%s · %s'):format(actor_heading, timestamp(now)),
+      timestamp(now),
       '',
       ('%s%s%s%s%s'):format(
         content_indent,
@@ -969,11 +985,16 @@ local function environment_insert_row(view)
     end
   end
   if last_environment then return last_environment + 1 end
-  for index, line in ipairs(lines) do
-    if line:find(options.conversation.user_label .. ' · ', 1, true) == 1
-      or line:find(options.conversation.copilot_label .. ' · ', 1, true) == 1
-    then
-      return math.max(1, index - 2)
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+    view.buf,
+    header_highlight_namespace,
+    { 0, 0 },
+    { -1, -1 },
+    { details = true }
+  )) do
+    local details = mark[4] or {}
+    if details.sign_text then
+      return math.max(1, mark[2] - 1)
     end
   end
   return nil
@@ -1162,14 +1183,26 @@ function M.upsert_timeline(member_id, item_id, item)
     timeline_highlight = 'NativeCopilotActorHeader'
   end
   local status_sign = not item.status_notice and status_signs[item.status] or nil
+  local actor_status_sign
+  if item.actor_message then
+    local actor_kind = item.actor_kind or item.kind
+    local option_name = actor_option_names[actor_kind]
+    actor_status_sign = actor_sign(
+      item.actor
+        or (option_name and options.conversation[option_name])
+        or actor_symbols[actor_kind],
+      actor_kind == 'task' and '📝' or '💬'
+    )
+  end
   record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
     id = record.extmark,
     end_row = start_row + #lines,
     end_col = 0,
     hl_group = timeline_highlight,
     hl_eol = timeline_highlight ~= nil,
-    sign_text = status_sign and status_sign.text or nil,
-    sign_hl_group = status_sign and status_sign.highlight or nil,
+    sign_text = actor_status_sign or (status_sign and status_sign.text or nil),
+    sign_hl_group = actor_status_sign and 'NativeCopilotActorHeader'
+      or (status_sign and status_sign.highlight or nil),
     right_gravity = true,
     end_right_gravity = false,
   })
@@ -1289,7 +1322,7 @@ function M.timeline_item_at_cursor(buf, row)
   end
 end
 
-local function set_message_heading(view, content)
+local function set_message_heading(view, content, sign_group)
   if not view.message_heading then return end
   local position = vim.api.nvim_buf_get_extmark_by_id(
     view.buf,
@@ -1311,7 +1344,8 @@ local function set_message_heading(view, content)
     view.buf,
     position[1],
     content,
-    'NativeCopilotAssistantHeader'
+    sign_group or 'NativeCopilotAssistantHeader',
+    actor_sign(options.conversation.copilot_label, '🤖')
   )
 end
 
@@ -1327,10 +1361,7 @@ local function animate_writing(view, generation)
     view.writing_step = (view.writing_step % 3) + 1
     set_message_heading(
       view,
-      ('%s · writing%s'):format(
-        options.conversation.copilot_label,
-        string.rep('.', view.writing_step)
-      )
+      ('writing%s'):format(string.rep('.', view.writing_step))
     )
     animate_writing(view, generation)
   end, 400)
@@ -1338,17 +1369,13 @@ end
 
 local function touch_message_heading(view, status, detail, event_time)
   stop_writing_animation(view)
-  local label = options.conversation.copilot_label
-  if status == 'failed' then
-    label = M.status_symbol('failed') .. ' ' .. label
-  end
   set_message_heading(
     view,
-    ('%s · %s%s'):format(
-      label,
+    ('%s%s'):format(
       timestamp(event_time),
       detail and (' · ' .. detail) or ''
-    )
+    ),
+    status == 'failed' and 'NativeCopilotStatusFailed' or nil
   )
 end
 
@@ -1388,9 +1415,7 @@ local function begin_response(view, response_id, event_time)
   view.response_started_at = event_time
   append(
     view,
-    ('%s · writing.\n\n'):format(
-      options.conversation.copilot_label
-    ),
+    'writing.\n\n',
     false
   )
   flush(view)
@@ -1404,8 +1429,9 @@ local function begin_response(view, response_id, event_time)
   highlight_header(
     view.buf,
     heading_row,
-    ('%s · writing.'):format(options.conversation.copilot_label),
-    'NativeCopilotAssistantHeader'
+    'writing.',
+    'NativeCopilotAssistantHeader',
+    actor_sign(options.conversation.copilot_label, '🤖')
   )
   view.awaiting_response = response_id or true
   view.response_active = true

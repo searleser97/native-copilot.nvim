@@ -118,6 +118,25 @@ local function status_sign_at(buf, needle)
   end
 end
 
+local function actor_sign_before(buf, needle)
+  local row = line_with(buf, needle)
+  if not row then return end
+  for candidate = row, math.max(1, row - 3), -1 do
+    local marks = vim.api.nvim_buf_get_extmarks(
+      buf,
+      -1,
+      { candidate - 1, 0 },
+      { candidate, 0 },
+      { details = true }
+    )
+    for _, mark in ipairs(marks) do
+      local details = mark[4] or {}
+      local sign = details.sign_text and vim.trim(details.sign_text) or nil
+      if sign == '👨' or sign == '🤖' or sign == '📝' then return sign end
+    end
+  end
+end
+
 local function has_status_sign_on_empty_line(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local marks = vim.api.nvim_buf_get_extmarks(
@@ -334,9 +353,13 @@ tick = function()
     })
     submit('Delay the assistant turn start so the pending UI can be checked.')
     local pending_content = text(buf)
+    local prompt_offset = pending_content:find('Delay the assistant turn start', 1, true)
     if not check(
-      pending_content:find('Delay the assistant turn start', 1, true)
-        and not pending_content:find('🤖 · writing', 1, true),
+      prompt_offset
+        and line_at(pending_content, prompt_offset)
+          == 'Delay the assistant turn start so the pending UI can be checked.'
+        and actor_sign_before(buf, 'Delay the assistant turn start') == '👨'
+        and not pending_content:find('writing', 1, true),
       'prompt submission waited for SDK turn start before showing writing'
     ) then
       return
@@ -349,7 +372,9 @@ tick = function()
       return
     end
     if not check(
-      content:find('🤖 · ', 1, true) and not content:find('🤖 · writing', 1, true),
+      actor_sign_before(buf, 'The delayed assistant turn started normally.') == '🤖'
+        and not content:find('writing', 1, true)
+        and not content:find('🤖 · ', 1, true),
       'delayed SDK turn completed without leaving a writing indicator'
     ) then
       return
@@ -453,7 +478,8 @@ tick = function()
     end
     local task_complete_heading = content:sub(1, task_complete):match('([^\n]*)\n\n[^\n]*$')
     if not check(
-      task_complete_heading and task_complete_heading:find('📝 · ', 1, true) ~= nil,
+      task_complete_heading
+        and actor_sign_before(buf, task_marker('e2e-task') .. ' completed') == '📝',
       'task completion rendered under the Task actor'
     ) then
       return
@@ -509,7 +535,8 @@ tick = function()
     schedule_tick()
   elseif phase == 'tool' then
     local tool_prompt = content:find('Read the completed validation output', 1, true)
-    local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
+    local copilot_header = tool_prompt
+      and content:find('\n%d%d:%d%d:%d%d\n\n', tool_prompt)
     local tool_row = copilot_header
       and content:find(
         'powershell — Read completed validation output and summarize only the final status',
@@ -652,7 +679,7 @@ tick = function()
         true
       )
     local resumed_copilot = reasoning_task_promoted
-      and content:find('🤖 · ', reasoning_task_promoted, true)
+      and content:find('\n%d%d:%d%d:%d%d\n\n', reasoning_task_promoted)
     local second_reasoning = content:find(
       'Next, I need to inspect the completed command before composing the final answer.',
       first_reasoning or 1,
@@ -733,7 +760,11 @@ tick = function()
     end
     local promoted_heading = content:sub(1, reasoning_task_promoted):match('([^\n]*)\n\n[^\n]*$')
     if not check(
-      promoted_heading and promoted_heading:find('📝 · ', 1, true) ~= nil,
+      promoted_heading
+        and actor_sign_before(
+          buf,
+          task_marker('e2e-reasoning-task') .. ' moved to background'
+        ) == '📝',
       'background promotion rendered under the Task actor'
     ) then
       return
@@ -949,7 +980,11 @@ tick = function()
         1,
         true
       ) ~= nil
-        and content:find('👨 · ' .. os.date('%H:%M:%S', history_epoch), 1, true) ~= nil,
+        and content:find(os.date('%H:%M:%S', history_epoch), 1, true) ~= nil
+        and actor_sign_before(
+          buf,
+          'Inspect this workspace and validate it without blocking the conversation.'
+        ) == '👨',
       'CLI session replay preserved original event timestamps'
     ) then
       return
