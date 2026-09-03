@@ -600,6 +600,8 @@ tick = function()
         reasoning_task_promoted or 1,
         true
       )
+    local resumed_copilot = reasoning_task_promoted
+      and content:find('🤖 · ', reasoning_task_promoted, true)
     local second_reasoning = content:find(
       'Next, I need to inspect the completed command before composing the final answer.',
       first_reasoning or 1,
@@ -618,6 +620,7 @@ tick = function()
     if not (
       reasoning_task_start
       and reasoning_task_promoted
+      and resumed_copilot
       and first_reasoning
       and second_reasoning
       and tool_row
@@ -674,6 +677,8 @@ tick = function()
     if not check(
       reasoning_task_start < first_reasoning
         and reasoning_task_start < reasoning_task_promoted
+        and reasoning_task_promoted < resumed_copilot
+        and resumed_copilot < first_reasoning
         and reasoning_task_promoted < first_reasoning
         and first_reasoning < second_reasoning
         and second_reasoning < tool_row

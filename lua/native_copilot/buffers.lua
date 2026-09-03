@@ -598,7 +598,29 @@ function M.append_block(member_id, view_id, heading, content, event_time)
   end
 end
 
+local function continue_copilot_actor(view, event_time)
+  if view.last_block_kind ~= 'actor_message'
+    or not (view.response_active or view.awaiting_response)
+  then
+    return
+  end
+  prepare_pending_block(view, 1)
+  flush(view)
+  local heading = ('%s · %s'):format(
+    options.conversation.copilot_label,
+    timestamp(event_time or options.now())
+  )
+  local heading_row = vim.api.nvim_buf_line_count(view.buf) - 1
+  append(view, heading .. '\n\n', false)
+  flush(view)
+  highlight_header(view.buf, heading_row, heading, 'NativeCopilotAssistantHeader')
+  view.response_line_start = true
+  view.response_resume_after_actor = false
+  view.last_block_kind = 'header'
+end
+
 local function begin_inline_activity(view, activity_id, heading, event_time)
+  continue_copilot_actor(view, event_time)
   ensure_day_header(view, event_time or options.now())
   flush(view)
   local plain = heading == 'Reasoning summary'
@@ -1376,6 +1398,7 @@ end
 function M.append_conversation_delta(member_id, message_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  continue_copilot_actor(view)
   if view.active_activity then
     view.pending = view.pending .. '\n'
     flush(view)
@@ -1433,6 +1456,7 @@ end
 function M.complete_conversation(member_id, message_id, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  continue_copilot_actor(view, event_time)
   if view.awaiting_response and content == '' then
     return
   elseif view.awaiting_response then

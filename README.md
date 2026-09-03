@@ -420,6 +420,8 @@ status icon. A transition from `executionMode: "sync"` to
 `executionMode: "background"` produces a separate `moved to background` notice; no transition is
 inferred when the first observed snapshot is already background-managed. The original Tool row
 remains the clickable source for arguments, results, and correlated background details.
+When reasoning or answer text follows a Task-authored lifecycle message, a new Copilot actor header
+is rendered so content never appears to belong to the Task actor.
 Shell IDs remain internal for ordinary synchronous invocations and become visible as
 `[shell_cmd_<shell-id>]` only when the invocation is explicitly asynchronous or background-managed.
 A `running` Task snapshot with `executionMode: "sync"` does not override a terminal Tool event;
