@@ -760,11 +760,7 @@ tick = function()
       'Review the workspace validation and report only actionable findings.'
     if not check(
       occurrence_count(content, subagent_prompt) == 0
-        and (line_containing(content, 'Review workspace validation') or ''):find(
-          '[cli-review-tool]',
-          1,
-          true
-        ),
+        and line_containing(content, 'task — Review workspace validation') ~= nil,
       '/resume rendered the concise task description instead of the full prompt inline'
     ) then
       finish()
