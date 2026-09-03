@@ -127,6 +127,7 @@ local state = {
   prompt_queue_edit = nil,
   prompt_queue_sequence = 0,
   session_metrics = {},
+  member_activity = {},
   schedules = {},
   resume_request_id = nil,
   resume_cursor_animation_restore = nil,
@@ -136,16 +137,54 @@ local function update_conversation_label(member_id)
   local entry = buffers.get_member(member_id)
   if not entry then return end
   local metrics = state.session_metrics[member_id] or {}
+  local activity = state.member_activity[member_id]
   local model = metrics.model_id or 'detecting…'
   local aic = tonumber(metrics.aic_used) or 0
-  local label = (' %s  |  Model: %s  |  AIC used: %.3f '):format(
+  local status = activity and activity.label
+    or (entry.state == 'busy' and 'Thinking' or entry.state == 'error' and 'Error' or 'Idle')
+  if activity and activity.active then
+    status = ('%s · %ds'):format(
+      status,
+      math.max(0, math.floor((vim.uv.now() - activity.started_at) / 1000))
+    )
+  end
+  local label = (' %s  |  Status: %s  |  Model: %s  |  AIC used: %.3f '):format(
     entry.display_name,
+    status,
     model,
     aic
   )
   for _, win in ipairs(vim.fn.win_findbuf(entry.views.conversation.buf)) do
     if vim.api.nvim_win_is_valid(win) then vim.wo[win].winbar = label end
   end
+end
+
+local refresh_activity_elapsed
+
+refresh_activity_elapsed = function(member_id, generation)
+  vim.defer_fn(function()
+    local activity = state.member_activity[member_id]
+    if not activity or not activity.active or activity.generation ~= generation then return end
+    update_conversation_label(member_id)
+    refresh_activity_elapsed(member_id, generation)
+  end, 1000)
+end
+
+local function set_member_activity(member_id, label, active)
+  local current = state.member_activity[member_id]
+  if current and current.label == label and current.active == active then
+    update_conversation_label(member_id)
+    return
+  end
+  local activity = {
+    label = label,
+    active = active == true,
+    started_at = vim.uv.now(),
+    generation = (current and current.generation or 0) + 1,
+  }
+  state.member_activity[member_id] = activity
+  update_conversation_label(member_id)
+  if activity.active then refresh_activity_elapsed(member_id, activity.generation) end
 end
 
 local function notify(message, level)
@@ -1424,6 +1463,7 @@ local function reset_member(member_id, preserve_buffers)
   state.environment[member_id] = nil
   state.tool_calls[member_id] = nil
   state.session_metrics[member_id] = nil
+  state.member_activity[member_id] = nil
   state.queued_prompts[member_id] = nil
   state.prompt_queue_paused[member_id] = nil
   state.command_requests[member_id] = nil
@@ -3026,16 +3066,20 @@ function M._on_event(message)
     if message.requestId then state.prompt_calls[message.requestId] = nil end
     -- The user turn is rendered immediately; writing starts only with the SDK turn-start event.
   elseif message.type == 'conversation.delta' then
+    set_member_activity(member_id, 'Writing', true)
     buffers.append_conversation_delta(member_id, payload.messageId or message.id, payload.content or '')
   elseif message.type == 'conversation.message' then
+    set_member_activity(member_id, 'Writing', true)
     buffers.complete_conversation(
       member_id,
       payload.messageId or message.id,
       payload.content or ''
     )
   elseif message.type == 'activity.delta' then
+    set_member_activity(member_id, 'Thinking', true)
     buffers.append_activity_delta(member_id, payload.reasoningId or message.id, payload.content or '')
   elseif message.type == 'activity.reasoning' then
+    set_member_activity(member_id, 'Thinking', true)
     buffers.complete_activity(
       member_id,
       payload.reasoningId or message.id,
@@ -3057,11 +3101,13 @@ function M._on_event(message)
     if event_type == 'tool.execution_start' then
       local call_id = data.toolCallId or message.id
       local tool_name = data.toolName or data.mcpToolName or 'tool'
+      set_member_activity(member_id, 'Running tool: ' .. tool_name, true)
       update_tool_call(member_id, call_id, tool_name, 'running', {
         arguments = data.arguments,
         shellToolInfo = data.shellToolInfo,
       })
     elseif event_type == 'tool.execution_complete' then
+      set_member_activity(member_id, 'Processing result', true)
       local call_id = data.toolCallId or message.id
       local activity = state.tool_calls[member_id]
       local existing = activity and activity.items[call_id]
@@ -3082,22 +3128,28 @@ function M._on_event(message)
         render_task_detail()
       end
     else
+      set_member_activity(member_id, 'Thinking', true)
       local detail = data.intent or data.message or vim.inspect(data)
       buffers.append_activity_block(member_id, event_type, tostring(detail))
     end
   elseif message.type == 'permission.requested' then
+    set_member_activity(member_id, 'Waiting for permission', true)
     request_permission(payload, member_id)
   elseif message.type == 'member.error' then
     buffers.append_activity_block(member_id, 'Error', payload.message or vim.inspect(payload))
     buffers.set_state(member_id, 'error')
+    set_member_activity(member_id, 'Error', false)
   elseif message.type == 'member.foreground_idle' then
     finish_foreground_turn(member_id)
+    set_member_activity(member_id, 'Idle', false)
   elseif message.type == 'member.state' then
     local member_state = payload.state or 'unknown'
     buffers.set_state(member_id, member_state)
     if member_state == 'busy' then
+      set_member_activity(member_id, 'Thinking', true)
       buffers.begin_response(member_id, payload.turnId or message.id)
     elseif member_state == 'idle' then
+      set_member_activity(member_id, 'Idle', false)
       local environment = state.environment[member_id]
       local startup = environment and environment.components['Copilot environment']
       if startup and startup.status == 'running' then

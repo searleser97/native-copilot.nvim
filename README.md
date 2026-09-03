@@ -444,8 +444,11 @@ Tool name. Inline summaries collapse whitespace and truncate to `tool_summary_ma
 characters; complete arguments remain available by pressing Enter on the row. Tool-specific
 fallbacks continue to show paths for file reads, creates, and edits; patterns and queries for
 searches; and shortened agent prompts/messages.
-The conversation winbar shows the effective model and cumulative AI credits (AIC) used by the
-session. Both values refresh from SDK usage events after every model call.
+The conversation winbar shows live Copilot activity, the effective model, and cumulative AI
+credits (AIC) used by the session. Activity advances through event-backed phases such as
+`Thinking`, `Running tool: <name>`, `Processing result`, `Writing`, `Waiting for permission`,
+`Idle`, and `Error`. Active phases include an elapsed-seconds counter, while model and AIC values
+refresh from SDK usage events after every model call.
 
 SDK-provided reasoning summaries, intent, errors, tools, prompts, schedules, tasks, and environment status
 appear inline in the conversation, similar to Copilot CLI's timeline. Whether reasoning content is

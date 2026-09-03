@@ -572,6 +572,25 @@ tick = function()
     ) then
       return
     end
+    phase = 'tool-processing'
+    schedule_tick()
+  elseif phase == 'tool-processing' then
+    local tool_row =
+      content:find('powershell — Read completed validation output and summarize only the final status', 1, true)
+    local reply =
+      content:find('The background validation completed successfully with exit code 0.', 1, true)
+    if not tool_row or reply then
+      schedule_tick()
+      return
+    end
+    local conversation_windows = vim.fn.win_findbuf(buf)
+    local winbar = #conversation_windows > 0 and vim.wo[conversation_windows[1]].winbar or ''
+    if not check(
+      winbar:find('Status: Processing result · 0s', 1, true) ~= nil,
+      'winbar reports Copilot processing a completed Tool result'
+    ) then
+      return
+    end
     phase = 'tool'
     schedule_tick()
   elseif phase == 'tool' then
