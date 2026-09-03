@@ -23,6 +23,7 @@ local manual_scroll_top
 local manual_scroll_cursor
 local conversation_height_before_scroll
 local reasoning_cursor
+local followed_cursor
 local completed = false
 local tick
 
@@ -562,7 +563,7 @@ tick = function()
         if conversation_height_before_scroll then
           vim.api.nvim_win_set_height(
             conversation_windows[1],
-            conversation_height_before_scroll
+            math.min(conversation_height_before_scroll, 8)
           )
         end
         vim.api.nvim_win_set_cursor(
@@ -748,7 +749,6 @@ tick = function()
     local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
-    local cursor_preserved
     if
       first_row
       and second_row
@@ -759,8 +759,12 @@ tick = function()
       and #windows > 0
     then
       fold = vim.api.nvim_win_call(windows[1], function()
-        cursor_preserved =
-          vim.deep_equal(vim.api.nvim_win_get_cursor(windows[1]), reasoning_cursor)
+        local cursor = vim.api.nvim_win_get_cursor(windows[1])
+        followed_cursor = {
+          advanced = cursor[1] > reasoning_cursor[1],
+          pinned_to_top = cursor[1] == vim.fn.line('w0'),
+          viewport_at_bottom = vim.fn.line('w$') >= vim.api.nvim_buf_line_count(buf),
+        }
         vim.api.nvim_win_set_cursor(windows[1], { third_paragraph_row, 0 })
         local closed_from_third = pcall(vim.cmd, 'normal! zc')
         local first_start = vim.fn.foldclosed(first_row)
@@ -825,8 +829,11 @@ tick = function()
       return
     end
     if not check(
-      cursor_preserved == true,
-      'streaming and lifecycle updates preserve the conversation cursor'
+      followed_cursor
+        and followed_cursor.advanced
+        and followed_cursor.pinned_to_top
+        and followed_cursor.viewport_at_bottom,
+      'streaming pins the cursor to the top visible line while following EOF'
     ) then
       return
     end

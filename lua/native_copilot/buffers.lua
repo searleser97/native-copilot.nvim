@@ -172,30 +172,35 @@ local function follow_bottom(view, move_cursor)
     if vim.api.nvim_win_is_valid(win) and view.follow_windows[win] ~= false then
       view.following_update = true
       local cursor = not move_cursor and vim.api.nvim_win_get_cursor(win) or nil
-      pcall(vim.api.nvim_win_set_cursor, win, { last_line, 0 })
-      pcall(vim.api.nvim_win_call, win, function()
-        vim.cmd('normal! zb')
-        local padding = math.max(
-          0,
-          math.min(options.bottom_padding or 0, vim.api.nvim_win_get_height(win) - 1)
-        )
-        if padding > 0 then
-          vim.cmd(('execute "normal! %d\\<C-E>"'):format(padding))
-        end
-      end)
-      if cursor then
-        local cursor_line = math.min(cursor[1], last_line)
+      local scrolloff = vim.wo[win].scrolloff
+      vim.wo[win].scrolloff = 0
+      pcall(function()
+        vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+        local top_line, bottom_line = vim.api.nvim_win_call(win, function()
+          vim.cmd('normal! zb')
+          local padding = math.max(
+            0,
+            math.min(options.bottom_padding or 0, vim.api.nvim_win_get_height(win) - 1)
+          )
+          if padding > 0 then
+            vim.cmd(('execute "normal! %d\\<C-E>"'):format(padding))
+          end
+          return vim.fn.line('w0'), vim.fn.line('w$')
+        end)
+        if not cursor then return end
+        local cursor_line = math.max(top_line, math.min(cursor[1], bottom_line))
         local cursor_text = vim.api.nvim_buf_get_lines(
           view.buf,
           cursor_line - 1,
           cursor_line,
           false
         )[1] or ''
-        pcall(vim.api.nvim_win_set_cursor, win, {
+        vim.api.nvim_win_set_cursor(win, {
           cursor_line,
           math.min(cursor[2], #cursor_text),
         })
-      end
+      end)
+      vim.wo[win].scrolloff = scrolloff
       view.follow_windows[win] = true
       view.following_update = false
     end
@@ -1597,14 +1602,21 @@ function M.on_shown(buf)
   end
 end
 
-function M.on_view_moved(win)
+function M.on_view_moved(win, event)
   if not win or not vim.api.nvim_win_is_valid(win) then return end
   local buf = vim.api.nvim_win_get_buf(win)
   for _, entry in pairs(registry) do
     local view = entry.views.conversation
     if view.buf == buf then
       if not view.following_update then
-        view.follow_windows[win] = viewport_at_bottom(view, win)
+        if event == 'CursorMoved' then
+          local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
+          local last_line = vim.api.nvim_buf_line_count(view.buf)
+          view.follow_windows[win] = cursor_line >= last_line
+          if view.follow_windows[win] then follow_bottom(view) end
+        else
+          view.follow_windows[win] = viewport_at_bottom(view, win)
+        end
       end
       return
     end

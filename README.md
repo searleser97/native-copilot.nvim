@@ -399,11 +399,11 @@ Copilot text, fenced code blocks, reasoning, tools, tasks, schedules, and permis
 headers, day dividers, and environment loading/status rows remain unindented.
 
 Conversation windows move to the final line when opened, switched, or reopened. Subsequent
-streaming and timeline updates always preserve the user's cursor; the viewport follows new output
-only while doing so does not displace that cursor. `bottom_padding` controls the preferred display
+streaming and timeline updates preserve the cursor line while it remains visible. When continued
+following would push that line outside the viewport, the cursor advances to the top visible line
+so the transcript can keep following EOF. Explicit cursor movement or scrolling away disables
+following; moving the cursor to EOF restores it. `bottom_padding` controls the preferred display
 rows below followed output, and `follow_bottom = false` disables automatic viewport following.
-Following pauses when the transcript end leaves the window and resumes when you return to the
-bottom.
 
 Conversation turns and timeline rows show local timestamps. Tool rows show their lifetime in place
 as `[start - …]` while running and `[start - end]` when terminal; their status is represented only

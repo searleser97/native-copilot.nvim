@@ -3182,7 +3182,7 @@ function M.setup(user_options)
       if not win or not vim.api.nvim_win_is_valid(win) then
         win = vim.api.nvim_get_current_win()
       end
-      buffers.on_view_moved(win)
+      buffers.on_view_moved(win, args.event)
     end,
   })
   vim.api.nvim_create_autocmd('TabClosed', {
