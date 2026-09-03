@@ -770,9 +770,7 @@ local function task_at_cursor()
 end
 
 local function tool_timeline_detail(tool_name, arguments, status)
-  if type(arguments) ~= 'table' then
-    return status == 'running' and 'processing…' or status
-  end
+  if type(arguments) ~= 'table' then return end
 
   local name = (tool_name or ''):lower()
   local detail
@@ -803,7 +801,7 @@ local function tool_timeline_detail(tool_name, arguments, status)
   end
 
   if type(detail) ~= 'string' or detail == '' then
-    return status == 'running' and 'processing…' or status
+    return
   end
   detail = detail:gsub('%s+', ' '):gsub('^%s+', ''):gsub('%s+$', '')
   local max_length = math.max(4, tonumber(options.tool_summary_max_length) or 120)
@@ -853,6 +851,8 @@ local function render_shell_tool_call(member_id, item)
     copilot_owned = not item.async,
     details = details,
     created_at = item.created_at,
+    started_at = item.started_at,
+    completed_at = item.completed_at,
   })
 end
 
@@ -884,7 +884,12 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   item.status = status
   item.details = vim.tbl_deep_extend('force', item.details or {}, details or {})
   item.is_shell = item.is_shell or type(item.details.shellToolInfo) == 'table'
-  item.created_at = item.created_at or json_value(item.details.created_at)
+  local event_time = json_value(item.details.created_at) or os.time()
+  item.created_at = item.created_at or event_time
+  item.started_at = item.started_at or item.created_at
+  if status ~= 'running' and not item.async then
+    item.completed_at = event_time
+  end
   local arguments = item.details.arguments
   local async_mode = type(arguments) == 'table'
     and (
@@ -930,6 +935,8 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
       copilot_owned = not item.async,
       details = item.details,
       created_at = json_value(item.details.created_at),
+      started_at = item.started_at,
+      completed_at = item.completed_at,
     })
   end
 
@@ -1002,6 +1009,12 @@ local function associate_task_tool(member_id, task, allow_shell_claim)
     if tool.is_shell then
       if json_value(task.executionMode) == 'background' or tool.async then
         tool.background_task = vim.deepcopy(task)
+        local task_status = json_value(task.status)
+        if task_status == 'running' or task_status == 'idle' then
+          tool.completed_at = nil
+        elseif task_status then
+          tool.completed_at = tool.completed_at or os.time()
+        end
       end
       tool.shell_id = tool.shell_id or tostring(task.id)
       render_shell_tool_call(member_id, tool)

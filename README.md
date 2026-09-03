@@ -404,9 +404,11 @@ rows below followed output, and `follow_bottom = false` disables automatic viewp
 Following pauses when the transcript end leaves the window and resumes when you return to the
 bottom.
 
-Conversation turns and timeline rows show local timestamps. A timeline row receives a new timestamp
-only when its visible state changes, and a streamed Copilot response receives its final timestamp
-when the response completes. Reasoning summaries omit timestamps. Customize the remaining display
+Conversation turns and timeline rows show local timestamps. Tool rows show their lifetime in place
+as `[start - …]` while running and `[start - end]` when terminal; their status is represented only
+by the circle indicator, never duplicated as `processing`, `completed`, or `failed` text. Other
+timeline events retain a single event timestamp, and a streamed Copilot response receives its final
+timestamp when the response completes. Reasoning summaries omit timestamps. Customize the display
 with `timestamp_format`, using an `os.date` format string. The conversation starts with a local-date
 divider and adds another before the first newly rendered item after midnight.
 `conversation.day_header_format` controls that divider without repeating the date on every row.

@@ -856,6 +856,12 @@ local function timeline_lines(item, now)
     or ('[%s]'):format(kind)
   local identity_prefix = identity ~= '' and (identity .. ' ') or ''
   local event = item.event and (tostring(item.event) .. ' · ') or ''
+  local displayed_time = kind == 'tool'
+      and ('[%s - %s]'):format(
+        timestamp(item.started_at or now),
+        item.completed_at and timestamp(item.completed_at) or '…'
+      )
+    or timestamp(now)
   if item.status_notice and not item.actor_message then
     return {
       ('%s%s%s%s%s · %s'):format(
@@ -864,7 +870,7 @@ local function timeline_lines(item, now)
         event,
         label,
         suffix,
-        timestamp(now)
+        displayed_time
       ),
     }
   end
@@ -907,7 +913,7 @@ local function timeline_lines(item, now)
       event,
       label,
       suffix,
-      timestamp(now)
+      displayed_time
     ),
   }
 end
@@ -1036,6 +1042,8 @@ function M.upsert_timeline(member_id, item_id, item)
     and record.item.label == item.label
     and record.item.status == item.status
     and record.item.detail == item.detail
+    and record.item.started_at == item.started_at
+    and record.item.completed_at == item.completed_at
   then
     local position = vim.api.nvim_buf_get_extmark_by_id(
       view.buf,

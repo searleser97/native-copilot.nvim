@@ -667,6 +667,19 @@ tick = function()
     ) then
       return
     end
+    if not check(
+      not reader_line:find('— completed', 1, true)
+        and not reader_line:find('— processing', 1, true),
+      'Tool rows omit textual lifecycle status'
+    ) then
+      return
+    end
+    if not check(
+      reader_line:match('· %[%d%d:%d%d:%d%d %- %d%d:%d%d:%d%d%]$') ~= nil,
+      'completed Tool row shows its start and end time interval'
+    ) then
+      return
+    end
     local promoted_heading = content:sub(1, reasoning_task_promoted):match('([^\n]*)\n\n[^\n]*$')
     if not check(
       promoted_heading and promoted_heading:find('📝 · ', 1, true) ~= nil,
