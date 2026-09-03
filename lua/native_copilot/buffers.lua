@@ -10,6 +10,15 @@ local status_symbols = {
   denied = '🚫',
   unknown = '❓',
 }
+local status_signs = {
+  running = { text = '●', highlight = 'NativeCopilotStatusRunning' },
+  idle = { text = '●', highlight = 'NativeCopilotStatusRunning' },
+  completed = { text = '✓', highlight = 'NativeCopilotStatusCompleted' },
+  failed = { text = '✕', highlight = 'NativeCopilotStatusFailed' },
+  cancelled = { text = '○', highlight = 'NativeCopilotStatusCancelled' },
+  denied = { text = '!', highlight = 'NativeCopilotStatusDenied' },
+  unknown = { text = '?', highlight = 'NativeCopilotStatusUnknown' },
+}
 local actor_symbols = {
   task = '📝',
   schedule = '⏰',
@@ -86,6 +95,30 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, 'NativeCopilotHeaderMeta', {
     default = true,
     link = 'Comment',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotStatusRunning', {
+    default = true,
+    link = 'DiagnosticWarn',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotStatusCompleted', {
+    default = true,
+    link = 'DiagnosticOk',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotStatusFailed', {
+    default = true,
+    link = 'DiagnosticError',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotStatusCancelled', {
+    default = true,
+    link = 'DiagnosticHint',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotStatusDenied', {
+    default = true,
+    link = 'DiagnosticError',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotStatusUnknown', {
+    default = true,
+    link = 'DiagnosticInfo',
   })
   vim.api.nvim_set_hl(0, 'NativeCopilotUserMessage', {
     default = true,
@@ -185,6 +218,7 @@ local function configure_folds(view)
       if first_setup then vim.wo[win].foldlevel = 99 end
       vim.wo[win].foldminlines = 0
       vim.wo[win].foldenable = true
+      vim.wo[win].signcolumn = 'yes:1'
     end
   end
 end
@@ -886,15 +920,11 @@ local function timeline_lines(item, now)
       local option_name = actor_option_names[actor_kind]
       actor_heading = option_name and options.conversation[option_name] or actor_kind
     end
-    local status_prefix = item.status_notice
-        and ''
-      or ((status_symbols[status] or status_symbols.unknown) .. ' ')
     return {
       ('%s · %s'):format(actor_heading, timestamp(now)),
       '',
-      ('%s%s%s%s%s%s'):format(
+      ('%s%s%s%s%s'):format(
         content_indent,
-        status_prefix,
         identity_prefix,
         event,
         label,
@@ -905,10 +935,9 @@ local function timeline_lines(item, now)
   local actor = item.actor or (kind ~= 'task' and actor_symbols[kind] or nil)
   local actor_prefix = actor and (actor .. ' ') or ''
   return {
-    ('%s%s%s %s%s%s%s · %s'):format(
+    ('%s%s%s%s%s%s · %s'):format(
       prefix,
       actor_prefix,
-      status_symbols[status] or status_symbols.unknown,
       identity_prefix,
       event,
       label,
@@ -1127,12 +1156,16 @@ function M.upsert_timeline(member_id, item_id, item)
   elseif not item.actor_message and (item.kind == 'task' or item.kind == 'tool') then
     timeline_highlight = 'NativeCopilotActorHeader'
   end
+  local status_sign = not item.status_notice and status_signs[item.status] or nil
   record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
     id = record.extmark,
     end_row = start_row + #lines,
     end_col = 0,
     hl_group = timeline_highlight,
     hl_eol = timeline_highlight ~= nil,
+    sign_text = status_sign and status_sign.text or nil,
+    sign_hl_group = status_sign and status_sign.highlight or nil,
+    number_hl_group = status_sign and status_sign.highlight or nil,
     right_gravity = true,
     end_right_gravity = false,
   })

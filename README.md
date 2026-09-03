@@ -158,10 +158,11 @@ prompt buffer or when the prompt cannot be submitted.
 
 The conversation is also the chronological activity timeline. Background tasks, environment
 initialization, foreground tools, schedules, and permission decisions appear as compact timeline
-rows. Environment rows are unquoted. `🟡` is processing or waiting, `🟢` completed or approved,
-`🔴` failed, `⚪` cancelled,
-`🚫` denied, and `❓` unknown. Each row keeps a stable position and updates in place as its state
-changes, so completion does not reorder earlier work.
+rows. Environment rows are unquoted. Lifecycle status appears in a one-cell Neovim sign column:
+yellow/orange `●` is processing or waiting, green `✓` completed or approved, red `✕` failed,
+gray/blue `○` cancelled, red `!` denied, and `?` unknown. Signs and enabled line numbers use
+matching theme-aware diagnostic colors. Each row keeps a stable position and updates in place, so
+completion does not reorder earlier work.
 
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
@@ -172,8 +173,8 @@ instruction files such as `CLAUDE.md` visible without opening details. Other arg
 for failed tools and tasks. The active Copilot heading begins only after the SDK reports that the assistant turn started, then
 cycles through `writing.`, `writing..`, and
 `writing...`; when the response completes, that text is replaced by its completion time. Failed
-responses retain a leading `🔴`. Permission requests use a leading `🟡` row that updates to
-`🟢` when approved or `🚫` when denied, without a separate Permission section. Normal prompt
+responses retain a failed gutter sign. Permission requests use a running gutter sign that updates
+to completed when approved or denied when rejected, without a separate Permission section. Normal prompt
 submission always uses immediate SDK delivery, including while Copilot is busy, so it can steer the
 active interaction. Press `<C-q>` to place a prompt explicitly in the FIFO pane instead; that pane
 supports pausing, editing, and cancelling before dispatch.
@@ -406,7 +407,7 @@ bottom.
 
 Conversation turns and timeline rows show local timestamps. Tool rows show their lifetime in place
 as `[start - …]` while running and `[start - end]` when terminal; their status is represented only
-by the circle indicator, never duplicated as `processing`, `completed`, or `failed` text. Other
+by the colored gutter sign, never duplicated as `processing`, `completed`, or `failed` text. Other
 timeline events retain a single event timestamp, and a streamed Copilot response receives its final
 timestamp when the response completes. Reasoning summaries omit timestamps. Customize the display
 with `timestamp_format`, using an `os.date` format string. The conversation starts with a local-date

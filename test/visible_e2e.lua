@@ -97,6 +97,26 @@ local function line_at(content, offset)
   return content:sub(start, finish - 1)
 end
 
+local function status_sign_at(buf, needle)
+  for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find(needle, 1, true) then
+      local marks = vim.api.nvim_buf_get_extmarks(
+        buf,
+        -1,
+        { row - 1, 0 },
+        { row, 0 },
+        { details = true }
+      )
+      for _, mark in ipairs(marks) do
+        local details = mark[4] or {}
+        if details.sign_text then
+          return details.sign_text, details.sign_hl_group, details.number_hl_group
+        end
+      end
+    end
+  end
+end
+
 local function task_marker(id, task_type)
   return ('[%s_%s]'):format(task_type or 'shell_cmd', id)
 end
@@ -368,9 +388,9 @@ tick = function()
     phase = 'task'
     schedule_tick()
   elseif phase == 'task' then
-    local create_row = content:find('🟢 create — src/generated.ts', 1, true)
+    local create_row = content:find('create — src/generated.ts', 1, true)
     local edit_row = create_row
-      and content:find('🟢 edit — src/existing.ts', create_row, true)
+      and content:find('edit — src/existing.ts', create_row, true)
     local stream_begin =
       content:find('I started the workspace validation in the background.', 1, true)
     local stream_end = content:find('without splitting this message.', stream_begin or 1, true)
@@ -474,7 +494,7 @@ tick = function()
     local copilot_header = tool_prompt and content:find('🤖 · ', tool_prompt, true)
     local tool_row = copilot_header
       and content:find(
-        '🟢 powershell — Read completed validation output and summarize only the final status',
+        'powershell — Read completed validation output and summarize only the final status',
         copilot_header,
         true
       )
@@ -514,9 +534,13 @@ tick = function()
     ) then
       return
     end
+    local tool_sign, tool_sign_hl, tool_number_hl =
+      status_sign_at(buf, 'powershell — Read completed validation output')
     if not check(
-      tool_line:find('🟢', 1, true) ~= nil,
-      'running synchronous task snapshot does not override Tool completion'
+      tool_sign == '✓'
+        and tool_sign_hl == 'NativeCopilotStatusCompleted'
+        and tool_number_hl == 'NativeCopilotStatusCompleted',
+      'completed Tool uses the colored completed gutter sign'
     ) then
       return
     end
@@ -617,7 +641,7 @@ tick = function()
       true
     )
     local tool_row = second_reasoning
-      and content:find('🟢 read_powershell', second_reasoning, true)
+      and content:find('read_powershell', second_reasoning, true)
     local final_response = tool_row
       and content:find('The event order is correct:', tool_row, true)
     local task_row = final_response
@@ -720,7 +744,7 @@ tick = function()
       buf,
       'Closing the fold from this third paragraph must collapse the complete reasoning block.'
     )
-    local tool_line = line_with_after(buf, '🟢 read_powershell', second_row)
+    local tool_line = line_with_after(buf, 'read_powershell', second_row)
     local final_row = line_with(buf, 'The event order is correct:')
     local windows = vim.fn.win_findbuf(buf)
     local fold
@@ -833,7 +857,7 @@ tick = function()
     local reasoning =
       content:find('I should inspect the project structure first.', user_message or 1, true)
     local tool_row = reasoning
-      and content:find('🟢 glob', reasoning, true)
+      and content:find('glob', reasoning, true)
     local instruction = tool_row
       and content:find('[instruction] Repository instructions', tool_row, true)
     local permission = instruction
