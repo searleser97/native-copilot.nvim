@@ -187,7 +187,10 @@ The resolved main Copilot command defines the Standard session's initial permiss
 `--allow-all` installs the SDK's `approveAll` handler; otherwise permission requests are shown in
 Neovim. Dynamically generated agents may inherit that behavior, request interactive approval, or
 define a stricter path/tool/action ceiling. A child may request `approveAll` only when the main
-command grants it, preventing privilege escalation.
+command grants it, preventing privilege escalation. While a busy long-lived session is silent, the
+host checks the SDK's durable event and pending-permission state. Missed lifecycle events are
+replayed once, interactive permissions are restored to the Neovim picker, and `approveAll` sessions
+reassert that policy before resolving a recovered request.
 
 Commands mirror the primary mappings:
 

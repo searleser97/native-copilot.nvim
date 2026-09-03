@@ -160,6 +160,11 @@ interface LiveSession {
   foregroundAbortSequence: number | undefined;
   sequence: number;
   taskRefresh: number;
+  seenEventIds: Set<string>;
+  lastEventAt: number;
+  lastRecoveryAt: number;
+  recoveringEvents: boolean;
+  approveAll: boolean;
   unsubscribe: () => void;
 }
 
@@ -942,9 +947,10 @@ export class CopilotRuntime {
   private readonly pendingFleets: DynamicFleetDefinition[] = [];
   private readonly pendingPermissions = new Map<
     string,
-    { resolve: (result: PermissionRequestResult) => void }
+    { target: string; respond: (result: PermissionRequestResult) => void }
   >();
   private readonly fleetLocks = new Map<string, Promise<void>>();
+  private readonly recoveryTimer: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly workspace: string,
@@ -953,6 +959,12 @@ export class CopilotRuntime {
     private readonly runtimeCommand?: string,
   ) {
     this.policy = nativePolicy(runtimeCommand, workspace);
+    this.recoveryTimer = setInterval(() => {
+      if (!this.shuttingDown) {
+        void this.recoverSilentSessions();
+      }
+    }, 3_000);
+    this.recoveryTimer.unref?.();
   }
 
   private async ensureClient(): Promise<CopilotClient> {
@@ -1172,7 +1184,7 @@ export class CopilotRuntime {
       return false;
     }
     this.pendingPermissions.delete(requestId);
-    pending.resolve(
+    pending.respond(
       approved
         ? { kind: "approve-once", approvedInteractively: true }
         : reject("Permission rejected by the user in Neovim."),
@@ -1202,9 +1214,107 @@ export class CopilotRuntime {
         { memberId: uiTarget, target: "status", done: false },
       );
       return new Promise((resolve) => {
-        this.pendingPermissions.set(requestId, { resolve });
+        this.pendingPermissions.set(requestId, { target: uiTarget, respond: resolve });
       });
     };
+  }
+
+  private async recoverSilentSessions(): Promise<void> {
+    const now = Date.now();
+    const recoveries: Promise<void>[] = [];
+    for (const live of this.live.values()) {
+      if (
+        live.busy
+        && !live.recoveringEvents
+        && now - live.lastEventAt >= 10_000
+        && now - live.lastRecoveryAt >= 10_000
+      ) {
+        live.lastRecoveryAt = now;
+        recoveries.push(this.recoverSilentSession(live));
+      }
+    }
+    await Promise.allSettled(recoveries);
+  }
+
+  private async recoverSilentSession(live: LiveSession): Promise<void> {
+    live.recoveringEvents = true;
+    try {
+      const events = await live.session.getEvents();
+      if (this.live.get(live.target) !== live) {
+        return;
+      }
+      for (const event of events) {
+        if (!live.seenEventIds.has(event.id)) {
+          this.handleSessionEvent(live, event);
+        }
+      }
+
+      const { items } = await live.session.rpc.permissions.pendingRequests();
+      for (const pending of items) {
+        if (live.approveAll) {
+          await live.session.rpc.permissions.setApproveAll({ enabled: true });
+          await live.session.rpc.permissions.handlePendingPermissionRequest({
+            requestId: pending.requestId,
+            result: { kind: "approve-once" },
+          });
+          continue;
+        }
+        if (
+          this.pendingPermissions.has(pending.requestId)
+          || [...this.pendingPermissions.values()].some(
+            (request) => request.target === live.target,
+          )
+        ) {
+          continue;
+        }
+        this.pendingPermissions.set(pending.requestId, {
+          target: live.target,
+          respond: (result) => {
+            void live.session.rpc.permissions
+              .handlePendingPermissionRequest({ requestId: pending.requestId, result })
+              .catch((error: unknown) => {
+                this.emit(
+                  "member.error",
+                  {
+                    message:
+                      error instanceof Error
+                        ? error.message
+                        : String(error),
+                  },
+                  {
+                    runId: live.runId,
+                    memberId: live.target,
+                    target: "activity",
+                    done: true,
+                  },
+                );
+              });
+          },
+        });
+        this.emit(
+          "permission.requested",
+          { requestId: pending.requestId, request: pending.request },
+          {
+            runId: live.runId,
+            memberId: live.target,
+            target: "status",
+            done: false,
+          },
+        );
+      }
+    } catch (error) {
+      this.emit(
+        "tasks.error",
+        {
+          message: `Session recovery failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        },
+        { runId: live.runId, memberId: live.target, target: "status", done: true },
+      );
+    } finally {
+      live.recoveringEvents = false;
+    }
   }
 
   // Attaches per-session permission and MCP-auth handlers to the shared native
@@ -1643,12 +1753,20 @@ export class CopilotRuntime {
       foregroundAbortSequence: undefined,
       sequence: 0,
       taskRefresh: 0,
+      seenEventIds: new Set<string>(),
+      lastEventAt: Date.now(),
+      lastRecoveryAt: 0,
+      recoveringEvents: false,
+      approveAll: config.onPermissionRequest === approveAll,
       unsubscribe: () => undefined,
     };
     live.unsubscribe = session.on((event) => this.handleSessionEvent(live, event));
     this.live.set(target, live);
     this.db.upsertSession(runId, memberId, actualSessionId, "connected");
     const history = await session.getEvents();
+    for (const event of history) {
+      live.seenEventIds.add(event.id);
+    }
     // Skip the history replay for an in-process reconnect: the UI buffer for this
     // target is retained across the reconnect (peer/mutation changes never reset a
     // buffer), so re-emitting the full transcript would duplicate it. A fresh
@@ -1752,6 +1870,11 @@ export class CopilotRuntime {
   }
 
   private handleSessionEvent(live: LiveSession, event: SessionEvent): void {
+    if (live.seenEventIds.has(event.id)) {
+      return;
+    }
+    live.seenEventIds.add(event.id);
+    live.lastEventAt = Date.now();
     live.sequence += 1;
     if (persistEventTypes.has(event.type)) {
       this.db.appendEvent(
@@ -3222,8 +3345,9 @@ export class CopilotRuntime {
       return;
     }
     this.shuttingDown = true;
+    clearInterval(this.recoveryTimer);
     for (const pending of this.pendingPermissions.values()) {
-      pending.resolve(reject(`Permission request cancelled: ${reason}`));
+      pending.respond(reject(`Permission request cancelled: ${reason}`));
     }
     this.pendingPermissions.clear();
     const runIds = new Set<string>();
