@@ -798,7 +798,7 @@ tick = function()
     local timestamp_tool = line_containing(content, 'history-timestamp-probe.txt') or ''
     local timestamp_heading = heading_before(content, 'history-timestamp-probe.txt') or ''
     local heading_time = timestamp_heading:match('(%d%d:%d%d:%d%d)')
-    local tool_time = timestamp_tool:match('· (%d%d:%d%d:%d%d)$')
+    local tool_time = timestamp_tool:match('%[(%d%d:%d%d:%d%d) %-')
     if not check(
       heading_time ~= nil and heading_time == tool_time,
       '/resume used the historical tool time for synthetic Copilot headings'
