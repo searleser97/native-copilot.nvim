@@ -165,8 +165,8 @@ local function viewport_at_bottom(view, win)
   end)
 end
 
-local function follow_bottom(view, move_cursor)
-  if not options.follow_bottom or view.id ~= 'conversation' then return end
+local function follow_bottom(view, move_cursor, force)
+  if (not options.follow_bottom and not force) or view.id ~= 'conversation' then return end
   local last_line = vim.api.nvim_buf_line_count(view.buf)
   for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
     if vim.api.nvim_win_is_valid(win) and view.follow_windows[win] ~= false then
@@ -1652,6 +1652,16 @@ end
 function M.mark_read(member_id)
   local entry = registry[member_id]
   if entry then entry.unread = 0 end
+end
+
+function M.scroll_to_bottom(member_id)
+  local entry = registry[member_id]
+  local view = entry and entry.views.conversation
+  if not view then return end
+  for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
+    if vim.api.nvim_win_is_valid(win) then view.follow_windows[win] = true end
+  end
+  follow_bottom(view, true, true)
 end
 
 function M.on_shown(buf)

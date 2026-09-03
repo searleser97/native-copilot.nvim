@@ -316,6 +316,7 @@ end
 
 local function dispatch_prompt(member_id, content)
   buffers.append_block(member_id, 'conversation', 'You', content)
+  buffers.scroll_to_bottom(member_id)
   local request_id = send('prompt.send', { target = member_id, content = content })
   if not request_id then return false end
   state.prompt_calls[request_id] = { member_id = member_id }
@@ -390,6 +391,7 @@ local function submit_prompt_content(queue_only)
   local command = commands.parse(content)
   if command then
     buffers.append_block(state.selected, 'conversation', 'You', content)
+    buffers.scroll_to_bottom(state.selected)
     if command.name:lower() == 'tasks' then
       M.select_task()
       return true
