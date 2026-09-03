@@ -1710,11 +1710,6 @@ export class CopilotRuntime {
     if (existing) {
       return existing;
     }
-    this.emit(
-      "environment.progress",
-      { component: "Copilot environment", message: "Starting runtime and discovering configuration" },
-      { runId, memberId: target, target: "activity" },
-    );
     const client = await this.ensureClient();
     let session: CopilotSession;
     if (sessionId && (resumeExisting || this.knownSessionIds.has(sessionId))) {
@@ -1786,7 +1781,17 @@ export class CopilotRuntime {
         },
         { runId, memberId: target, target: "conversation", done: true },
       );
+      this.emit(
+        "session.identity",
+        { sessionId: actualSessionId },
+        { runId, memberId: target, target: "activity", done: true },
+      );
     }
+    this.emit(
+      "environment.progress",
+      { component: "Copilot environment", message: "Starting runtime and discovering configuration" },
+      { runId, memberId: target, target: "activity" },
+    );
     for (const probe of environmentProbes) {
       this.emit(
         "environment.progress",

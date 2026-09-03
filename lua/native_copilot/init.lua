@@ -2750,6 +2750,9 @@ function M._on_event(message)
   elseif message.type == 'background.cancelled' then
     notify(('Cancelled %d background agent(s).'):format(payload.count or 0))
     return
+  elseif message.type == 'session.identity' then
+    buffers.set_session_id(event_member(message), payload.sessionId)
+    return
   elseif message.type == 'environment.progress' then
     local component = payload.component or 'Environment'
     local member_id = event_member(message)

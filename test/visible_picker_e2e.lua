@@ -362,6 +362,18 @@ tick = function()
       schedule_tick()
       return
     end
+    local session_id = content:find('[SessionId][e2e-standard-session]', 1, true)
+    local first_environment = content:find('[environment]', 1, true)
+    if not check(
+      session_id
+        and first_environment
+        and session_id < first_environment
+        and content:find('\n\n[SessionId][e2e-standard-session]', 1, true),
+      'standard session identity preceded environment discovery'
+    ) then
+      finish()
+      return
+    end
     if not check(
       not has_quoted_environment(content),
       'environment rows rendered without blockquote markers'
@@ -754,6 +766,18 @@ tick = function()
       and not content:find('Inspect this workspace and validate it without blocking', 1, true)
     then
       schedule_tick()
+      return
+    end
+    local resumed_session_id = content:find('[SessionId][e2e-cli-session]', 1, true)
+    local resumed_environment = content:find('[environment]', resumed_session_id or 1, true)
+    if not check(
+      resumed_session_id
+        and resumed_environment
+        and resumed_session_id < resumed_environment
+        and content:find('\n\n[SessionId][e2e-cli-session]', 1, true),
+      '/resume rendered a separated session identity before environment rows'
+    ) then
+      finish()
       return
     end
     local subagent_prompt =

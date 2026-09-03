@@ -326,6 +326,7 @@ local function create_buffer(name, member_id, view_id)
     timeline_time_overrides = {},
     follow_windows = {},
     following_update = false,
+    session_id = nil,
   }
 end
 
@@ -401,6 +402,7 @@ function M.prepare_history(member_id, event_time)
   view.last_block_kind = nil
   view.history_prepared = true
   view.history_environment_started = false
+  view.session_id = nil
 end
 
 local function flush(view)
@@ -1272,6 +1274,28 @@ function M.remove_timeline(member_id, item_id)
   end
   view.timeline[item_id] = nil
   finalize_render(view)
+end
+
+function M.set_session_id(member_id, session_id)
+  local entry = M.ensure_member(member_id)
+  local view = entry.views.conversation
+  session_id = tostring(session_id or '')
+  if session_id == '' or view.session_id == session_id then return end
+  flush(view)
+  ensure_trailing_empty_rows(view, 1)
+  local row = vim.api.nvim_buf_line_count(view.buf)
+  with_modifiable(view.buf, function()
+    vim.api.nvim_buf_set_lines(
+      view.buf,
+      row,
+      row,
+      false,
+      { ('[SessionId][%s]'):format(session_id) }
+    )
+  end)
+  view.session_id = session_id
+  view.last_block_kind = 'session_identity'
+  follow_bottom(view)
 end
 
 function M.timeline_item_at_cursor(buf, row)

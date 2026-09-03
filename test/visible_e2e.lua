@@ -263,6 +263,17 @@ tick = function()
       schedule_tick()
       return
     end
+    local session_id = content:find('[SessionId][e2e-standard-session]', 1, true)
+    local first_environment = content:find('[environment]', 1, true)
+    if not check(
+      session_id
+        and first_environment
+        and session_id < first_environment
+        and content:find('\n\n[SessionId][e2e-standard-session]', 1, true),
+      'new sessions rendered a separated identity marker before environment rows'
+    ) then
+      return
+    end
     if not check(content:find('[environment] Tools — 4 loaded', 1, true), 'mock tools initialized') then
       return
     end
@@ -1030,6 +1041,7 @@ tick = function()
       and content:find('[environment] Agents — 0 loaded', plugins, true)
     local environment_ready =
       content:find('[environment] Copilot environment — ready', agent_task, true)
+    local session_id = content:find('[SessionId][e2e-cli-session]', agent_task, true)
     local mcp_ready = profile == 'allow-all'
       and not content:find('[environment] MCP ', agent_task, true)
       or profile == 'allow-all-mcp'
@@ -1040,6 +1052,19 @@ tick = function()
     if not check(
       tools and instructions and skills and plugins and agents and environment_ready and mcp_ready,
       'CLI session resume restored current Tools, MCP, and environment rows'
+    ) then
+      return
+    end
+    if not check(
+      session_id
+        and tools
+        and session_id < tools
+        and content:sub(agent_task, session_id):find(
+          '\n\n[SessionId][e2e-cli-session]',
+          1,
+          true
+        ),
+      'CLI session resume separated identity from history before environment rows'
     ) then
       return
     end

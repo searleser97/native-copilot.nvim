@@ -164,6 +164,10 @@ gray/blue `○` cancelled, red `!` denied, and `?` unknown. Signs use theme-awar
 while line numbers retain their normal highlight. Each row keeps a stable position and updates in
 place, so completion does not reorder earlier work.
 
+Each fresh or resumed conversation prints `[SessionId][<session-id>]` after any restored history
+and before environment discovery. The session marker begins a new block with at least one blank
+line separating it from preceding conversation content.
+
 Tools, Instructions, Skills, MCP servers, Plugins, Agents, and other environment initialization use
 non-actionable `[environment]` rows. The initial `Copilot environment` row remains visible and
 transitions from startup to `ready`. Foreground tools use `[tool]` rows. File reads and code searches

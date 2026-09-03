@@ -410,6 +410,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
     this.standardRunId = randomUUID();
     this.db.createRun(this.standardRunId, "standard", null, this.workspace, process.pid);
     const target = "standard";
+    this.emit("session.identity", {
+      sessionId: "e2e-standard-session",
+    }, { runId: this.standardRunId, memberId: target, target: "activity", done: true });
     await this.loadEnvironment(target);
     this.emit("member.state", { state: "idle" }, {
       memberId: target,
@@ -914,6 +917,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         replayTimestamp: Date.parse(event.timestamp),
       })),
     }, { runId: this.standardRunId, memberId: target, target: "conversation", done: true });
+    this.emit("session.identity", {
+      sessionId,
+    }, { runId: this.standardRunId, memberId: target, target: "activity", done: true });
     await this.loadEnvironment(target);
     this.emit("member.state", {
       state: "idle",
