@@ -25,6 +25,7 @@ local conversation_height_before_scroll
 local reasoning_cursor
 local followed_cursor
 local processing_result_winbar_seen = false
+local timeline_recovery_checked = false
 local completed = false
 local tick
 
@@ -165,6 +166,51 @@ local function has_sign_on_empty_line(buf)
   return false
 end
 
+local function timeline_recovers_without_range_extmark(buf)
+  local started_at = os.time()
+  buffers.upsert_timeline('standard', 'e2e-timeline-recovery', {
+    kind = 'tool',
+    label = 'grep',
+    status = 'running',
+    detail = 'duplicate-recovery-probe',
+    started_at = started_at,
+  })
+  local row = line_with(buf, 'duplicate-recovery-probe')
+  if not row then return false end
+  local namespace = vim.api.nvim_get_namespaces().native_copilot_timeline
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+    buf,
+    namespace,
+    { row - 1, 0 },
+    { row, 0 },
+    { details = true }
+  )) do
+    local details = mark[4] or {}
+    if not details.sign_text then
+      vim.api.nvim_buf_del_extmark(buf, namespace, mark[1])
+      break
+    end
+  end
+  buffers.upsert_timeline('standard', 'e2e-timeline-recovery', {
+    kind = 'tool',
+    label = 'grep',
+    status = 'completed',
+    detail = 'duplicate-recovery-probe',
+    started_at = started_at,
+    completed_at = started_at + 1,
+  })
+  local count = 0
+  local completed = false
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find('duplicate-recovery-probe', 1, true) then
+      count = count + 1
+      completed = not line:find('…', 1, true)
+    end
+  end
+  buffers.remove_timeline('standard', 'e2e-timeline-recovery')
+  return count == 1 and completed
+end
+
 local function task_marker(id, task_type)
   return ('[%s_%s]'):format(task_type or 'shell_cmd', id)
 end
@@ -284,6 +330,15 @@ tick = function()
       'environment lifecycle signs remained on their owning rows'
     ) then
       return
+    end
+    if not timeline_recovery_checked then
+      timeline_recovery_checked = true
+      if not check(
+        timeline_recovers_without_range_extmark(buf),
+        'Tool completion reconciles the existing row when its range extmark is missing'
+      ) then
+        return
+      end
     end
     if not check(content:find('[environment] Tools — 4 loaded', 1, true), 'mock tools initialized') then
       return

@@ -1064,6 +1064,47 @@ local function reconcile_environment_rows(view, item)
   return rows[1]
 end
 
+local function timeline_record_position(view, record, details)
+  local function extmark_position(id)
+    if not id then return {} end
+    return vim.api.nvim_buf_get_extmark_by_id(
+      view.buf,
+      timeline_namespace,
+      id,
+      details and { details = true } or {}
+    )
+  end
+
+  local position = extmark_position(record.sign_extmark)
+  if #position == 0 then position = extmark_position(record.extmark) end
+  if #position > 0 then
+    record.start_row = position[1]
+    return position
+  end
+
+  if not record.item then return {} end
+  local expected = timeline_lines(record.item, record.created_at)[1]
+  local nearest
+  local nearest_distance
+  for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
+    if line == expected then
+      local row = index - 1
+      local distance = math.abs(row - (record.start_row or row))
+      if not nearest_distance or distance < nearest_distance then
+        nearest = row
+        nearest_distance = distance
+      end
+    end
+  end
+  if nearest == nil then return {} end
+  record.start_row = nearest
+  return {
+    nearest,
+    0,
+    details and { end_row = nearest + (record.line_count or 1), end_col = 0 } or nil,
+  }
+end
+
 function M.upsert_timeline(member_id, item_id, item)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
@@ -1103,12 +1144,7 @@ function M.upsert_timeline(member_id, item_id, item)
     and record.item.started_at == item.started_at
     and record.item.completed_at == item.completed_at
   then
-    local position = vim.api.nvim_buf_get_extmark_by_id(
-      view.buf,
-      timeline_namespace,
-      record.extmark,
-      {}
-    )
+    local position = timeline_record_position(view, record, false)
     if #position > 0 then
       record.item = vim.deepcopy(item)
       record.item.id = item_id
@@ -1124,12 +1160,7 @@ function M.upsert_timeline(member_id, item_id, item)
       vim.api.nvim_buf_set_lines(view.buf, start_row, start_row + 1, false, lines)
     end)
   elseif record then
-    local position = vim.api.nvim_buf_get_extmark_by_id(
-      view.buf,
-      timeline_namespace,
-      record.extmark,
-      { details = true }
-    )
+    local position = timeline_record_position(view, record, true)
     if #position > 0 then
       start_row = position[1]
       local end_row = start_row + record.line_count
@@ -1266,12 +1297,7 @@ function M.remove_timeline(member_id, item_id)
   view.timeline_time_overrides[item_id] = nil
   local record = view and view.timeline[item_id]
   if not record then return end
-  local position = vim.api.nvim_buf_get_extmark_by_id(
-    view.buf,
-    timeline_namespace,
-    record.extmark,
-    { details = true }
-  )
+  local position = timeline_record_position(view, record, true)
   pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.extmark)
   if record.sign_extmark then
     pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_extmark)
@@ -1326,12 +1352,7 @@ function M.timeline_item_at_cursor(buf, row)
     if view.buf == buf then
       local zero_row = row - 1
       for _, record in pairs(view.timeline) do
-        local position = vim.api.nvim_buf_get_extmark_by_id(
-          view.buf,
-          timeline_namespace,
-          record.extmark,
-          { details = true }
-        )
+        local position = timeline_record_position(view, record, true)
         if #position > 0 then
           local end_row = position[3].end_row or (position[1] + record.line_count)
           if zero_row >= position[1] and zero_row < end_row then

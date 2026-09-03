@@ -1762,6 +1762,7 @@ export class CopilotRuntime {
     this.live.set(target, live);
     this.db.upsertSession(runId, memberId, actualSessionId, "connected");
     const history = await session.getEvents();
+    const replayEvents = history.filter((event) => !live.seenEventIds.has(event.id));
     for (const event of history) {
       live.seenEventIds.add(event.id);
     }
@@ -1774,7 +1775,7 @@ export class CopilotRuntime {
       this.emit(
         "session.history",
         {
-          events: history.map((event) => ({
+          events: replayEvents.map((event) => ({
             ...event,
             replayTimestamp: Date.parse(event.timestamp),
           })),
