@@ -549,6 +549,29 @@ tick = function()
     schedule_tick()
   elseif phase == 'manual-scroll' then
     submit('Read the completed validation output and summarize the result.')
+    local conversation_windows = vim.fn.win_findbuf(buf)
+    local submission_followed_bottom
+    if #conversation_windows > 0 then
+      local win = conversation_windows[1]
+      submission_followed_bottom = vim.api.nvim_win_call(win, function()
+        local last_line = vim.api.nvim_buf_line_count(buf)
+        local cursor = vim.api.nvim_win_get_cursor(win)
+        return cursor[1] == last_line and vim.fn.line('w$') >= last_line
+      end)
+      manual_scroll_top = vim.api.nvim_win_call(win, function()
+        vim.api.nvim_win_set_cursor(win, { 1, 0 })
+        vim.cmd('normal! zt')
+        manual_scroll_cursor = vim.api.nvim_win_get_cursor(win)
+        return vim.fn.winsaveview().topline
+      end)
+      buffers.on_view_moved(win, 'CursorMoved')
+    end
+    if not check(
+      submission_followed_bottom == true,
+      'sending a user message restores following and scrolls to EOF'
+    ) then
+      return
+    end
     phase = 'tool'
     schedule_tick()
   elseif phase == 'tool' then
@@ -653,31 +676,11 @@ tick = function()
   elseif phase == 'resume-follow' then
     local conversation_windows = vim.fn.win_findbuf(buf)
     if #conversation_windows > 0 then
-      local win = conversation_windows[1]
-      vim.api.nvim_win_call(win, function()
-        vim.api.nvim_win_set_cursor(win, { math.max(1, vim.api.nvim_buf_line_count(buf) - 10), 0 })
-        vim.cmd('normal! zt')
-      end)
-      buffers.on_view_moved(win, 'CursorMoved')
+      reasoning_cursor = vim.api.nvim_win_get_cursor(conversation_windows[1])
     end
     submit(
       'Investigate the event-ordering issue, use the available result, and explain your conclusion.'
     )
-    local submission_followed_bottom
-    if #conversation_windows > 0 then
-      local win = conversation_windows[1]
-      submission_followed_bottom = vim.api.nvim_win_call(win, function()
-        local last_line = vim.api.nvim_buf_line_count(buf)
-        reasoning_cursor = vim.api.nvim_win_get_cursor(win)
-        return reasoning_cursor[1] == last_line and vim.fn.line('w$') >= last_line
-      end)
-    end
-    if not check(
-      submission_followed_bottom == true,
-      'sending a user message restores following and scrolls to EOF'
-    ) then
-      return
-    end
     phase = 'reasoning-stream'
     schedule_tick()
   elseif phase == 'reasoning-stream' then
