@@ -1785,9 +1785,7 @@ function M.reset()
   registry = {}
 end
 
--- Removes a single member's buffers without disturbing other members, so one
--- Fleet stopping or an agent being removed never clears the Standard session or
--- another concurrently active Fleet.
+-- Removes one agent's buffers without disturbing Standard or other agents.
 function M.remove_member(member_id)
   local entry = registry[member_id]
   if not entry then return end

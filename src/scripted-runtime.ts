@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { FleetDatabase } from "./database.js";
-import type { RuntimeAdapter } from "./runtime-adapter.js";
-import type { FleetMoveOptions } from "./runtime.js";
-import type { DynamicAgentDefinition, DynamicFleetDefinition } from "./types.js";
+import type { AgentDatabase } from "./database.js";
+import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
+import type { SpawnAgentsRequest } from "./types.js";
 
 interface RuntimeEmitter {
   (
@@ -23,6 +22,25 @@ interface PendingPermission {
   target: string;
 }
 
+/** One scripted standalone agent, mirroring the runtime's durable agent identity. */
+interface ScriptedAgent {
+  agentId: string;
+  target: string;
+  alias: string;
+  displayName: string;
+  description: string;
+  task: string;
+  recipients: string[];
+  standardCanTalk: boolean;
+  runId: string;
+  sessionId: string;
+}
+
+// A single deterministic recoverable agent so the UI end-to-end suite can exercise
+// per-agent recovery without a live Copilot runtime.
+const RECOVERABLE_AGENT_ID = "e2e0aaaa-0000-4000-8000-00000000e2e1";
+const RECOVERABLE_AGENT_RUN_ID = "e2e-recoverable-agent-run";
+
 const observationMode = process.env.NATIVE_COPILOT_E2E_OBSERVE === "1";
 const delayMultiplier = observationMode ? 8 : 1;
 const delay = (milliseconds: number): Promise<void> =>
@@ -35,11 +53,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
   private resumedCliSession = false;
   private sessionListCount = 0;
   private readonly pendingPermissions = new Map<string, PendingPermission>();
+  private readonly agents = new Map<string, ScriptedAgent>();
+  private recoveredAgentRun = false;
   private stopped = false;
 
   constructor(
     private readonly workspace: string,
-    private readonly db: FleetDatabase,
+    private readonly db: AgentDatabase,
     private readonly emit: RuntimeEmitter,
     private readonly profile: string,
   ) {}
@@ -408,7 +428,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
   async openStandard(): Promise<void> {
     if (this.standardRunId) return;
     this.standardRunId = randomUUID();
-    this.db.createRun(this.standardRunId, "standard", null, this.workspace, process.pid);
+    this.db.createStandardRun(this.standardRunId, this.workspace, process.pid);
+    this.db.adoptStandardMessages(this.standardRunId, this.workspace, "standard");
     const target = "standard";
     this.emit("session.identity", {
       sessionId: "e2e-standard-session",
@@ -472,25 +493,48 @@ export class ScriptedRuntime implements RuntimeAdapter {
     return {
       scripted: true,
       profile: this.profile,
-      standard: this.standardRunId ? { runId: this.standardRunId } : undefined,
-      fleets: [],
+      standard: this.standardRunId
+        ? { runId: this.standardRunId, target: "standard", state: "idle" }
+        : undefined,
+      agents: [...this.agents.values()].map((agent) => ({
+        target: agent.target,
+        agentId: agent.agentId,
+        alias: agent.alias,
+        displayName: agent.displayName,
+        description: agent.description,
+        task: agent.task,
+        recipients: agent.recipients,
+        standardCanTalk: agent.standardCanTalk,
+        runId: agent.runId,
+        sessionId: agent.sessionId,
+        state: "idle",
+      })),
       sessions: this.standardRunId
-        ? [{ target: "standard", memberId: "standard", state: "idle" }]
+        ? [{ target: "standard", alias: "standard", state: "idle" }]
         : [],
     };
   }
 
-  recoverableFleetRuns(): Array<Record<string, unknown>> {
-    return this.profile === "telescope"
-      ? [{
-          id: "e2e-recoverable-fleet-run",
-          fleetId: "e2e-recovered-fleet",
-          name: "Recovered validation fleet",
-          status: "stopped",
-          startedAt: "2026-08-31T14:00:00.000Z",
-          members: ["planner", "reviewer"],
-        }]
-      : [];
+  recoverableAgentRuns(): Array<Record<string, unknown>> {
+    if (this.profile !== "telescope" || this.recoveredAgentRun) {
+      return [];
+    }
+    return [{
+      id: RECOVERABLE_AGENT_RUN_ID,
+      runId: RECOVERABLE_AGENT_RUN_ID,
+      target: `agent:${RECOVERABLE_AGENT_ID}`,
+      agentId: RECOVERABLE_AGENT_ID,
+      alias: "planner",
+      displayName: "Planner",
+      description: "Plan the workspace validation",
+      task: "Plan the workspace validation and report the plan.",
+      recipients: ["standard"],
+      standardCanTalk: true,
+      status: "interrupted",
+      startedAt: "2026-08-31T14:00:00.000Z",
+      endedAt: "2026-08-31T14:30:00.000Z",
+      sessionId: "e2e-recovered-agent-session",
+    }];
   }
 
   async listModels(): Promise<unknown[]> {
@@ -544,7 +588,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
       this.db.finishRun(this.standardRunId, "stopped", `Resuming session ${sessionId}`);
     }
     this.standardRunId = randomUUID();
-    this.db.createRun(this.standardRunId, "standard", null, this.workspace, process.pid);
+    this.db.createStandardRun(this.standardRunId, this.workspace, process.pid);
+    this.db.adoptStandardMessages(this.standardRunId, this.workspace, "standard");
     this.resumedCliSession = true;
     const target = "standard";
     this.emit("session.loading", {
@@ -1049,69 +1094,151 @@ export class ScriptedRuntime implements RuntimeAdapter {
     this.emitIdle(target);
   }
 
-  async startFleet(definition: DynamicFleetDefinition): Promise<void> {
-    const members = definition.agents.map((agent) => ({
-      id: `${definition.id}/${agent.id}`,
+  private agentPayload(agent: ScriptedAgent): Record<string, unknown> {
+    return {
+      target: agent.target,
+      agentId: agent.agentId,
+      alias: agent.alias,
       displayName: agent.displayName,
-    }));
-    this.emit("fleet.ready", {
-      fleetId: definition.id,
-      name: definition.name,
-      entryMember: `${definition.id}/${definition.entryAgent}`,
-      recovered: false,
-      members,
-    }, { target: "status", done: true });
+      description: agent.description,
+      task: agent.task,
+      recipients: agent.recipients,
+      standardCanTalk: agent.standardCanTalk,
+      runId: agent.runId,
+    };
   }
 
-  async resumeFleet(runId: string): Promise<void> {
-    if (this.profile !== "telescope" || runId !== "e2e-recoverable-fleet-run") return;
-    this.emit("fleet.ready", {
-      fleetId: "e2e-recovered-fleet",
-      name: "Recovered validation fleet",
-      entryMember: "e2e-recovered-fleet/planner",
-      recovered: true,
-      members: [
-        { id: "e2e-recovered-fleet/planner", displayName: "Planner" },
-        { id: "e2e-recovered-fleet/reviewer", displayName: "Reviewer" },
-      ],
-    }, { target: "status", done: true });
+  private requireAgent(agentRef: string): ScriptedAgent {
+    const direct = this.agents.get(agentRef);
+    if (direct) return direct;
+    for (const agent of this.agents.values()) {
+      if (
+        agent.target === agentRef ||
+        agent.alias === agentRef ||
+        agent.runId === agentRef
+      ) {
+        return agent;
+      }
+    }
+    throw new Error(`No active agent matches "${agentRef}".`);
   }
 
-  async stopFleet(fleetIdOrRunId: string, reason = "Fleet stopped by scripted runtime"): Promise<void> {
-    this.emit("fleet.stopped", {
-      fleetId: fleetIdOrRunId,
-      reason,
-      members: [],
-    }, { target: "status", done: true });
+  async spawnAgents(request: SpawnAgentsRequest): Promise<Array<Record<string, unknown>>> {
+    const standardCanTalkTo = new Set(request.standardCanTalkTo);
+    const results: Array<Record<string, unknown>> = [];
+    for (const definition of request.agents) {
+      const agentId = randomUUID();
+      const agent: ScriptedAgent = {
+        agentId,
+        target: `agent:${agentId}`,
+        alias: definition.id,
+        displayName: definition.displayName,
+        description: definition.description,
+        task: definition.task,
+        recipients: [...definition.canTalkTo],
+        standardCanTalk: standardCanTalkTo.has(definition.id),
+        runId: randomUUID(),
+        sessionId: `e2e-agent-session-${definition.id}`,
+      };
+      this.agents.set(agentId, agent);
+      this.emit("agent.loading", { ...this.agentPayload(agent), recovered: false }, {
+        runId: agent.runId,
+        memberId: agent.target,
+        target: "status",
+        done: false,
+      });
+      this.emit(
+        "agent.ready",
+        { ...this.agentPayload(agent), recovered: false, sessionId: agent.sessionId },
+        { runId: agent.runId, memberId: agent.target, target: "status", done: true },
+      );
+      this.emitBusy(agent.target, `turn-${agent.agentId}`);
+      this.emitMessage(
+        agent.target,
+        `message-${agent.agentId}`,
+        `SCRIPTED-AGENT-TASK: ${agent.task}`,
+      );
+      this.emitIdle(agent.target);
+      results.push({ ...this.agentPayload(agent), sessionId: agent.sessionId, started: true });
+    }
+    return results;
   }
 
-  async mutateFleetAddOrUpdate(
-    _fleetId: string,
-    agentDefinition: DynamicAgentDefinition,
-  ): Promise<Record<string, unknown>> {
-    return { action: "updated", agentId: agentDefinition.id, reconnectedAgents: [] };
+  async resumeAgent(runId: string): Promise<void> {
+    if (this.profile !== "telescope" || runId !== RECOVERABLE_AGENT_RUN_ID) {
+      throw new Error(`Agent run "${runId}" was not found for this workspace.`);
+    }
+    const agent: ScriptedAgent = {
+      agentId: RECOVERABLE_AGENT_ID,
+      target: `agent:${RECOVERABLE_AGENT_ID}`,
+      alias: "planner",
+      displayName: "Planner",
+      description: "Plan the workspace validation",
+      task: "Plan the workspace validation and report the plan.",
+      recipients: ["standard"],
+      standardCanTalk: true,
+      runId: RECOVERABLE_AGENT_RUN_ID,
+      sessionId: "e2e-recovered-agent-session",
+    };
+    this.agents.set(agent.agentId, agent);
+    this.recoveredAgentRun = true;
+    this.emit(
+      "agent.loading",
+      { ...this.agentPayload(agent), recovered: true, sessionId: agent.sessionId },
+      { runId: agent.runId, memberId: agent.target, target: "status", done: false },
+    );
+    this.emit("session.identity", { sessionId: agent.sessionId }, {
+      runId: agent.runId,
+      memberId: agent.target,
+      target: "activity",
+      done: true,
+    });
+    this.emit(
+      "agent.ready",
+      { ...this.agentPayload(agent), recovered: true, sessionId: agent.sessionId },
+      { runId: agent.runId, memberId: agent.target, target: "status", done: true },
+    );
+    this.emit("member.state", { state: "idle" }, {
+      runId: agent.runId,
+      memberId: agent.target,
+      target: "status",
+      done: true,
+    });
   }
 
-  async mutateFleetRemove(
-    _fleetId: string,
-    agentId: string,
-    _newEntryAgent?: string,
-  ): Promise<Record<string, unknown>> {
-    return { action: "removed", agentId, reconnectedAgents: [] };
+  async stopAgent(agentRef: string, reason = "Agent stopped by scripted runtime"): Promise<void> {
+    const agent = this.requireAgent(agentRef);
+    this.agents.delete(agent.agentId);
+    this.emit("agent.stopped", { ...this.agentPayload(agent), reason }, {
+      runId: agent.runId,
+      memberId: agent.target,
+      target: "status",
+      done: true,
+    });
   }
 
-  async mutateFleetMove(
-    sourceFleetId: string,
-    destinationFleetId: string,
-    agentId: string,
-    _options: FleetMoveOptions = {},
-  ): Promise<Record<string, unknown>> {
-    return { sourceFleetId, destinationFleetId, agentId, sessionPreserved: true };
+  async updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>> {
+    const agent = this.requireAgent(agentRef);
+    agent.displayName = update.definition.displayName;
+    agent.description = update.definition.description;
+    agent.task = update.definition.task;
+    agent.recipients = [...update.definition.canTalkTo];
+    if (update.standardCanTalk !== undefined) {
+      agent.standardCanTalk = update.standardCanTalk;
+    }
+    this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: false }, {
+      runId: agent.runId,
+      memberId: agent.target,
+      target: "status",
+      done: true,
+    });
+    return { action: "updated", ...this.agentPayload(agent), reconnected: false };
   }
 
   async shutdown(reason: string): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.agents.clear();
     if (this.standardRunId) {
       this.db.finishRun(this.standardRunId, "stopped", reason);
     }

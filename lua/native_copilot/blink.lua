@@ -68,8 +68,8 @@ function Source:get_completions(context, callback)
   local unsubscribe = commands.on_catalog(target, function(available)
     if not cancelled then callback(response(context, available)) end
   end)
-  local ok, fleet = pcall(require, 'native_copilot')
-  if ok then fleet.ensure_commands(target) end
+  local ok, plugin = pcall(require, 'native_copilot')
+  if ok then plugin.ensure_commands(target) end
   return function()
     cancelled = true
     unsubscribe()

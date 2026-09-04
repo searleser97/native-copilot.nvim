@@ -17,15 +17,21 @@ import {
   type Tool,
 } from "@github/copilot-sdk";
 import { z } from "zod";
-import { FleetDatabase, type SettledMessage } from "./database.js";
-import { dynamicAgentSchema, dynamicFleetSchema, validateFleet } from "./config.js";
+import { AgentDatabase } from "./database.js";
+import {
+  STANDARD_ALIAS,
+  dynamicAgentSchema,
+  spawnAgentsSchema,
+  validateAgentDefinition,
+  validateSpawnRequest,
+} from "./config.js";
+import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
 import type {
   DynamicAgentDefinition,
-  DynamicFleetDefinition,
   DynamicPermission,
   PermissionProfile,
-  ResolvedFleet,
-  ResolvedMember,
+  ResolvedAgent,
+  SpawnAgentsRequest,
 } from "./types.js";
 
 export interface RuntimeEmitter {
@@ -135,20 +141,52 @@ export function resolveRuntimeCommand(
   });
 }
 
+export const STANDARD_TARGET = "standard";
+export const AGENT_TARGET_PREFIX = "agent:";
+
+/** Builds the runtime/UI target id of a spawned agent from its durable UUID. */
+export function agentTarget(agentId: string): string {
+  return `${AGENT_TARGET_PREFIX}${agentId}`;
+}
+
+export type TargetRoute =
+  | { kind: "standard" }
+  | { kind: "agent"; agentId: string };
+
+/**
+ * Decides how a UI/runtime target id routes. Only the exact id "standard" reaches
+ * the Standard supervisor; every spawned agent is addressed as "agent:<uuid>" with
+ * its durable runtime UUID. Anything else is malformed and rejected rather than
+ * silently falling back to Standard.
+ */
+export function routeTarget(target: string): TargetRoute {
+  if (target === STANDARD_TARGET) {
+    return { kind: "standard" };
+  }
+  if (target.startsWith(AGENT_TARGET_PREFIX)) {
+    const agentId = target.slice(AGENT_TARGET_PREFIX.length);
+    if (agentId.length > 0) {
+      return { kind: "agent", agentId };
+    }
+  }
+  throw new Error(`Target "${target}" is neither "standard" nor an "agent:<uuid>" target.`);
+}
+
+/** One live SDK session: the Standard supervisor or exactly one standalone agent. */
 interface LiveSession {
   session: CopilotSession;
   runId: string;
-  // Raw agent identifier, unique within a Fleet definition and used for
-  // DB run-scoped records, session IDs, and peer send_to_<agent> tool names.
-  memberId: string;
-  // Fleet-qualified UI/runtime identity (e.g. "fleet_a/planner"); "standard"
-  // for the supervisor session. Unique across all concurrently active Fleets.
+  // Runtime/UI identity: "standard" or "agent:<uuid>".
   target: string;
-  // Owning Fleet id, or undefined for the Standard supervisor session.
-  fleetId: string | undefined;
-  // Peer recipient set the live session's custom tools were built from; used to
-  // detect when a mutation requires reconnecting the session with new peer tools.
-  recipients: Set<string>;
+  // Durable agent UUID, or undefined for the Standard supervisor session.
+  agentId: string | undefined;
+  // Tool-safe alias; "standard" for the supervisor session.
+  alias: string;
+  // Deterministic signature of everything this session's SessionConfig was built
+  // from — the complete agent definition plus its resolved outgoing peer targets.
+  // Any difference means the live session must be reconnected with a rebuilt config
+  // while preserving its session id and history.
+  configSignature: string;
   modelId: string | undefined;
   aicUsed: number;
   busy: boolean;
@@ -175,236 +213,57 @@ interface EnvironmentProbe {
 
 type McpAuthHandler = NonNullable<SessionConfig["onMcpAuthRequest"]>;
 
-// A concurrently running Fleet. The Standard supervisor session is tracked
-// separately and always stays connected while any number of these are active.
-interface FleetContext {
-  runId: string;
-  fleet: ResolvedFleet;
-  mcpServers: Set<string>;
-}
-
-// Minimal shape of an active Fleet needed to plan a cross-Fleet agent move.
-export interface FleetMoveParticipant {
-  fleet: ResolvedFleet;
-  mcpServers: Set<string>;
-}
-
-export interface FleetMoveOptions {
-  replacementEntryAgentId?: string;
-  destinationAgent?: DynamicAgentDefinition;
-}
-
-// A snapshot of a live Fleet member captured before a fallible mutation so the exact
-// pre-mutation connectivity (session id and peer recipients) can be restored on
-// rollback, even for members whose live entry was removed during the failed attempt.
-interface LiveMemberSnapshot {
+/**
+ * One standalone durable agent. Every agent owns its own DB run, SDK session, and
+ * mailbox; agents are never grouped, so this is the complete runtime identity.
+ */
+interface AgentContext {
+  /** Durable internal UUID assigned by the runtime. */
+  agentId: string;
+  /** Runtime/UI target id, always "agent:<agentId>". */
   target: string;
-  memberId: string;
-  sessionId: string;
-  recipients: Set<string>;
+  /** Tool-safe alias, unique among active and recoverable agents. */
+  alias: string;
+  runId: string;
+  definition: DynamicAgentDefinition;
+  agent: ResolvedAgent;
+  /** MCP server ceiling captured from the Standard session when the agent started. */
+  mcpServers: Set<string>;
 }
 
-// The pure outcome of validating and computing a cross-Fleet move. It contains the
-// two rewritten (and re-validated) definitions plus the metadata the runtime needs
-// to apply, persist, and roll the move back. Producing it has no side effects, so
-// every move rule can be unit-tested without the SDK.
-export interface FleetMovePlan {
-  sourceDefinition: DynamicFleetDefinition;
-  destinationDefinition: DynamicFleetDefinition;
-  sourceFleet: ResolvedFleet;
-  destinationFleet: ResolvedFleet;
-  destinationAgent: DynamicAgentDefinition;
-  isEntry: boolean;
-  affectedSourcePeers: string[];
+/** One outgoing communication edge, resolved from an alias to a concrete target. */
+interface PeerBinding {
+  alias: string;
+  agentId: string | undefined;
+  target: string | undefined;
 }
 
 /**
- * Validates a cross-Fleet agent move and computes the rewritten source and
- * destination definitions. Throws on any rule violation (unknown/duplicate agent,
- * emptying the source, moving the entry agent without a replacement, an out-of-
- * ceiling destination agent, or a resulting definition that fails validation).
- * Pure: it never mutates its inputs or touches sessions/DB.
+ * Deterministic JSON for signature comparison: object keys are emitted in sorted
+ * order so two structurally identical definitions always produce the same string
+ * regardless of the key order they were parsed or persisted with.
  */
-export function planFleetMove(
-  source: FleetMoveParticipant,
-  destination: FleetMoveParticipant,
-  agentId: string,
-  options: FleetMoveOptions,
-  allowAll: boolean,
-  nativeToolCeiling: string[] = [],
-): FleetMovePlan {
-  if (source.fleet.id === destination.fleet.id) {
-    throw new Error("The source and destination Fleets must be different.");
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
   }
-  if (!source.fleet.members.has(agentId)) {
-    throw new Error(`Fleet "${source.fleet.id}" has no agent "${agentId}".`);
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`);
+    return `{${entries.join(",")}}`;
   }
-  if (destination.fleet.members.has(agentId)) {
-    throw new Error(
-      `Fleet "${destination.fleet.id}" already has an agent "${agentId}"; ids must be unique per Fleet.`,
-    );
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
   }
-  if (source.fleet.members.size <= 1) {
-    throw new Error(`Cannot move the final member of fleet "${source.fleet.id}".`);
-  }
-
-  const sourceAgent = source.fleet.definition.agents.find((agent) => agent.id === agentId)!;
-  const destinationMemberIds = new Set(
-    destination.fleet.definition.agents.map((agent) => agent.id),
-  );
-  let destinationAgent: DynamicAgentDefinition;
-  if (options.destinationAgent) {
-    if (options.destinationAgent.id !== agentId) {
-      throw new Error(
-        `destinationAgent.id "${options.destinationAgent.id}" must equal the moved agent id "${agentId}".`,
-      );
-    }
-    destinationAgent = options.destinationAgent;
-  } else {
-    destinationAgent = {
-      ...structuredClone(sourceAgent),
-      canTalkTo: sourceAgent.canTalkTo.filter(
-        (id) => id !== agentId && destinationMemberIds.has(id),
-      ),
-    };
-  }
-
-  if (
-    !allowAll &&
-    destinationAgent.permissions &&
-    "mode" in destinationAgent.permissions &&
-    destinationAgent.permissions.mode === "approveAll"
-  ) {
-    throw new Error(
-      "approveAll child permissions require the main Copilot command to include --allow-all.",
-    );
-  }
-  if (
-    destinationAgent.permissions &&
-    !("mode" in destinationAgent.permissions) &&
-    !memberToolsWithinCeiling(nativeToolCeiling, destinationAgent.permissions.tools.allow)
-  ) {
-    throw new Error(
-      `Fleet agent "${agentId}" requests tools outside the main session allowlist ` +
-        `(${nativeToolCeiling.join(", ") || "unrestricted"}). Child allowlists may only narrow ` +
-        "the native tool ceiling.",
-    );
-  }
-  for (const server of destinationAgent.mcpServers ?? []) {
-    if (!destination.mcpServers.has(server)) {
-      throw new Error(
-        `Fleet agent "${agentId}" requested MCP server "${server}" unavailable in "${destination.fleet.id}".`,
-      );
-    }
-  }
-
-  const sourceDefinition = structuredClone(source.fleet.definition) as DynamicFleetDefinition;
-  const isEntry = sourceDefinition.entryAgent === agentId;
-  if (isEntry) {
-    const replacement = options.replacementEntryAgentId;
-    if (!replacement) {
-      throw new Error(
-        `Cannot move entry agent "${agentId}" without naming a replacementEntryAgentId.`,
-      );
-    }
-    if (replacement === agentId) {
-      throw new Error("replacementEntryAgentId must name a different agent than the one moving.");
-    }
-    if (!sourceDefinition.agents.some((agent) => agent.id === replacement)) {
-      throw new Error(
-        `replacementEntryAgentId "${replacement}" is not a member of fleet "${source.fleet.id}".`,
-      );
-    }
-    sourceDefinition.entryAgent = replacement;
-  }
-  sourceDefinition.agents = sourceDefinition.agents
-    .filter((agent) => agent.id !== agentId)
-    .map((agent) => ({ ...agent, canTalkTo: agent.canTalkTo.filter((id) => id !== agentId) }));
-  const validatedSource = validateFleet(sourceDefinition);
-  if (!validatedSource.valid || !validatedSource.fleet) {
-    throw new Error(
-      `Source fleet "${source.fleet.id}" move is invalid: ${validatedSource.issues
-        .map((issue) => `${issue.path}: ${issue.message}`)
-        .join("; ")}`,
-    );
-  }
-
-  const destinationDefinition = structuredClone(
-    destination.fleet.definition,
-  ) as DynamicFleetDefinition;
-  destinationDefinition.agents.push(destinationAgent);
-  const validatedDestination = validateFleet(destinationDefinition);
-  if (!validatedDestination.valid || !validatedDestination.fleet) {
-    throw new Error(
-      `Destination fleet "${destination.fleet.id}" move is invalid: ${validatedDestination.issues
-        .map((issue) => `${issue.path}: ${issue.message}`)
-        .join("; ")}`,
-    );
-  }
-
-  const affectedSourcePeers = [...source.fleet.members.entries()]
-    .filter(([id, member]) => id !== agentId && member.recipients.has(agentId))
-    .map(([id]) => id);
-
-  return {
-    sourceDefinition,
-    destinationDefinition,
-    sourceFleet: validatedSource.fleet,
-    destinationFleet: validatedDestination.fleet,
-    destinationAgent,
-    isEntry,
-    affectedSourcePeers,
-  };
+  return "null";
 }
 
-export const STANDARD_TARGET = "standard";
-
-/** Builds the Fleet-qualified UI/runtime target id for a raw member id. */
-export function qualifiedTarget(fleetId: string, memberId: string): string {
-  return `${fleetId}/${memberId}`;
-}
-
-/** Splits a qualified target id back into its Fleet id and raw member id. */
-export function parseTarget(target: string): { fleetId?: string; memberId: string } {
-  const separator = target.indexOf("/");
-  if (separator < 0) {
-    return { memberId: target };
-  }
-  return { fleetId: target.slice(0, separator), memberId: target.slice(separator + 1) };
-}
-
-export type TargetRoute =
-  | { kind: "standard" }
-  | { kind: "fleet"; fleetId: string; memberId: string };
-
-/**
- * Decides how a UI/runtime target id routes. Only the exact unqualified id
- * "standard" reaches the Standard supervisor; a qualified id such as
- * "fleet_a/standard" routes the Fleet member named "standard". Any other
- * unqualified id, or a qualified id missing its Fleet id or member id, is
- * malformed and rejected rather than silently falling back to Standard.
- */
-export function routeTarget(target: string): TargetRoute {
-  if (target === STANDARD_TARGET) {
-    return { kind: "standard" };
-  }
-  const { fleetId, memberId } = parseTarget(target);
-  if (fleetId === undefined || fleetId.length === 0 || memberId.length === 0) {
-    throw new Error(`Target "${target}" is not a valid Fleet-qualified member id.`);
-  }
-  return { kind: "fleet", fleetId, memberId };
-}
-
-function setsEqual(left: Set<string>, right: Set<string>): boolean {
-  if (left.size !== right.size) {
-    return false;
-  }
-  for (const value of left) {
-    if (!right.has(value)) {
-      return false;
-    }
-  }
-  return true;
+interface MailboxRecipient {
+  runId: string;
+  target: string;
+  alias: string;
 }
 
 export interface RuntimeSessionOptions {
@@ -420,7 +279,7 @@ export interface RuntimeSessionOptions {
 /**
  * The canonical, typed native configuration parsed once from the resolved main
  * Copilot command. This is the single source of truth every session inherits:
- * the Standard supervisor and every Fleet member build from it through
+ * the Standard supervisor and every agent build from it through
  * {@link applyNativePolicy}. Agent-specific settings are only ever overlays or
  * restrictions on this object — nothing re-parses the command or re-declares
  * these defaults elsewhere. `mcpServers` is the merged native MCP-server record
@@ -437,19 +296,26 @@ export interface NativePolicy {
   reasoningEffort?: string;
 }
 
-interface StoredDynamicFleet {
-  definition: DynamicFleetDefinition;
+/** The durable per-agent record persisted on the agent's own run. */
+interface StoredAgentRecord {
+  definition: DynamicAgentDefinition;
   mcpServers: string[];
+  standardCanTalk: boolean;
 }
 
-function storedDynamicFleet(value: string): StoredDynamicFleet {
-  const parsed = JSON.parse(value) as Partial<StoredDynamicFleet>;
-  if (!parsed.definition || !Array.isArray(parsed.mcpServers)) {
-    throw new Error("Stored fleet definition is invalid.");
+function storedAgentRecord(value: string): StoredAgentRecord {
+  const parsed = JSON.parse(value) as Partial<StoredAgentRecord>;
+  if (
+    !parsed.definition ||
+    typeof parsed.definition !== "object" ||
+    !Array.isArray(parsed.mcpServers)
+  ) {
+    throw new Error("The stored agent definition is invalid.");
   }
   return {
     definition: parsed.definition,
     mcpServers: parsed.mcpServers.filter((server): server is string => typeof server === "string"),
+    standardCanTalk: parsed.standardCanTalk === true,
   };
 }
 
@@ -588,12 +454,12 @@ export function runtimeSessionOptions(command: string | undefined): RuntimeSessi
  * Reads the MCP server definitions named by every `--additional-mcp-config` value
  * (inline JSON or a `.mcp.json`-style file path) into one merged record. This is
  * the single native MCP-server source that both the Standard session and every
- * Fleet member inherit. Because these values come directly from the user's main
- * Copilot command, a broken source is surfaced as an error rather than silently
- * dropped: a missing/unreadable file, invalid JSON, a non-object root, a missing
+ * agent inherit. Because these values come directly from the user's main Copilot
+ * command, a broken source is surfaced as an error rather than silently dropped:
+ * a missing/unreadable file, invalid JSON, a non-object root, a missing
  * `mcpServers`/`servers` group, or a non-object server entry all throw. Silently
  * discarding them would hide the misconfiguration and quietly shrink the native
- * MCP ceiling that Fleet members inherit.
+ * MCP ceiling that agents inherit.
  */
 export function additionalMcpServers(
   values: string[],
@@ -661,8 +527,8 @@ export function additionalMcpServers(
  * command and workspace. It composes the two native parsers —
  * {@link runtimeSessionOptions} (CLI session flags) and
  * {@link additionalMcpServers} (`--additional-mcp-config` sources) — into the
- * single typed object that drives both the Standard session and every Fleet
- * member. This is the only place these defaults are assembled.
+ * single typed object that drives both the Standard session and every agent.
+ * This is the only place these defaults are assembled.
  */
 export function nativePolicy(
   command: string | undefined,
@@ -692,9 +558,9 @@ export function nativePolicy(
 
 /**
  * Layers the single canonical {@link NativePolicy} onto a session config. Every
- * session — Standard and Fleet members alike — passes through here so children
+ * session — Standard and every agent alike — passes through here so children
  * inherit the same native working directory policy by default. A config that has
- * already narrowed a dimension (e.g. a member's own `availableTools` allowlist,
+ * already narrowed a dimension (e.g. an agent's own `availableTools` allowlist,
  * an explicit `mcpServers` entry, or its own `model`) is treated as a deliberate
  * override and preserved; native denies (`excludedTools`, `disabledMcpServers`)
  * always merge as a ceiling.
@@ -729,10 +595,10 @@ export function applyNativePolicy(config: SessionConfig, policy: NativePolicy): 
  * session scaffold (client name, streaming, session store, schedule support, and
  * config/instruction discovery rooted at the native working directory) with the
  * canonical native policy layered by {@link applyNativePolicy}. Both the Standard
- * supervisor and every Fleet member start from this exact object; the instance
- * only attaches per-session permission/MCP-auth handlers and then narrows or
- * overrides individual fields. Handlers are intentionally omitted here so this
- * remains a pure, testable definition of the inherited base.
+ * supervisor and every agent start from this exact object; the instance only
+ * attaches per-session permission/MCP-auth handlers and then narrows or overrides
+ * individual fields. Handlers are intentionally omitted here so this remains a
+ * pure, testable definition of the inherited base.
  */
 export function nativeSessionScaffold(policy: NativePolicy): SessionConfig {
   const config: SessionConfig = {
@@ -823,10 +689,10 @@ export function permissionDecision(
           : reject(`Write access is outside the configured path ceiling: ${request.fileName}`);
       case "shell": {
         if (!profile.commands) {
-          return reject("Shell commands are disabled for this member.");
+          return reject("Shell commands are disabled for this agent.");
         }
         if (!profile.network && request.possibleUrls.length > 0) {
-          return reject("Network access is disabled for this member.");
+          return reject("Network access is disabled for this agent.");
         }
         const readOnly = request.commands.every((command) => command.readOnly);
         const roots = readOnly ? profile.paths.read : profile.paths.write;
@@ -841,22 +707,22 @@ export function permissionDecision(
             request.fullCommandText,
           )
         ) {
-          return reject("Git write operations are disabled for this member.");
+          return reject("Git write operations are disabled for this agent.");
         }
         return approve(request);
       }
       case "url":
         return profile.network
           ? approve(request)
-          : reject("Network access is disabled for this member.");
+          : reject("Network access is disabled for this agent.");
       case "mcp":
         return profile.externalActions && toolAllowed(profile, request.toolName)
           ? approve(request)
-          : reject(`MCP tool "${request.toolName}" is not permitted for this member.`);
+          : reject(`MCP tool "${request.toolName}" is not permitted for this agent.`);
       case "custom-tool":
         return toolAllowed(profile, request.toolName)
           ? approve(request)
-          : reject(`Custom tool "${request.toolName}" is not permitted for this member.`);
+          : reject(`Custom tool "${request.toolName}" is not permitted for this agent.`);
       case "memory":
       case "hook":
       case "extension-management":
@@ -864,12 +730,12 @@ export function permissionDecision(
       case "factory":
         return profile.externalActions
           ? approve(request)
-          : reject(`${request.kind} operations are disabled for this member.`);
+          : reject(`${request.kind} operations are disabled for this agent.`);
   }
 }
 
 export function usesApproveAll(
-  permission: DynamicPermission | PermissionProfile | undefined,
+  permission: DynamicPermission | undefined,
   mainAllowsAll: boolean,
 ): boolean {
   if (permission && "mode" in permission) {
@@ -909,52 +775,58 @@ function toolCeilingCovers(ceiling: Set<string>, pattern: string): boolean {
 }
 
 /**
- * Returns true when a Fleet member's requested tool allowlist is semantically a
- * subset of the canonical native ceiling. An empty native allowlist means the main
- * session is unrestricted, so any member allowlist is permitted. Both sides are
- * normalized through {@link sdkToolPatterns}, so a bare "*" and source wildcards
- * (e.g. "builtin:*") are expanded and matched. This is enforced instead of silently
- * intersecting, so an invalid (widening) member definition is rejected rather than
+ * Returns true when an agent's requested tool allowlist is semantically a subset of
+ * the canonical native ceiling. An empty native allowlist means the main session is
+ * unrestricted, so any agent allowlist is permitted. Both sides are normalized
+ * through {@link sdkToolPatterns}, so a bare "*" and source wildcards (e.g.
+ * "builtin:*") are expanded and matched. This is enforced instead of silently
+ * intersecting, so an invalid (widening) agent definition is rejected rather than
  * quietly narrowed in a way that hides the mistake.
  */
-export function memberToolsWithinCeiling(nativeAllow: string[], memberAllow: string[]): boolean {
+export function agentToolsWithinCeiling(nativeAllow: string[], agentAllow: string[]): boolean {
   const ceilingList = sdkToolPatterns(nativeAllow);
   if (ceilingList.length === 0) {
     return true;
   }
   const ceiling = new Set(ceilingList);
-  return sdkToolPatterns(memberAllow).every((pattern) => toolCeilingCovers(ceiling, pattern));
+  return sdkToolPatterns(agentAllow).every((pattern) => toolCeilingCovers(ceiling, pattern));
 }
 
-export class CopilotRuntime {
+export class CopilotRuntime implements RuntimeAdapter {
   private client: CopilotClient | undefined;
   private knownSessionIds = new Set<string>();
   private readonly live = new Map<string, LiveSession>();
+  // In-flight SDK connections keyed by target. Every connect path goes through this
+  // guard so one durable agent can never end up with two concurrent SDK sessions.
+  private readonly connecting = new Map<string, Promise<LiveSession>>();
   // The single canonical native policy parsed once from the resolved main Copilot
-  // command. Both the Standard supervisor and every Fleet member inherit it; agent
+  // command. Both the Standard supervisor and every agent inherit it; agent
   // settings only overlay or restrict it, so there is one source of truth.
   private readonly policy: NativePolicy;
-  // The Standard supervisor session's run. It stays connected for the lifetime
-  // of the host while any number of Fleets run concurrently.
+  // The Standard supervisor session's run. It stays connected for the lifetime of
+  // the host and supervises agents without any implied permission to message them.
   private standard: { runId: string } | undefined;
-  // Active Fleets keyed by Fleet id. Each context owns its own run, resolved
-  // definition, and MCP server ceiling, and its members are tracked in `live`
-  // under Fleet-qualified target ids so equal raw member ids never collide.
-  private readonly fleets = new Map<string, FleetContext>();
+  // Every active standalone agent, keyed by its durable runtime UUID.
+  private readonly agents = new Map<string, AgentContext>();
+  // Alias index over `agents`; aliases are unique among active agents and
+  // recoverable agent runs, so an alias always resolves to at most one UUID.
+  private readonly aliasIndex = new Map<string, string>();
   private shuttingDown = false;
-  // Fleets requested via create_fleet while Standard is busy. They start once
-  // Standard becomes idle; multiple requests may queue.
-  private readonly pendingFleets: DynamicFleetDefinition[] = [];
+  // Spawn requests accepted while Standard is busy. Each queued request starts its
+  // agents independently once Standard becomes idle.
+  private readonly pendingSpawns: SpawnAgentsRequest[] = [];
   private readonly pendingPermissions = new Map<
     string,
     { target: string; respond: (result: PermissionRequestResult) => void }
   >();
-  private readonly fleetLocks = new Map<string, Promise<void>>();
+  // Serializes lifecycle operations per agent UUID so concurrent update/stop
+  // requests cannot interleave on the same agent.
+  private readonly agentLocks = new Map<string, Promise<void>>();
   private readonly recoveryTimer: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly workspace: string,
-    private readonly db: FleetDatabase,
+    private readonly db: AgentDatabase,
     private readonly emit: RuntimeEmitter,
     private readonly runtimeCommand?: string,
   ) {
@@ -1031,7 +903,7 @@ export class CopilotRuntime {
       }
       return live;
     }
-    return this.ensureFleetMember(route.fleetId, route.memberId);
+    return this.ensureAgentSession(route.agentId);
   }
 
   async listCommands(target: string): Promise<unknown[]> {
@@ -1159,10 +1031,10 @@ export class CopilotRuntime {
 
     const id = randomUUID();
     const display = result.displayPrompt || `/${name}${input ? ` ${input}` : ""}`;
-    this.db.enqueueMessage(id, live.runId, "user", live.memberId, "user", display);
+    this.db.enqueueMessage(id, live.runId, "user", live.target, "user", display);
     this.emit(
       "prompt.queued",
-      { id, source: "command", target: live.memberId, content: display },
+      { id, source: "command", target: live.target, content: display },
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
     try {
@@ -1170,7 +1042,7 @@ export class CopilotRuntime {
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
-        { id, sdkMessageId, source: "user", target: live.memberId, content: display },
+        { id, sdkMessageId, source: "user", target: live.target, content: display },
         { runId: live.runId, memberId: live.target, target: "conversation" },
       );
       return {
@@ -1369,19 +1241,15 @@ export class CopilotRuntime {
     }
   }
 
-  // Attaches per-session permission and MCP-auth handlers to the shared native
-  // base (nativeSessionScaffold). Standard and Fleet members both build from that
-  // identical base and then only narrow or deliberately override individual fields,
-  // so there is one source of truth for inherited defaults. The uiTarget is the
-  // Fleet-qualified routing id used for control-plane events; raw member ids are
-  // reserved for run-scoped DB and peer semantics.
+  // Attaches per-session permission and MCP-auth handlers to the shared native base
+  // (nativeSessionScaffold). Standard and every agent build from that identical base
+  // and then only narrow or deliberately override individual fields, so there is one
+  // source of truth for inherited defaults. The uiTarget is the runtime routing id
+  // ("standard" or "agent:<uuid>").
   private baseSessionConfig(
     uiTarget: string,
     permission: DynamicPermission | undefined,
   ): SessionConfig {
-    // The shared, canonical native base both Standard and every Fleet member build
-    // from. The instance only attaches per-session handlers; native tool/MCP/model
-    // policy is already layered by nativeSessionScaffold.
     const config = nativeSessionScaffold(this.policy);
     config.onPermissionRequest = this.permissionHandler(permission, uiTarget);
     config.onMcpAuthRequest = this.mcpAuthHandler(uiTarget);
@@ -1456,40 +1324,36 @@ export class CopilotRuntime {
       });
   }
 
-  private memberConfig(
-    member: ResolvedMember,
-    tools: Tool<any>[],
-    fleetMcpServers: Set<string>,
-    uiTarget: string,
-  ): SessionConfig {
+  private agentConfig(context: AgentContext): SessionConfig {
     // Start from the identical native base the Standard session uses. The base has
     // already layered the canonical native policy, so everything below only narrows
     // or deliberately overrides individual inherited fields.
-    const config = this.baseSessionConfig(uiTarget, member.permission);
+    const agent = context.agent;
+    const config = this.baseSessionConfig(context.target, agent.permission);
     config.includeSubAgentStreamingEvents = false;
-    config.reasoningSummary = member.reasoningSummary;
-    config.systemMessage = { mode: "append", content: member.initialPrompt };
-    config.tools = tools;
-    if (member.permission && !("mode" in member.permission)) {
-      // Narrow: the member allowlist replaces the inherited native allowlist.
-      config.availableTools = sdkToolPatterns(member.permission.tools.allow);
-      // Restrict: member denies merge on top of the inherited native excluded ceiling.
+    config.reasoningSummary = agent.reasoningSummary;
+    config.systemMessage = { mode: "append", content: agent.initialPrompt };
+    config.tools = this.createPeerMessageTools(context);
+    if (agent.permission && !("mode" in agent.permission)) {
+      // Narrow: the agent allowlist replaces the inherited native allowlist.
+      config.availableTools = sdkToolPatterns(agent.permission.tools.allow);
+      // Restrict: agent denies merge on top of the inherited native excluded ceiling.
       const nativeExcluded = Array.isArray(config.excludedTools) ? config.excludedTools : [];
       config.excludedTools = [
-        ...new Set([...nativeExcluded, ...sdkToolPatterns(member.permission.tools.deny)]),
+        ...new Set([...nativeExcluded, ...sdkToolPatterns(agent.permission.tools.deny)]),
       ];
     }
-    if (member.model !== undefined) {
-      config.model = member.model;
+    if (agent.model !== undefined) {
+      config.model = agent.model;
     }
-    if (member.reasoningEffort !== undefined) {
-      config.reasoningEffort = member.reasoningEffort;
+    if (agent.reasoningEffort !== undefined) {
+      config.reasoningEffort = agent.reasoningEffort;
     }
-    if (member.mcpServers) {
+    if (agent.mcpServers) {
       config.disabledMcpServers = [
         ...new Set([
           ...(config.disabledMcpServers ?? []),
-          ...[...fleetMcpServers].filter((server) => !member.mcpServers!.has(server)),
+          ...[...context.mcpServers].filter((server) => !agent.mcpServers!.has(server)),
         ]),
       ];
     }
@@ -1499,67 +1363,195 @@ export class CopilotRuntime {
   private standardSessionConfig(): SessionConfig {
     // The Standard supervisor uses the native base unchanged — native tool/MCP and
     // model/reasoning policy are already layered by baseSessionConfig — adding only
-    // its Fleet-management tools.
-    const config = this.baseSessionConfig("standard", undefined);
+    // its agent-management tools.
+    const config = this.baseSessionConfig(STANDARD_TARGET, undefined);
     config.reasoningSummary = "detailed";
     config.tools = [
-      this.createFleetTool(),
-      this.addAgentToFleetTool(),
-      this.removeAgentFromFleetTool(),
-      this.moveAgentToFleetTool(),
+      this.spawnAgentsTool(),
+      this.updateAgentTool(),
+      this.removeAgentTool(),
+      this.sendToAgentTool(),
+      this.listAgentsTool(),
     ];
     return config;
   }
 
-  private createFleetTool(): Tool<any> {
-    return defineTool("create_fleet", {
+  private spawnAgentsTool(): Tool<any> {
+    return defineTool("spawn_agents", {
       description:
-        "Create and start a task-specific Fleet when the user asks for multiple collaborating " +
+        "Spawn one or more standalone durable Copilot agents when the user asks for additional " +
         "agents or when independent planning, implementation, testing, or review would materially " +
-        "improve the result. Define every agent completely at runtime. Give each agent a focused " +
-        "prompt, least-privilege permissions, only the MCP servers it needs, and directional " +
-        "canTalkTo peers; each peer becomes a send_to_<agent> tool. The objective is delivered to " +
-        "entryAgent after startup. Omitted permissions and mcpServers inherit the main session. " +
-        "The Fleet runs alongside the Standard session and any other active Fleets; Standard " +
-        "stays connected as supervisor. The Fleet starts once this Standard turn becomes idle.",
-      parameters: dynamicFleetSchema,
+        "improve the result. Define every agent completely at runtime: a focused prompt, a concrete " +
+        "initial task, least-privilege permissions, only the MCP servers it needs, and directional " +
+        "canTalkTo recipients. Each recipient becomes a dedicated send_to_<alias> tool, and the " +
+        'reserved alias "standard" lets an agent message this session. Communication is denied by ' +
+        "default in both directions: list an alias in standardCanTalkTo to allow this session to " +
+        "message that agent. This request is not a group — every agent gets its own durable " +
+        "session, run, and mailbox, and each starts and can be recovered independently once this " +
+        "Standard turn becomes idle.",
+      parameters: spawnAgentsSchema,
       skipPermission: true,
       defer: "never",
-      handler: (definition) => {
-        const fleetDefinition = definition as DynamicFleetDefinition;
-        const result = validateFleet(fleetDefinition);
-        if (!result.valid) {
-          throw new Error(
-            `Fleet "${fleetDefinition.id}" is invalid: ${result.issues
-              .map((issue) => `${issue.path}: ${issue.message}`)
-              .join("; ")}`,
-          );
-        }
-        if (this.fleets.has(fleetDefinition.id)) {
-          throw new Error(`Fleet "${fleetDefinition.id}" is already active.`);
-        }
-        if (this.pendingFleets.some((pending) => pending.id === fleetDefinition.id)) {
-          throw new Error(`Fleet "${fleetDefinition.id}" is already pending startup.`);
-        }
-        this.assertPermissionCeiling(fleetDefinition.agents);
-        this.pendingFleets.push(fleetDefinition);
+      handler: (request) => {
+        const spawn = request as SpawnAgentsRequest;
+        const resolved = this.resolveSpawnRequest(spawn);
+        this.pendingSpawns.push(spawn);
         this.emit(
-          "fleet.requested",
-          { fleetId: fleetDefinition.id, definition: fleetDefinition, startsWhen: "session.idle" },
+          "agents.requested",
+          {
+            count: resolved.length,
+            agents: resolved.map((agent) => ({
+              alias: agent.alias,
+              displayName: agent.displayName,
+              description: agent.description,
+              task: agent.task,
+              recipients: [...agent.recipients],
+              standardCanTalk: agent.standardCanTalk,
+            })),
+            standardCanTalkTo: [...spawn.standardCanTalkTo],
+            startsWhen: "session.idle",
+          },
+          { memberId: STANDARD_TARGET, target: "activity", done: true },
         );
         return {
           accepted: true,
-          fleetId: fleetDefinition.id,
+          agents: resolved.map((agent) => agent.alias),
           message:
-            "The Fleet will start alongside Standard after this Standard Copilot turn becomes idle.",
+            "Each agent starts independently after this Standard Copilot turn becomes idle.",
         };
       },
     });
   }
 
-  private assertPermissionCeiling(agents: DynamicAgentDefinition[]): void {
-    for (const agent of agents) {
-      const permissions = agent.permissions;
+  private updateAgentTool(): Tool<any> {
+    return defineTool("update_agent", {
+      description:
+        "Replace the complete definition of one active agent in place, without disturbing this " +
+        "session or any other agent. Identify the agent by alias or by its agent id; the alias is " +
+        "durable and cannot be changed. Provide a complete definition — prompt, task, permissions, " +
+        "MCP servers, and canTalkTo — which must respect the permission and MCP ceilings. Set " +
+        "standardCanTalk to grant or revoke this session's permission to message the agent. If the " +
+        "agent's outgoing recipients change, its live session is reconnected with updated " +
+        "send_to_<alias> tools while preserving its session id and history.",
+      parameters: z.object({
+        agent: z.string().min(1).describe("Alias or agent id of the active agent to update."),
+        definition: dynamicAgentSchema.describe(
+          "Complete replacement definition; its id must equal the agent's current alias.",
+        ),
+        standardCanTalk: z
+          .boolean()
+          .optional()
+          .describe(
+            "Whether this Standard session may message the agent; omit to keep the current grant.",
+          ),
+      }),
+      skipPermission: true,
+      defer: "never",
+      handler: async ({ agent, definition, standardCanTalk }) => {
+        const summary = await this.updateAgent(agent, {
+          definition: definition as DynamicAgentDefinition,
+          ...(standardCanTalk === undefined ? {} : { standardCanTalk }),
+        });
+        return { accepted: true, ...summary };
+      },
+    });
+  }
+
+  private removeAgentTool(): Tool<any> {
+    return defineTool("remove_agent", {
+      description:
+        "Stop and remove one active agent, identified by alias or agent id, without disturbing " +
+        "this session or any other agent. The agent is disconnected, its run is closed, and every " +
+        "remaining agent that could message it has that recipient pruned and is reconnected with " +
+        "updated tools while preserving its history.",
+      parameters: z.object({
+        agent: z.string().min(1).describe("Alias or agent id of the active agent to remove."),
+        reason: z.string().min(1).optional().describe("Optional reason recorded on the run."),
+      }),
+      skipPermission: true,
+      defer: "never",
+      handler: async ({ agent, reason }) => {
+        const context = this.requireAgent(agent);
+        await this.stopAgent(context.agentId, reason ?? "Agent removed by Standard Copilot");
+        return {
+          accepted: true,
+          action: "removed",
+          target: context.target,
+          agentId: context.agentId,
+          alias: context.alias,
+        };
+      },
+    });
+  }
+
+  private sendToAgentTool(): Tool<any> {
+    return defineTool("send_to_agent", {
+      description:
+        "Send a durable asynchronous message to one active agent, identified by alias or agent id. " +
+        "This is only permitted for agents explicitly granted to this session through " +
+        "standardCanTalkTo (or a later update_agent); messaging any other agent is rejected.",
+      parameters: z.object({
+        agent: z.string().min(1).describe("Alias or agent id of the recipient agent."),
+        subject: z.string().min(1).optional(),
+        message: z.string().min(1),
+      }),
+      skipPermission: true,
+      defer: "never",
+      handler: ({ agent, subject, message }) => {
+        const context = this.requireAgent(agent);
+        if (!context.agent.standardCanTalk) {
+          throw new Error(
+            `Standard Copilot is not permitted to message agent "${context.alias}". Grant it with ` +
+              "standardCanTalkTo when spawning the agent, or with update_agent.",
+          );
+        }
+        const id = this.enqueueDurableMessage(
+          STANDARD_ALIAS,
+          { runId: context.runId, target: context.target, alias: context.alias },
+          subject,
+          message,
+          STANDARD_TARGET,
+        );
+        return { deliveredToMailbox: context.alias, messageId: id };
+      },
+    });
+  }
+
+  private listAgentsTool(): Tool<any> {
+    return defineTool("list_agents", {
+      description:
+        "List every currently active standalone agent with its alias, agent id, task, outgoing " +
+        "recipients, and whether this session is permitted to message it.",
+      parameters: z.object({}),
+      skipPermission: true,
+      defer: "never",
+      handler: () => ({
+        agents: [...this.agents.values()].map((context) => ({
+          ...this.agentPayload(context),
+          state: this.agentState(context),
+        })),
+      }),
+    });
+  }
+
+  /** Validates a spawn request and every uniqueness/ceiling rule it must satisfy. */
+  private resolveSpawnRequest(request: SpawnAgentsRequest): ResolvedAgent[] {
+    const validated = validateSpawnRequest(request);
+    if (!validated.valid || !validated.agents) {
+      throw new Error(
+        `The agent spawn request is invalid:\n${validated.issues
+          .map((issue) => `${issue.path}: ${issue.message}`)
+          .join("\n")}`,
+      );
+    }
+    this.assertPermissionCeiling(request.agents);
+    this.assertAliasesAvailable(validated.agents.map((agent) => agent.alias));
+    return validated.agents;
+  }
+
+  private assertPermissionCeiling(definitions: DynamicAgentDefinition[]): void {
+    for (const definition of definitions) {
+      const permissions = definition.permissions;
       if (permissions === undefined) {
         continue;
       }
@@ -1574,9 +1566,9 @@ export class CopilotRuntime {
       // A concrete permission profile: its tool allowlist may only narrow the
       // canonical native ceiling, never widen it. Rejecting (rather than silently
       // intersecting) surfaces an invalid LLM-authored definition instead of hiding it.
-      if (!memberToolsWithinCeiling(this.policy.availableTools, permissions.tools.allow)) {
+      if (!agentToolsWithinCeiling(this.policy.availableTools, permissions.tools.allow)) {
         throw new Error(
-          `Fleet agent "${agent.id}" requests tools outside the main session allowlist ` +
+          `Agent "${definition.id}" requests tools outside the main session allowlist ` +
             `(${this.policy.availableTools.join(", ") || "unrestricted"}). Child allowlists may ` +
             "only narrow the native tool ceiling.",
         );
@@ -1585,180 +1577,293 @@ export class CopilotRuntime {
   }
 
   private assertMcpCeiling(
-    agents: DynamicAgentDefinition[],
+    definitions: DynamicAgentDefinition[],
     availableServers: ReadonlySet<string>,
   ): void {
-    for (const agent of agents) {
-      for (const server of agent.mcpServers ?? []) {
+    for (const definition of definitions) {
+      for (const server of definition.mcpServers ?? []) {
         if (!availableServers.has(server)) {
           throw new Error(
-            `Fleet agent "${agent.id}" requested unavailable MCP server "${server}".`,
+            `Agent "${definition.id}" requested unavailable MCP server "${server}".`,
           );
         }
       }
     }
   }
 
-  private addAgentToFleetTool(): Tool<any> {
-    return defineTool("add_agent_to_fleet", {
-      description:
-        "Add an agent to an active Fleet, or update an existing agent in place, without disturbing " +
-        "the Standard session or other Fleets. This is an explicit upsert keyed by agent id: if no " +
-        "agent with the given id exists it is added, and if one already exists its complete " +
-        "definition is replaced (updated). Provide the target fleetId and a complete agent " +
-        "definition. The resulting Fleet is validated and must respect the permission and MCP " +
-        "ceilings. Sessions whose peer send_to_<agent> tools change are reconnected while preserving " +
-        "their history.",
-      parameters: z.object({
-        fleetId: z.string().min(1).describe("Id of the active Fleet to mutate."),
-        agent: dynamicAgentSchema.describe(
-          "Complete definition of the agent to add, or to replace an existing agent with the same id.",
-        ),
-      }),
-      skipPermission: true,
-      defer: "never",
-      handler: async ({ fleetId, agent }) => {
-        const summary = await this.mutateFleetAddOrUpdate(
-          fleetId,
-          agent as DynamicAgentDefinition,
+  /**
+   * Aliases are the user-facing, tool-safe handle for an agent, so they must be
+   * unique among active agents, agents queued to start, and every recoverable agent
+   * definition persisted in this workspace; otherwise an agent could not be
+   * addressed unambiguously.
+   */
+  private assertAliasesAvailable(aliases: string[], ignoreAgentId?: string): void {
+    const reserved = this.db.reservedAgentAliases(this.workspace);
+    for (const alias of aliases) {
+      const activeAgentId = this.aliasIndex.get(alias);
+      if (activeAgentId !== undefined && activeAgentId !== ignoreAgentId) {
+        throw new Error(`Alias "${alias}" is already used by an active agent.`);
+      }
+      if (
+        this.pendingSpawns.some((pending) =>
+          pending.agents.some((definition) => definition.id === alias))
+      ) {
+        throw new Error(`Alias "${alias}" is already queued to start.`);
+      }
+      const run = reserved.find(
+        (candidate) => candidate.alias === alias && candidate.agentId !== ignoreAgentId,
+      );
+      if (run) {
+        throw new Error(
+          `Alias "${alias}" belongs to agent run "${run.runId}" (${run.status}) in this ` +
+            "workspace; recover or reuse that agent, or choose a different alias.",
         );
-        return { accepted: true, fleetId, ...summary };
-      },
+      }
+    }
+  }
+
+  private resolveAgentRef(agentRef: string): AgentContext | undefined {
+    if (agentRef.startsWith(AGENT_TARGET_PREFIX)) {
+      return this.agents.get(agentRef.slice(AGENT_TARGET_PREFIX.length));
+    }
+    const byAgentId = this.agents.get(agentRef);
+    if (byAgentId) {
+      return byAgentId;
+    }
+    const aliasAgentId = this.aliasIndex.get(agentRef);
+    if (aliasAgentId !== undefined) {
+      return this.agents.get(aliasAgentId);
+    }
+    for (const context of this.agents.values()) {
+      if (context.runId === agentRef) {
+        return context;
+      }
+    }
+    return undefined;
+  }
+
+  private requireAgent(agentRef: string): AgentContext {
+    const context = this.resolveAgentRef(agentRef);
+    if (!context) {
+      throw new Error(`No active agent matches "${agentRef}".`);
+    }
+    return context;
+  }
+
+  private agentState(context: AgentContext): string {
+    const live = this.live.get(context.target);
+    if (!live) {
+      return "loading";
+    }
+    return live.foregroundBusy ? "busy" : "idle";
+  }
+
+  private storedAgentJson(context: AgentContext): string {
+    const record: StoredAgentRecord = {
+      definition: context.definition,
+      mcpServers: [...context.mcpServers],
+      standardCanTalk: context.agent.standardCanTalk,
+    };
+    return JSON.stringify(record);
+  }
+
+  private async availableMcpServers(): Promise<Set<string>> {
+    const standard = this.live.get(STANDARD_TARGET);
+    if (!standard) {
+      return new Set();
+    }
+    return new Set((await standard.session.rpc.mcp.list()).servers.map((server) => server.name));
+  }
+
+  /**
+   * Resolves an agent's outgoing ACL aliases to concrete targets at configuration
+   * time. An alias that is not currently active resolves to no target; its tool is
+   * still created so the model gets an explicit "not active" error instead of a
+   * silently dropped message.
+   */
+  private peerBindings(agent: ResolvedAgent): PeerBinding[] {
+    return [...agent.recipients].sort().map((alias) => {
+      if (alias === STANDARD_ALIAS) {
+        return { alias, agentId: undefined, target: STANDARD_TARGET };
+      }
+      const agentId = this.aliasIndex.get(alias);
+      return {
+        alias,
+        agentId,
+        target: agentId === undefined ? undefined : agentTarget(agentId),
+      };
     });
   }
 
-  private removeAgentFromFleetTool(): Tool<any> {
-    return defineTool("remove_agent_from_fleet", {
-      description:
-        "Remove an agent from an active Fleet without disturbing the Standard session or other " +
-        "Fleets. The removed agent is disconnected, references to it are pruned from every peer's " +
-        "canTalkTo, and affected peers are reconnected with updated tools while preserving history. " +
-        "The entry agent cannot be removed unless newEntryAgent names an atomic replacement, and " +
-        "the final remaining member cannot be removed.",
-      parameters: z.object({
-        fleetId: z.string().min(1).describe("Id of the active Fleet to mutate."),
-        agentId: z.string().min(1).describe("Raw id of the agent to remove."),
-        newEntryAgent: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Required only when removing the current entry agent: its replacement."),
-      }),
-      skipPermission: true,
-      defer: "never",
-      handler: async ({ fleetId, agentId, newEntryAgent }) => {
-        const summary = await this.mutateFleetRemove(fleetId, agentId, newEntryAgent);
-        return { accepted: true, fleetId, agentId, ...summary };
-      },
+  /**
+   * The complete signature of the SessionConfig an agent would be connected with
+   * right now: its full definition (prompt, task, model, reasoning, permissions, MCP
+   * subset, ACL) and the concrete targets its peer aliases currently resolve to. Any
+   * change here — not just a peer change — requires reconnecting the live session.
+   */
+  private sessionSignature(context: AgentContext): string {
+    return stableStringify({
+      definition: context.definition,
+      mcpCeiling: [...context.mcpServers].sort(),
+      peers: this.peerBindings(context.agent).map((binding) => [
+        binding.alias,
+        binding.target ?? null,
+      ]),
     });
   }
 
-  private moveAgentToFleetTool(): Tool<any> {
-    return defineTool("move_agent_to_fleet", {
-      description:
-        "Atomically move one active agent from a source Fleet to a destination Fleet without " +
-        "disturbing the Standard session or any other Fleet. Both Fleets must be active and the " +
-        "destination must not already contain an agent with the same id. The source may not become " +
-        "empty. Moving the source entry agent is rejected unless replacementEntryAgentId names " +
-        "another current source agent, which is promoted to entry atomically. References to the " +
-        "moved agent are pruned from every source peer's canTalkTo and affected source peers are " +
-        "reconnected. The moved agent's canTalkTo must be valid in the destination: provide a " +
-        "complete destinationAgent definition to override it, otherwise the agent keeps its " +
-        "definition with canTalkTo filtered to destination members. The moved agent is resumed " +
-        "under the destination Fleet's native config overlay and peer tools, preserving the same " +
-        "SDK session and conversation history when possible. Both definitions are persisted " +
-        "atomically; if anything fails the move is rolled back with no partial state.",
-      parameters: z.object({
-        sourceFleetId: z.string().min(1).describe("Id of the active Fleet the agent is moving from."),
-        destinationFleetId: z
-          .string()
-          .min(1)
-          .describe("Id of the active Fleet the agent is moving to."),
-        agentId: z.string().min(1).describe("Raw id of the agent to move; unchanged by the move."),
-        replacementEntryAgentId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Required only when moving the source entry agent: the current source agent promoted " +
-              "to entry in its place.",
-          ),
-        destinationAgent: dynamicAgentSchema
-          .optional()
-          .describe(
-            "Optional complete replacement definition for the moved agent in the destination (its " +
-              "id must equal agentId). Omit to reuse the current definition with canTalkTo filtered " +
-              "to destination members.",
-          ),
-      }),
-      skipPermission: true,
-      defer: "never",
-      handler: async ({ sourceFleetId, destinationFleetId, agentId, replacementEntryAgentId, destinationAgent }) => {
-        const summary = await this.mutateFleetMove(
-          sourceFleetId,
-          destinationFleetId,
-          agentId,
-          {
-            ...(replacementEntryAgentId ? { replacementEntryAgentId } : {}),
-            ...(destinationAgent
-              ? { destinationAgent: destinationAgent as DynamicAgentDefinition }
-              : {}),
-          },
-        );
-        return { accepted: true, ...summary };
-      },
-    });
+  private standardRecipient(): MailboxRecipient {
+    if (!this.standard || !this.live.has(STANDARD_TARGET)) {
+      throw new Error("The Standard Copilot session is not running.");
+    }
+    return { runId: this.standard.runId, target: STANDARD_TARGET, alias: STANDARD_ALIAS };
   }
 
-  private createPeerMessageTools(fleetId: string, source: ResolvedMember): Tool<any>[] {
-    return [...source.recipients].map((target) =>
-      defineTool(`send_to_${target}`, {
-        description: `Send a durable asynchronous message to the ${target} fleet agent.`,
+  private agentRecipient(alias: string, resolvedAgentId: string | undefined): MailboxRecipient {
+    const agentId = resolvedAgentId ?? this.aliasIndex.get(alias);
+    const context = agentId === undefined ? undefined : this.agents.get(agentId);
+    if (!context || context.alias !== alias) {
+      throw new Error(`Agent "${alias}" is not active; the message was not delivered.`);
+    }
+    return { runId: context.runId, target: context.target, alias: context.alias };
+  }
+
+  /**
+   * Stores a durable message against the recipient's own run and schedules an
+   * independent drain of that recipient's mailbox.
+   */
+  private enqueueDurableMessage(
+    sourceAlias: string,
+    recipient: MailboxRecipient,
+    subject: string | undefined,
+    message: string,
+    sourceTarget: string,
+  ): string {
+    const id = randomUUID();
+    const content = subject ? `Subject: ${subject}\n\n${message}` : message;
+    this.db.enqueueMessage(
+      id,
+      recipient.runId,
+      sourceAlias,
+      recipient.target,
+      "agent",
+      content,
+    );
+    this.emit(
+      "mailbox.queued",
+      { id, source: sourceAlias, target: recipient.alias, content },
+      { runId: recipient.runId, memberId: sourceTarget, target: "messages" },
+    );
+    queueMicrotask(() => void this.drainMailbox(recipient.target));
+    return id;
+  }
+
+  /**
+   * Builds the dedicated outgoing send tools for one agent: exactly one
+   * `send_to_<alias>` per entry in its explicit ACL, plus `send_to_standard` only
+   * when its canTalkTo contains the reserved alias. The ACL is re-enforced inside
+   * every handler so a stale tool can never widen permission.
+   */
+  private createPeerMessageTools(context: AgentContext): Tool<any>[] {
+    const agentId = context.agentId;
+    return this.peerBindings(context.agent).map((binding) =>
+      defineTool(`send_to_${binding.alias}`, {
+        description:
+          binding.alias === STANDARD_ALIAS
+            ? "Send a durable asynchronous message to the Standard Copilot session."
+            : `Send a durable asynchronous message to the "${binding.alias}" agent.`,
         parameters: z.object({
           subject: z.string().min(1).optional(),
           message: z.string().min(1),
         }),
         skipPermission: true,
         defer: "never",
-        handler: async ({ subject, message }) => {
-          const context = this.fleets.get(fleetId);
-          if (!context) {
-            throw new Error(`Fleet "${fleetId}" is not active.`);
+        handler: ({ subject, message }) => {
+          const source = this.agents.get(agentId);
+          if (!source) {
+            throw new Error(`Agent "${context.alias}" is no longer active.`);
           }
-          const id = randomUUID();
-          const content = subject ? `Subject: ${subject}\n\n${message}` : message;
-          this.db.enqueueMessage(id, context.runId, source.id, target, "agent", content);
-          this.emit(
-            "mailbox.queued",
-            { id, source: source.id, target, content },
-            {
-              runId: context.runId,
-              memberId: qualifiedTarget(fleetId, source.id),
-              target: qualifiedTarget(fleetId, target),
-            },
+          if (!source.agent.recipients.has(binding.alias)) {
+            throw new Error(
+              `Agent "${source.alias}" is not permitted to message "${binding.alias}".`,
+            );
+          }
+          const recipient =
+            binding.alias === STANDARD_ALIAS
+              ? this.standardRecipient()
+              : this.agentRecipient(binding.alias, binding.agentId);
+          const id = this.enqueueDurableMessage(
+            source.alias,
+            recipient,
+            subject,
+            message,
+            source.target,
           );
-          queueMicrotask(() => void this.drainMailbox(fleetId, target));
-          return { deliveredToMailbox: target, messageId: id };
+          return { deliveredToMailbox: recipient.alias, messageId: id };
         },
       })
     );
   }
 
-  private async connectSession(
-    runId: string,
-    target: string,
-    memberId: string,
-    fleetId: string | undefined,
-    sessionId: string | undefined,
-    config: SessionConfig,
-    recipients: Set<string>,
-    resumeExisting = false,
-    suppressHistory = false,
-  ): Promise<LiveSession> {
-    const existing = this.live.get(target);
+  private async connectSession(options: {
+    runId: string;
+    target: string;
+    agentId: string | undefined;
+    alias: string;
+    sessionId: string | undefined;
+    config: SessionConfig;
+    configSignature: string;
+    resumeExisting?: boolean;
+    suppressHistory?: boolean;
+  }): Promise<LiveSession> {
+    const existing = this.live.get(options.target);
     if (existing) {
       return existing;
     }
+    // Every connect goes through the same guard: spawn, mailbox draining, recovery,
+    // and reconnect can all race for one agent, and a second SDK connect would
+    // otherwise create a duplicate session for one durable agent.
+    return this.trackConnection(options.target, () => this.establishSession(options));
+  }
+
+  /**
+   * The single guarded connection primitive. It atomically joins the connection
+   * already in flight for a target instead of starting a second one, so any caller
+   * — including one that resumes after awaiting an earlier connection — is guarded.
+   * The registration is removed on both success and failure.
+   */
+  private async trackConnection(
+    target: string,
+    connect: () => Promise<LiveSession>,
+  ): Promise<LiveSession> {
+    const inFlight = this.connecting.get(target);
+    if (inFlight) {
+      return inFlight;
+    }
+    const attempt = connect();
+    this.connecting.set(target, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (this.connecting.get(target) === attempt) {
+        this.connecting.delete(target);
+      }
+    }
+  }
+
+  private async establishSession(options: {
+    runId: string;
+    target: string;
+    agentId: string | undefined;
+    alias: string;
+    sessionId: string | undefined;
+    config: SessionConfig;
+    configSignature: string;
+    resumeExisting?: boolean;
+    suppressHistory?: boolean;
+  }): Promise<LiveSession> {
+    const { runId, target, agentId, alias, sessionId, config } = options;
+    const resumeExisting = options.resumeExisting === true;
     const client = await this.ensureClient();
     let session: CopilotSession;
     if (sessionId && (resumeExisting || this.knownSessionIds.has(sessionId))) {
@@ -1767,7 +1872,7 @@ export class CopilotRuntime {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const missing = message.includes("Session not found:");
-        if (!resumeExisting || !missing || this.db.hasConversationActivity(runId, memberId)) {
+        if (!resumeExisting || !missing || this.db.hasConversationActivity(runId)) {
           throw error;
         }
         session = await client.createSession(config);
@@ -1785,10 +1890,10 @@ export class CopilotRuntime {
     const live: LiveSession = {
       session,
       runId,
-      memberId,
       target,
-      fleetId,
-      recipients: new Set(recipients),
+      agentId,
+      alias,
+      configSignature: options.configSignature,
       modelId: config.model,
       aicUsed: 0,
       busy: false,
@@ -1809,18 +1914,17 @@ export class CopilotRuntime {
     };
     live.unsubscribe = session.on((event) => this.handleSessionEvent(live, event));
     this.live.set(target, live);
-    this.db.upsertSession(runId, memberId, actualSessionId, "connected");
+    this.db.upsertSession(runId, actualSessionId, "connected");
     const history = await session.getEvents();
     const replayEvents = history.filter((event) => !live.seenEventIds.has(event.id));
     for (const event of history) {
       live.seenEventIds.add(event.id);
     }
     // Skip the history replay for an in-process reconnect: the UI buffer for this
-    // target is retained across the reconnect (peer/mutation changes never reset a
-    // buffer), so re-emitting the full transcript would duplicate it. A fresh
-    // connect, a host-restart recovery, or a move into a new destination buffer
-    // still needs the history to render.
-    if (!suppressHistory) {
+    // target is retained across the reconnect (an ACL change never resets a buffer),
+    // so re-emitting the full transcript would duplicate it. A fresh connect or a
+    // host-restart recovery still needs the history to render.
+    if (options.suppressHistory !== true) {
       this.emit(
         "session.history",
         {
@@ -1902,29 +2006,26 @@ export class CopilotRuntime {
     return live;
   }
 
-  private async ensureFleetMember(fleetId: string, memberId: string): Promise<LiveSession> {
-    const context = this.fleets.get(fleetId);
+  private async ensureAgentSession(agentId: string): Promise<LiveSession> {
+    const context = this.agents.get(agentId);
     if (!context) {
-      throw new Error(`Fleet "${fleetId}" is not active.`);
+      throw new Error(`Agent "${agentId}" is not active.`);
     }
-    const member = context.fleet.members.get(memberId);
-    if (!member) {
-      throw new Error(`Unknown fleet member "${memberId}" in fleet "${fleetId}".`);
+    const existing = this.live.get(context.target);
+    if (existing) {
+      return existing;
     }
-    const tools = this.createPeerMessageTools(fleetId, member);
-    const storedSessionId = this.db
-      .fleetRun(context.runId, this.workspace)
-      ?.sessions.find((session) => session.memberId === memberId)
-      ?.sessionId;
-    return this.connectSession(
-      context.runId,
-      qualifiedTarget(fleetId, memberId),
-      memberId,
-      fleetId,
-      storedSessionId,
-      this.memberConfig(member, tools, context.mcpServers, qualifiedTarget(fleetId, memberId)),
-      member.recipients,
-    );
+    const storedSessionId = this.db.session(context.runId)?.sessionId;
+    return this.connectSession({
+      runId: context.runId,
+      target: context.target,
+      agentId: context.agentId,
+      alias: context.alias,
+      sessionId: storedSessionId,
+      config: this.agentConfig(context),
+      configSignature: this.sessionSignature(context),
+      resumeExisting: storedSessionId !== undefined,
+    });
   }
 
   private handleSessionEvent(live: LiveSession, event: SessionEvent): void {
@@ -1938,7 +2039,7 @@ export class CopilotRuntime {
       this.db.appendEvent(
         event.id,
         live.runId,
-        live.memberId,
+        live.target,
         event.type,
         event.data,
         live.sequence,
@@ -2094,7 +2195,7 @@ export class CopilotRuntime {
           );
         }
         break;
-      case "session.idle":
+      case "session.idle": {
         live.busy = false;
         live.foregroundBusy = false;
         live.foregroundTurnId = undefined;
@@ -2102,13 +2203,13 @@ export class CopilotRuntime {
         live.foregroundTurnHasToolRequests = false;
         live.foregroundAbortSequence = undefined;
         this.emit("member.state", { state: "idle", ...event.data }, { ...fields, target: "status" });
-        if (live.fleetId === undefined) {
-          queueMicrotask(() => void this.drainPendingFleets());
-        } else {
-          const fleetId = live.fleetId;
-          queueMicrotask(() => void this.drainMailbox(fleetId, live.memberId));
+        if (live.target === STANDARD_TARGET) {
+          queueMicrotask(() => void this.drainPendingSpawns());
         }
+        const target = live.target;
+        queueMicrotask(() => void this.drainMailbox(target));
         break;
+      }
       case "session.error":
         this.emit("member.error", event.data, { ...fields, target: "activity", done: true });
         break;
@@ -2134,9 +2235,6 @@ export class CopilotRuntime {
         if (event.type === "tool.execution_complete") {
           this.refreshTasks(live);
           setTimeout(() => {
-            // The live map is keyed by the Fleet-qualified target, not the raw
-            // member id; a raw-id lookup would miss Fleet members entirely (and could
-            // collide with another Fleet's same-named member).
             if (this.live.get(live.target) === live) {
               this.refreshTasks(live);
             }
@@ -2205,19 +2303,23 @@ export class CopilotRuntime {
       return;
     }
     const runId = randomUUID();
-    this.db.createRun(runId, "standard", null, this.workspace, process.pid);
+    this.db.createStandardRun(runId, this.workspace, process.pid);
+    // Messages agents addressed to Standard outlive the session they were sent to,
+    // so any still-undelivered ones are transferred into this new run.
+    const adoptedMessages = this.db.adoptStandardMessages(runId, this.workspace, STANDARD_TARGET);
     this.standard = { runId };
     try {
-      await this.connectSession(
+      await this.connectSession({
         runId,
-        STANDARD_TARGET,
-        STANDARD_TARGET,
-        undefined,
-        undefined,
-        this.standardSessionConfig(),
-        new Set(),
-      );
-      this.emit("standard.ready", { mode: "standard" }, { runId });
+        target: STANDARD_TARGET,
+        agentId: undefined,
+        alias: STANDARD_ALIAS,
+        sessionId: undefined,
+        config: this.standardSessionConfig(),
+        configSignature: "standard",
+      });
+      this.emit("standard.ready", { mode: "standard", adoptedMessages }, { runId });
+      queueMicrotask(() => void this.drainMailbox(STANDARD_TARGET));
     } catch (error) {
       this.db.finishRun(runId, "interrupted", "Standard Copilot failed to start");
       this.standard = undefined;
@@ -2235,7 +2337,7 @@ export class CopilotRuntime {
     if (live) {
       live.unsubscribe();
       await live.session.disconnect().catch(() => undefined);
-      this.db.upsertSession(runId, live.memberId, live.session.sessionId, "disconnected");
+      this.db.upsertSession(runId, live.session.sessionId, "disconnected");
     }
     this.db.finishRun(runId, "stopped", reason);
     this.standard = undefined;
@@ -2258,7 +2360,9 @@ export class CopilotRuntime {
 
     await this.stopStandard(`Resuming session ${sessionId}`);
     const runId = randomUUID();
-    this.db.createRun(runId, "standard", null, this.workspace, process.pid);
+    this.db.createStandardRun(runId, this.workspace, process.pid);
+    // Carry any mailbox still addressed to Standard across the session replacement.
+    const adoptedMessages = this.db.adoptStandardMessages(runId, this.workspace, STANDARD_TARGET);
     this.standard = { runId };
     this.emit(
       "session.loading",
@@ -2266,17 +2370,22 @@ export class CopilotRuntime {
       { runId, memberId: STANDARD_TARGET, target: "status", done: false },
     );
     try {
-      await this.connectSession(
+      await this.connectSession({
         runId,
-        STANDARD_TARGET,
-        STANDARD_TARGET,
-        undefined,
+        target: STANDARD_TARGET,
+        agentId: undefined,
+        alias: STANDARD_ALIAS,
         sessionId,
-        this.standardSessionConfig(),
-        new Set(),
-        true,
+        config: this.standardSessionConfig(),
+        configSignature: "standard",
+        resumeExisting: true,
+      });
+      this.emit(
+        "standard.ready",
+        { mode: "standard", recovered: true, sessionId, adoptedMessages },
+        { runId },
       );
-      this.emit("standard.ready", { mode: "standard", recovered: true, sessionId }, { runId });
+      queueMicrotask(() => void this.drainMailbox(STANDARD_TARGET));
     } catch (error) {
       this.db.finishRun(runId, "interrupted", "Standard Copilot recovery failed");
       this.standard = undefined;
@@ -2285,24 +2394,40 @@ export class CopilotRuntime {
     }
   }
 
-  private async drainPendingFleets(): Promise<void> {
-    while (this.pendingFleets.length > 0) {
+  private async withAgentLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.agentLocks.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => {
+      release = resolveGate;
+    });
+    const tail = previous.then(() => gate);
+    this.agentLocks.set(agentId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.agentLocks.get(agentId) === tail) {
+        this.agentLocks.delete(agentId);
+      }
+    }
+  }
+
+  private async drainPendingSpawns(): Promise<void> {
+    while (this.pendingSpawns.length > 0) {
       const standard = this.live.get(STANDARD_TARGET);
       if (standard?.busy) {
         return;
       }
-      const definition = this.pendingFleets.shift()!;
-      if (this.fleets.has(definition.id)) {
-        continue;
-      }
+      const request = this.pendingSpawns.shift()!;
       try {
-        await this.startFleet(definition);
+        await this.spawnAgents(request);
       } catch (error) {
         this.emit(
-          "fleet.error",
+          "agent.error",
           {
-            fleetId: definition.id,
             message: error instanceof Error ? error.message : String(error),
+            aliases: request.agents.map((definition) => definition.id),
           },
           { memberId: STANDARD_TARGET, target: "activity", done: true },
         );
@@ -2310,1001 +2435,521 @@ export class CopilotRuntime {
     }
   }
 
-  async startFleet(definition: DynamicFleetDefinition): Promise<void> {
-    return this.withFleetLocks([definition.id], () => this.startFleetUnlocked(definition));
-  }
-
-  private async startFleetUnlocked(definition: DynamicFleetDefinition): Promise<void> {
-    const validated = validateFleet(definition);
-    if (!validated.valid || !validated.fleet) {
-      throw new Error(
-        `Fleet "${definition.id}" is invalid:\n${validated.issues
-          .map((issue) => `${issue.path}: ${issue.message}`)
-          .join("\n")}`,
-      );
-    }
-    if (this.fleets.has(definition.id)) {
-      throw new Error(`Fleet "${definition.id}" is already active.`);
-    }
-    this.assertPermissionCeiling(definition.agents);
+  /**
+   * Starts every agent named by an ephemeral spawn request. Each agent gets its own
+   * durable UUID, run, SDK session, and mailbox and starts independently: one
+   * failure never prevents the others from starting.
+   */
+  async spawnAgents(request: SpawnAgentsRequest): Promise<Array<Record<string, unknown>>> {
+    const resolved = this.resolveSpawnRequest(request);
     if (!this.standard || !this.live.has(STANDARD_TARGET)) {
       await this.openStandard();
     }
-    const standard = this.live.get(STANDARD_TARGET);
-    const mcpServers = new Set(
-      standard ? (await standard.session.rpc.mcp.list()).servers.map((server) => server.name) : [],
-    );
-    this.assertMcpCeiling(definition.agents, mcpServers);
-    const runId = randomUUID();
-    this.db.createRun(
-      runId,
-      "fleet",
-      definition.id,
-      this.workspace,
-      process.pid,
-      JSON.stringify({ definition, mcpServers: [...mcpServers] }),
-    );
-    const context: FleetContext = { runId, fleet: validated.fleet, mcpServers };
-    this.fleets.set(definition.id, context);
-    this.emitFleetLoading(
-      context,
-      false,
-      [...validated.fleet.members.values()]
-        .filter((member) => member.autoStart)
-        .map((member) => member.id),
-    );
-    try {
-      for (const member of validated.fleet.members.values()) {
-        if (member.autoStart) {
-          await this.ensureFleetMember(definition.id, member.id);
-        }
-      }
-      this.emit("fleet.ready", this.fleetPayload(context, false), { runId });
-      await this.sendUserPrompt(
-        qualifiedTarget(definition.id, validated.fleet.entryMember),
-        definition.objective,
-      );
-    } catch (error) {
-      await this.disconnectFleetSessions(definition.id, runId);
-      this.fleets.delete(definition.id);
-      this.db.finishRun(runId, "interrupted", "Fleet startup failed");
-      this.emit(
-        "fleet.stopped",
-        {
-          fleetId: definition.id,
-          reason: "Fleet startup failed",
-          members: [...validated.fleet.members.keys()].map((id) =>
-            qualifiedTarget(definition.id, id)),
-        },
-        { runId },
-      );
-      throw error;
-    }
-  }
+    const mcpServers = await this.availableMcpServers();
+    this.assertMcpCeiling(request.agents, mcpServers);
 
-  async resumeFleet(runId: string): Promise<void> {
-    const stored = this.db.fleetRun(runId, this.workspace);
-    if (!stored) {
-      throw new Error(`Fleet run "${runId}" was not found for this workspace.`);
-    }
-    return this.withFleetLocks([stored.fleetId], () => this.resumeFleetUnlocked(runId));
-  }
-
-  private async resumeFleetUnlocked(runId: string): Promise<void> {
-    const stored = this.db.fleetRun(runId, this.workspace);
-    if (!stored) {
-      throw new Error(`Fleet run "${runId}" was not found for this workspace.`);
-    }
-    if (stored.status === "active") {
-      throw new Error(`Fleet run "${runId}" is owned by another active Neovim instance.`);
-    }
-    if (!stored.fleetDefinition) {
-      throw new Error(`Fleet run "${runId}" predates dynamic fleet persistence and cannot resume.`);
-    }
-    if (this.fleets.has(stored.fleetId)) {
-      throw new Error(`Fleet "${stored.fleetId}" is already active.`);
-    }
-    const recovered = storedDynamicFleet(stored.fleetDefinition);
-    const definition = recovered.definition;
-    const validated = validateFleet(definition);
-    if (!validated.valid || !validated.fleet) {
-      throw new Error(`Fleet "${stored.fleetId}" can no longer be resumed with this configuration.`);
-    }
-    this.assertPermissionCeiling(definition.agents);
-    if (!this.standard || !this.live.has(STANDARD_TARGET)) {
-      await this.openStandard();
-    }
-    const standard = this.live.get(STANDARD_TARGET);
-    const mcpServers = new Set(
-      standard ? (await standard.session.rpc.mcp.list()).servers.map((server) => server.name) : [],
-    );
-    this.assertMcpCeiling(definition.agents, mcpServers);
-    this.db.resumeRun(runId, process.pid);
-    const context: FleetContext = {
-      runId,
-      fleet: validated.fleet,
-      mcpServers,
-    };
-    this.db.updateFleetDefinition(
-      runId,
-      JSON.stringify({ definition, mcpServers: [...mcpServers] }),
-    );
-    this.fleets.set(stored.fleetId, context);
-    const storedSessions = new Map(
-      stored.sessions.map((session) => [session.memberId, session.sessionId]),
-    );
-    this.emitFleetLoading(
-      context,
-      true,
-      [...validated.fleet.members.values()]
-        .filter((member) => storedSessions.has(member.id) || member.autoStart)
-        .map((member) => member.id),
-    );
-    const started: LiveSession[] = [];
-    try {
-      for (const member of validated.fleet.members.values()) {
-        const sessionId = storedSessions.get(member.id);
-        if (sessionId) {
-          started.push(
-            await this.connectSession(
-              runId,
-              qualifiedTarget(stored.fleetId, member.id),
-              member.id,
-              stored.fleetId,
-              sessionId,
-              this.memberConfig(
-                member,
-                this.createPeerMessageTools(stored.fleetId, member),
-                context.mcpServers,
-                qualifiedTarget(stored.fleetId, member.id),
-              ),
-              member.recipients,
-              true,
-            ),
-          );
-        } else if (member.autoStart) {
-          started.push(await this.ensureFleetMember(stored.fleetId, member.id));
-        }
-      }
-      this.emit("fleet.ready", this.fleetPayload(context, true), { runId });
-      for (const member of started) {
-        const fleetId = stored.fleetId;
-        queueMicrotask(() => void this.drainMailbox(fleetId, member.memberId));
-      }
-    } catch (error) {
-      await this.disconnectFleetSessions(stored.fleetId, runId);
-      this.fleets.delete(stored.fleetId);
-      this.db.finishRun(runId, "interrupted", "Fleet recovery failed");
-      this.emit(
-        "fleet.stopped",
-        {
-          fleetId: stored.fleetId,
-          reason: "Fleet recovery failed",
-          members: [...validated.fleet.members.keys()].map((id) =>
-            qualifiedTarget(stored.fleetId, id)),
-        },
-        { runId },
-      );
-      throw error;
-    }
-  }
-
-  private resolveFleet(
-    fleetIdOrRunId: string,
-  ): { fleetId: string; context: FleetContext } | undefined {
-    const direct = this.fleets.get(fleetIdOrRunId);
-    if (direct) {
-      return { fleetId: fleetIdOrRunId, context: direct };
-    }
-    for (const [fleetId, context] of this.fleets) {
-      if (context.runId === fleetIdOrRunId) {
-        return { fleetId, context };
-      }
-    }
-    return undefined;
-  }
-
-  private async acquireFleetLock(fleetId: string): Promise<() => void> {
-    const previous = this.fleetLocks.get(fleetId) ?? Promise.resolve();
-    let releaseGate!: () => void;
-    const gate = new Promise<void>((resolveGate) => {
-      releaseGate = resolveGate;
-    });
-    const tail = previous.then(() => gate);
-    this.fleetLocks.set(fleetId, tail);
-    await previous;
-    return () => {
-      releaseGate();
-      if (this.fleetLocks.get(fleetId) === tail) {
-        this.fleetLocks.delete(fleetId);
-      }
-    };
-  }
-
-  private async withFleetLocks<T>(
-    fleetIds: string[],
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const releases: Array<() => void> = [];
-    for (const fleetId of [...new Set(fleetIds)].sort()) {
-      releases.push(await this.acquireFleetLock(fleetId));
-    }
-    try {
-      return await operation();
-    } finally {
-      for (const release of releases.reverse()) {
-        release();
-      }
-    }
-  }
-
-  private async disconnectFleetSessions(fleetId: string, runId: string): Promise<string[]> {
-    const members = [...this.live.values()].filter((live) => live.fleetId === fleetId);
-    for (const live of members) {
-      this.live.delete(live.target);
-    }
-    await Promise.allSettled(
-      members.map(async (live) => {
-        live.unsubscribe();
-        await live.session.disconnect().catch(() => undefined);
-        this.db.upsertSession(runId, live.memberId, live.session.sessionId, "disconnected");
-      }),
-    );
-    return members.map((live) => live.target);
-  }
-
-  async stopFleet(fleetIdOrRunId: string, reason = "Fleet stopped by user"): Promise<void> {
-    const found = this.resolveFleet(fleetIdOrRunId);
-    if (!found) {
-      throw new Error(`Fleet "${fleetIdOrRunId}" is not active.`);
-    }
-    return this.withFleetLocks([found.fleetId], () =>
-      this.stopFleetUnlocked(fleetIdOrRunId, reason),
-    );
-  }
-
-  private async stopFleetUnlocked(
-    fleetIdOrRunId: string,
-    reason: string,
-  ): Promise<void> {
-    const found = this.resolveFleet(fleetIdOrRunId);
-    if (!found) {
-      throw new Error(`Fleet "${fleetIdOrRunId}" is not active.`);
-    }
-    const { fleetId, context } = found;
-    this.fleets.delete(fleetId);
-    await this.disconnectFleetSessions(fleetId, context.runId);
-    this.db.finishRun(context.runId, "stopped", reason);
-    this.emit(
-      "fleet.stopped",
-      {
-        fleetId,
-        reason,
-        members: [...context.fleet.members.keys()].map((id) => qualifiedTarget(fleetId, id)),
-      },
-      { runId: context.runId },
-    );
-  }
-
-  async mutateFleetAddOrUpdate(
-    fleetId: string,
-    agentDefinition: DynamicAgentDefinition,
-  ): Promise<Record<string, unknown>> {
-    return this.withFleetLocks([fleetId], () =>
-      this.mutateFleetAddOrUpdateUnlocked(fleetId, agentDefinition),
-    );
-  }
-
-  private async mutateFleetAddOrUpdateUnlocked(
-    fleetId: string,
-    agentDefinition: DynamicAgentDefinition,
-  ): Promise<Record<string, unknown>> {
-    const context = this.fleets.get(fleetId);
-    if (!context) {
-      throw new Error(`Fleet "${fleetId}" is not active.`);
-    }
-    this.assertPermissionCeiling([agentDefinition]);
-    for (const server of agentDefinition.mcpServers ?? []) {
-      if (!context.mcpServers.has(server)) {
-        throw new Error(
-          `Fleet agent "${agentDefinition.id}" requested unavailable MCP server "${server}".`,
-        );
-      }
-    }
-    const definition = structuredClone(context.fleet.definition) as DynamicFleetDefinition;
-    const index = definition.agents.findIndex((agent) => agent.id === agentDefinition.id);
-    const isUpdate = index >= 0;
-    if (isUpdate) {
-      definition.agents[index] = agentDefinition;
-    } else {
-      definition.agents.push(agentDefinition);
-    }
-    const validated = validateFleet(definition);
-    if (!validated.valid || !validated.fleet) {
-      throw new Error(
-        `Fleet "${fleetId}" mutation is invalid: ${validated.issues
-          .map((issue) => `${issue.path}: ${issue.message}`)
-          .join("; ")}`,
-      );
-    }
-    const fleetBefore = context.fleet;
-    const jsonBefore = this.fleetDefinitionJson(context);
-    // Capture the exact live membership before mutating so a failed reconnect can
-    // restore every previously-live member, including any whose live entry vanishes.
-    const liveSnapshot = this.captureLiveMembers(context, [...fleetBefore.members.keys()]);
-    this.applyFleetMutation(context, validated.fleet, definition);
-    const target = qualifiedTarget(fleetId, agentDefinition.id);
-    const force = new Set<string>();
-    const member = validated.fleet.members.get(agentDefinition.id)!;
-    let startedNewMember = false;
-    try {
-      if (this.live.has(target)) {
-        force.add(agentDefinition.id);
-      } else if (member.autoStart) {
-        await this.ensureFleetMember(fleetId, agentDefinition.id);
-        startedNewMember = true;
-      }
-      const reconnected = await this.reconnectChangedPeers(context, force);
-      this.emitFleetUpdated(context, {
-        added: isUpdate ? [] : [agentDefinition.id],
-        updated: isUpdate ? [agentDefinition.id] : [],
-        removed: [],
-      });
-      return {
-        action: isUpdate ? "updated" : "added",
-        agentId: agentDefinition.id,
-        reconnectedAgents: reconnected,
-      };
-    } catch (error) {
-      // Roll back both durable and in-memory state, then realign any peers that were
-      // already reconnected under the rejected definition. No reported failure may
-      // leave a partially committed mutation.
-      this.rollbackFleetMutation(context, fleetBefore, jsonBefore);
-      if (startedNewMember) {
-        const orphan = this.live.get(target);
-        if (orphan) {
-          orphan.unsubscribe();
-          this.live.delete(target);
-          await orphan.session.disconnect().catch(() => undefined);
-          this.db.deleteSession(context.runId, agentDefinition.id);
-        }
-      }
-      // Restore every previously-live member that lost its live entry, then realign
-      // any that are still live but were reconnected under the rejected definition.
-      await this.restoreLiveMembers(context, liveSnapshot);
-      try {
-        await this.reconnectChangedPeers(context, new Set(force));
-      } catch {
-        // Peer realignment is best-effort.
-      }
-      throw error;
-    }
-  }
-
-  async mutateFleetRemove(
-    fleetId: string,
-    agentId: string,
-    newEntryAgent?: string,
-  ): Promise<Record<string, unknown>> {
-    return this.withFleetLocks([fleetId], () =>
-      this.mutateFleetRemoveUnlocked(fleetId, agentId, newEntryAgent),
-    );
-  }
-
-  private async mutateFleetRemoveUnlocked(
-    fleetId: string,
-    agentId: string,
-    newEntryAgent?: string,
-  ): Promise<Record<string, unknown>> {
-    const context = this.fleets.get(fleetId);
-    if (!context) {
-      throw new Error(`Fleet "${fleetId}" is not active.`);
-    }
-    if (!context.fleet.members.has(agentId)) {
-      throw new Error(`Fleet "${fleetId}" has no agent "${agentId}".`);
-    }
-    if (context.fleet.members.size <= 1) {
-      throw new Error(`Cannot remove the final member of fleet "${fleetId}".`);
-    }
-    const definition = structuredClone(context.fleet.definition) as DynamicFleetDefinition;
-    const isEntry = definition.entryAgent === agentId;
-    if (isEntry) {
-      if (!newEntryAgent) {
-        throw new Error(
-          `Cannot remove entry agent "${agentId}" without naming a replacement newEntryAgent.`,
-        );
-      }
-      if (newEntryAgent === agentId) {
-        throw new Error("newEntryAgent must name a different agent than the one being removed.");
-      }
-      if (!definition.agents.some((agent) => agent.id === newEntryAgent)) {
-        throw new Error(`newEntryAgent "${newEntryAgent}" is not a member of fleet "${fleetId}".`);
-      }
-      definition.entryAgent = newEntryAgent;
-    }
-    definition.agents = definition.agents
-      .filter((agent) => agent.id !== agentId)
-      .map((agent) => ({ ...agent, canTalkTo: agent.canTalkTo.filter((id) => id !== agentId) }));
-    const validated = validateFleet(definition);
-    if (!validated.valid || !validated.fleet) {
-      throw new Error(
-        `Fleet "${fleetId}" mutation is invalid: ${validated.issues
-          .map((issue) => `${issue.path}: ${issue.message}`)
-          .join("; ")}`,
-      );
-    }
-    const affectedPeers = [...context.fleet.members.entries()]
-      .filter(([id, member]) => id !== agentId && member.recipients.has(agentId))
-      .map(([id]) => id);
-    const fleetBefore = context.fleet;
-    const jsonBefore = this.fleetDefinitionJson(context);
-    // Capture the exact live membership before mutating (including the agent being
-    // removed) so a failed reconnect can restore every previously-live member.
-    const liveSnapshot = this.captureLiveMembers(context, [...fleetBefore.members.keys()]);
-    this.applyFleetMutation(context, validated.fleet, definition);
-    const removedTarget = qualifiedTarget(fleetId, agentId);
-    const removedLive = this.live.get(removedTarget);
-    try {
-      if (removedLive) {
-        removedLive.unsubscribe();
-        this.live.delete(removedTarget);
-        await removedLive.session.disconnect().catch(() => undefined);
-        this.db.upsertSession(context.runId, agentId, removedLive.session.sessionId, "removed");
-      }
-      const reconnected = await this.reconnectChangedPeers(context, new Set(affectedPeers));
-      this.emitFleetUpdated(context, { added: [], updated: [], removed: [agentId] });
-      return {
-        action: "removed",
+    // Register every agent identity first so aliases in the batch resolve to their
+    // UUID targets while the sessions are being configured.
+    const contexts: AgentContext[] = [];
+    for (const [index, agent] of resolved.entries()) {
+      const agentId = randomUUID();
+      const context: AgentContext = {
         agentId,
-        ...(isEntry ? { newEntryAgent } : {}),
-        reconnectedAgents: reconnected,
+        target: agentTarget(agentId),
+        alias: agent.alias,
+        runId: randomUUID(),
+        definition: request.agents[index]!,
+        agent,
+        mcpServers: new Set(mcpServers),
       };
-    } catch (error) {
-      // Roll back durable and in-memory state, then restore every previously-live
-      // member (including the just-removed agent and any peer whose reconnect failed)
-      // and realign the peers still live under the restored definition.
-      this.rollbackFleetMutation(context, fleetBefore, jsonBefore);
-      await this.restoreLiveMembers(context, liveSnapshot);
-      try {
-        await this.reconnectChangedPeers(context, new Set(affectedPeers));
-      } catch {
-        // Peer realignment is best-effort.
-      }
-      throw error;
-    }
-  }
-
-  // Atomically moves one active agent from a source Fleet to a destination Fleet.
-  // Every validation runs before any state changes; the source and destination
-  // definitions are then persisted together in one DB transaction, in-memory
-  // contexts are updated, and the moved agent's SDK session/history is preserved by
-  // resuming the same session id under the destination-qualified target. Any failure
-  // rolls the in-memory contexts and persisted definitions back so no partial state
-  // survives.
-  async mutateFleetMove(
-    sourceFleetId: string,
-    destinationFleetId: string,
-    agentId: string,
-    options: FleetMoveOptions = {},
-  ): Promise<Record<string, unknown>> {
-    return this.withFleetLocks([sourceFleetId, destinationFleetId], () =>
-      this.mutateFleetMoveUnlocked(sourceFleetId, destinationFleetId, agentId, options),
-    );
-  }
-
-  private async mutateFleetMoveUnlocked(
-    sourceFleetId: string,
-    destinationFleetId: string,
-    agentId: string,
-    options: FleetMoveOptions,
-  ): Promise<Record<string, unknown>> {
-    const source = this.fleets.get(sourceFleetId);
-    if (!source) {
-      throw new Error(`Fleet "${sourceFleetId}" is not active.`);
-    }
-    const destination = this.fleets.get(destinationFleetId);
-    if (!destination) {
-      throw new Error(`Fleet "${destinationFleetId}" is not active.`);
-    }
-
-    // Validate and compute both rewritten definitions purely, before any state
-    // change. planFleetMove throws on any rule violation so nothing is mutated on
-    // an invalid request. The native tool ceiling is threaded in so a destination
-    // agent override cannot widen the main allowlist.
-    const plan = planFleetMove(
-      source,
-      destination,
-      agentId,
-      options,
-      this.policy.allowAll,
-      this.policy.availableTools,
-    );
-    const { sourceDefinition, destinationDefinition, isEntry, affectedSourcePeers } = plan;
-
-    // Capture rollback state before any change.
-    const sourceFleetBefore = source.fleet;
-    const destinationFleetBefore = destination.fleet;
-    const sourceJsonBefore = JSON.stringify({
-      definition: source.fleet.definition,
-      mcpServers: [...source.mcpServers],
-    });
-    const destinationJsonBefore = JSON.stringify({
-      definition: destination.fleet.definition,
-      mcpServers: [...destination.mcpServers],
-    });
-    const sourceJsonAfter = JSON.stringify({
-      definition: sourceDefinition,
-      mcpServers: [...source.mcpServers],
-    });
-    const destinationJsonAfter = JSON.stringify({
-      definition: destinationDefinition,
-      mcpServers: [...destination.mcpServers],
-    });
-    const movedTarget = qualifiedTarget(sourceFleetId, agentId);
-    const destinationTarget = qualifiedTarget(destinationFleetId, agentId);
-    const movedLive = this.live.get(movedTarget);
-    const preservedSessionId = movedLive?.session.sessionId;
-    const preservePath = Boolean(movedLive && preservedSessionId);
-    // Snapshot the source peers' pre-move connectivity so a failed move restores
-    // any whose live entry vanished during reconnection.
-    const sourcePeerSnapshot = this.captureLiveMembers(source, affectedSourcePeers);
-
-    // Explicit stage flags let the rollback reason precisely about which SDK/DB
-    // state exists, so it never leaves an orphan or duplicate session.
-    let movedDetached = false;
-    let originalDisconnected = false;
-    let messagesSettled: SettledMessage[] = [];
-
-    // Persist both definitions atomically first; nothing else has changed yet.
-    this.db.updateFleetDefinitions([
-      { runId: source.runId, fleetDefinition: sourceJsonAfter },
-      { runId: destination.runId, fleetDefinition: destinationJsonAfter },
-    ]);
-
-    try {
-      // Update in-memory contexts.
-      source.fleet = plan.sourceFleet;
-      destination.fleet = plan.destinationFleet;
-
-      // Reconnect source peers that referenced the moved agent so their tools update.
-      // The moved agent's live entry is intentionally left registered here: if this
-      // step fails the original session is untouched and needs no restoration.
-      const sourceReconnected = await this.reconnectChangedPeers(
-        source,
-        new Set(affectedSourcePeers),
-      );
-
-      // Bring the moved agent up in the destination.
-      const destinationMember = plan.destinationFleet.members.get(agentId)!;
-      if (movedLive && preservedSessionId) {
-        // Detach and disconnect the source session only now, immediately before the
-        // destination resume reuses its session id.
-        movedLive.unsubscribe();
-        this.live.delete(movedTarget);
-        movedDetached = true;
-        await movedLive.session.disconnect().catch(() => undefined);
-        originalDisconnected = true;
-        await this.connectSession(
-          destination.runId,
-          destinationTarget,
-          agentId,
-          destinationFleetId,
-          preservedSessionId,
-          this.memberConfig(
-            destinationMember,
-            this.createPeerMessageTools(destinationFleetId, destinationMember),
-            destination.mcpServers,
-            destinationTarget,
-          ),
-          destinationMember.recipients,
-          true,
-        );
-        // Move the persisted session record to the destination run.
-        this.db.reassociateSession(
-          source.runId,
-          destination.runId,
-          agentId,
-          preservedSessionId,
-          "connected",
-        );
-      } else {
-        // No live session to preserve: drop any stale source record and, if the
-        // destination member auto-starts, connect a fresh destination session.
-        this.db.deleteSession(source.runId, agentId);
-        if (destinationMember.autoStart) {
-          await this.ensureFleetMember(destinationFleetId, agentId);
-        }
-      }
-
-      // The moved agent no longer drains the source run, so its still-in-flight
-      // source mailbox must NOT migrate: settle it terminally in the source run with
-      // an explicit reason. Captured so a later failure can restore it on rollback.
-      messagesSettled = this.db.settleMovedMessages(
-        source.runId,
+      this.agents.set(agentId, context);
+      this.aliasIndex.set(context.alias, agentId);
+      this.db.createAgentRun(
+        context.runId,
         agentId,
-        `Agent "${agentId}" moved to fleet "${destinationFleetId}".`,
+        context.alias,
+        this.storedAgentJson(context),
+        agent.standardCanTalk,
+        this.workspace,
+        process.pid,
       );
+      contexts.push(context);
+      this.emitAgentLifecycle("agent.loading", context, { recovered: false });
+    }
 
-      // Refresh any destination peers whose recipient set changed (usually none).
-      const destinationReconnected = await this.reconnectChangedPeers(destination, new Set());
-
-      // Emit incremental UI lifecycle events for both Fleets so the moved agent's
-      // buffer/history follows it to the destination without touching other Fleets.
-      this.emitFleetUpdated(source, { added: [], updated: [], removed: [agentId] });
-      this.emitFleetUpdated(destination, { added: [agentId], updated: [], removed: [] });
-
-      return {
-        action: "moved",
-        agentId,
-        sourceFleetId,
-        destinationFleetId,
-        sessionPreserved: preservePath,
-        settledMessages: messagesSettled.length,
-        ...(isEntry ? { replacementEntryAgentId: options.replacementEntryAgentId } : {}),
-        sourceReconnectedAgents: sourceReconnected,
-        destinationReconnectedAgents: destinationReconnected,
-      };
-    } catch (error) {
-      // Roll back in-memory contexts and persisted definitions so no partial state
-      // survives, tracking each stage so no orphan or duplicate SDK session remains.
-      source.fleet = sourceFleetBefore;
-      destination.fleet = destinationFleetBefore;
+    const results: Array<Record<string, unknown>> = [];
+    for (const context of contexts) {
       try {
-        this.db.updateFleetDefinitions([
-          { runId: source.runId, fleetDefinition: sourceJsonBefore },
-          { runId: destination.runId, fleetDefinition: destinationJsonBefore },
-        ]);
-      } catch {
-        // Definition rollback is best-effort; the in-memory truth is already restored.
-      }
-
-      // Restore any source mailbox we settled so the messages remain deliverable.
-      if (messagesSettled.length > 0) {
-        try {
-          this.db.restoreMovedMessages(messagesSettled);
-        } catch {
-          // Mailbox restoration is best-effort.
-        }
-      }
-
-      // Remove any destination live session created during the attempt so no orphan
-      // SDK session survives, and move its persisted record back to the source.
-      const destinationLive = this.live.get(destinationTarget);
-      if (destinationLive) {
-        destinationLive.unsubscribe();
-        this.live.delete(destinationTarget);
-        await destinationLive.session.disconnect().catch(() => undefined);
-      }
-      if (preservePath) {
-        // Normalize the DB record back to the source run whether or not the forward
-        // reassociate ran (it deletes any destination row and restores the source row).
-        try {
-          this.db.reassociateSession(
-            destination.runId,
-            source.runId,
-            agentId,
-            preservedSessionId!,
-            "connected",
-          );
-        } catch {
-          // Best-effort; in-memory state is authoritative.
-        }
-      } else if (destinationLive) {
-        // The fresh destination session had its own persisted record; drop it.
-        this.db.deleteSession(destination.runId, agentId);
-      }
-
-      // Restore the moved agent under the source.
-      if (preservePath) {
-        if (originalDisconnected) {
-          // The original session was disconnected; resume it exactly once (only if it
-          // is not somehow already live) to avoid a duplicate SDK session.
-          if (!this.live.has(movedTarget)) {
-            const restoreMember = sourceFleetBefore.members.get(agentId);
-            if (restoreMember) {
-              this.db.upsertSession(source.runId, agentId, preservedSessionId!, "connected");
-              try {
-                await this.connectSession(
-                  source.runId,
-                  movedTarget,
-                  agentId,
-                  sourceFleetId,
-                  preservedSessionId!,
-                  this.memberConfig(
-                    restoreMember,
-                    this.createPeerMessageTools(sourceFleetId, restoreMember),
-                    source.mcpServers,
-                    movedTarget,
-                  ),
-                  restoreMember.recipients,
-                  true,
-                  true,
-                );
-              } catch {
-                // The source session could not be resumed; leave it disconnected
-                // rather than risking a duplicate.
-              }
-            }
-          }
-        } else if (movedDetached && movedLive && !this.live.has(movedTarget)) {
-          // The original was detached but never disconnected: re-register the same
-          // still-connected handle directly instead of resuming a new session.
-          movedLive.unsubscribe = movedLive.session.on((event) =>
-            this.handleSessionEvent(movedLive, event));
-          this.live.set(movedTarget, movedLive);
-          this.db.upsertSession(source.runId, agentId, movedLive.session.sessionId, "connected");
-        }
-        // If the original was never detached, its live entry is still registered and
-        // needs no restoration.
-      }
-
-      // Restore source peers robustly, then realign any still-live peers.
-      await this.restoreLiveMembers(source, sourcePeerSnapshot);
-      try {
-        await this.reconnectChangedPeers(source, new Set(affectedSourcePeers));
-      } catch {
-        // Peer restoration is best-effort.
-      }
-      throw error;
-    }
-  }
-
-  private applyFleetMutation(
-    context: FleetContext,
-    fleet: ResolvedFleet,
-    definition: DynamicFleetDefinition,
-  ): void {
-    context.fleet = fleet;
-    this.db.updateFleetDefinition(
-      context.runId,
-      JSON.stringify({ definition, mcpServers: [...context.mcpServers] }),
-    );
-  }
-
-  // Serializes a Fleet context's current definition exactly as applyFleetMutation
-  // persists it, so a failed mutation can restore the previous durable state.
-  private fleetDefinitionJson(context: FleetContext): string {
-    return JSON.stringify({
-      definition: context.fleet.definition,
-      mcpServers: [...context.mcpServers],
-    });
-  }
-
-  // Restores in-memory and durable Fleet state after a failed mutation so no
-  // partial state survives. The DB restore is best-effort; the in-memory truth is
-  // authoritative and always restored first.
-  private rollbackFleetMutation(
-    context: FleetContext,
-    fleetBefore: ResolvedFleet,
-    jsonBefore: string,
-  ): void {
-    context.fleet = fleetBefore;
-    try {
-      this.db.updateFleetDefinition(context.runId, jsonBefore);
-    } catch {
-      // Durable rollback is best-effort; in-memory state already reflects the truth.
-    }
-  }
-
-  private async reconnectFleetMember(context: FleetContext, memberId: string): Promise<void> {
-    const fleetId = context.fleet.id;
-    const target = qualifiedTarget(fleetId, memberId);
-    const existing = this.live.get(target);
-    const sessionId =
-      existing?.session.sessionId ??
-      this.db
-        .fleetRun(context.runId, this.workspace)
-        ?.sessions.find((session) => session.memberId === memberId)
-        ?.sessionId;
-    if (existing) {
-      existing.unsubscribe();
-      this.live.delete(target);
-      await existing.session.disconnect().catch(() => undefined);
-    }
-    const member = context.fleet.members.get(memberId);
-    if (!member) {
-      return;
-    }
-    await this.connectSession(
-      context.runId,
-      target,
-      memberId,
-      fleetId,
-      sessionId,
-      this.memberConfig(
-        member,
-        this.createPeerMessageTools(fleetId, member),
-        context.mcpServers,
-        target,
-      ),
-      member.recipients,
-      true,
-      true,
-    );
-  }
-
-  private async reconnectChangedPeers(
-    context: FleetContext,
-    force: Set<string>,
-  ): Promise<string[]> {
-    const reconnected: string[] = [];
-    for (const [memberId, member] of context.fleet.members) {
-      const live = this.live.get(qualifiedTarget(context.fleet.id, memberId));
-      if (!live) {
-        continue;
-      }
-      if (force.has(memberId) || !setsEqual(live.recipients, member.recipients)) {
-        await this.reconnectFleetMember(context, memberId);
-        reconnected.push(memberId);
-      }
-    }
-    return reconnected;
-  }
-
-  // Captures the exact live membership (session id + recipients) of the named
-  // members before a fallible mutation. Used together with restoreLiveMembers so a
-  // rollback can rebuild members whose live entry vanished mid-failure, not only
-  // those still present in the live map.
-  private captureLiveMembers(
-    context: FleetContext,
-    memberIds: Iterable<string>,
-  ): LiveMemberSnapshot[] {
-    const snapshot: LiveMemberSnapshot[] = [];
-    for (const memberId of memberIds) {
-      const target = qualifiedTarget(context.fleet.id, memberId);
-      const live = this.live.get(target);
-      if (live) {
-        snapshot.push({
-          target,
-          memberId,
+        const live = await this.ensureAgentSession(context.agentId);
+        this.emitAgentLifecycle("agent.ready", context, {
+          recovered: false,
           sessionId: live.session.sessionId,
-          recipients: new Set(live.recipients),
+        });
+        await this.sendUserPrompt(context.target, context.agent.task);
+        results.push({
+          ...this.agentPayload(context),
+          runId: context.runId,
+          sessionId: live.session.sessionId,
+          started: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.failAgent(context, message);
+        results.push({
+          ...this.agentPayload(context),
+          runId: context.runId,
+          started: false,
+          error: message,
         });
       }
     }
-    return snapshot;
+    await this.reconnectStalePeers();
+    return results;
   }
 
-  // Restores any snapshotted member missing from the live map by resuming its exact
-  // captured session id (history suppressed, buffer retained). Members still present
-  // are left untouched; reconnectChangedPeers realigns those whose recipients differ.
-  private async restoreLiveMembers(
-    context: FleetContext,
-    snapshot: LiveMemberSnapshot[],
-  ): Promise<void> {
-    for (const entry of snapshot) {
-      if (this.live.has(entry.target)) {
+  /** Resumes exactly one durable agent run; there is no group recovery. */
+  async resumeAgent(runId: string): Promise<void> {
+    const stored = this.db.agentRun(runId, this.workspace);
+    if (!stored) {
+      throw new Error(`Agent run "${runId}" was not found for this workspace.`);
+    }
+    return this.withAgentLock(stored.agentId, () => this.resumeAgentUnlocked(runId));
+  }
+
+  private async resumeAgentUnlocked(runId: string): Promise<void> {
+    const stored = this.db.agentRun(runId, this.workspace);
+    if (!stored) {
+      throw new Error(`Agent run "${runId}" was not found for this workspace.`);
+    }
+    if (stored.status === "active") {
+      throw new Error(`Agent run "${runId}" is owned by another active Neovim instance.`);
+    }
+    if (!stored.definition) {
+      throw new Error(`Agent run "${runId}" has no stored definition and cannot resume.`);
+    }
+    if (this.agents.has(stored.agentId)) {
+      throw new Error(`Agent "${stored.alias}" is already active.`);
+    }
+    const record = storedAgentRecord(stored.definition);
+    const definition = record.definition;
+    // A recovered agent keeps the exact ACL it was persisted with, so its recipients
+    // are validated against themselves. A recipient that is not currently active
+    // still gets its send tool; that tool reports the peer is not active instead of
+    // silently delivering elsewhere.
+    const validated = validateAgentDefinition(definition, {
+      availableAliases: new Set(definition.canTalkTo),
+      standardCanTalk: stored.standardCanTalk || record.standardCanTalk,
+    });
+    if (!validated.valid || !validated.agent) {
+      throw new Error(
+        `Agent "${stored.alias}" can no longer be resumed with this configuration: ${validated.issues
+          .map((issue) => `${issue.path}: ${issue.message}`)
+          .join("; ")}`,
+      );
+    }
+    this.assertPermissionCeiling([definition]);
+    this.assertAliasesAvailable([definition.id], stored.agentId);
+    if (!this.standard || !this.live.has(STANDARD_TARGET)) {
+      await this.openStandard();
+    }
+    // Recovery must not widen the agent's environment: its ceiling is the MCP server
+    // set captured when it was created, narrowed to what Standard currently exposes.
+    // Servers added to the workspace since then stay out of reach, and a server the
+    // definition still requests but that is gone fails the recovery explicitly.
+    const available = await this.availableMcpServers();
+    const mcpServers = new Set(record.mcpServers.filter((server) => available.has(server)));
+    this.assertMcpCeiling([definition], mcpServers);
+
+    this.db.resumeRun(runId, process.pid);
+    const context: AgentContext = {
+      agentId: stored.agentId,
+      target: agentTarget(stored.agentId),
+      alias: definition.id,
+      runId,
+      definition,
+      agent: validated.agent,
+      mcpServers,
+    };
+    this.agents.set(context.agentId, context);
+    this.aliasIndex.set(context.alias, context.agentId);
+    this.db.updateAgentRun(
+      runId,
+      context.alias,
+      this.storedAgentJson(context),
+      validated.agent.standardCanTalk,
+    );
+    this.emitAgentLifecycle("agent.loading", context, {
+      recovered: true,
+      ...(stored.session ? { sessionId: stored.session.sessionId } : {}),
+    });
+    try {
+      const live = await this.connectSession({
+        runId,
+        target: context.target,
+        agentId: context.agentId,
+        alias: context.alias,
+        sessionId: stored.session?.sessionId,
+        config: this.agentConfig(context),
+        configSignature: this.sessionSignature(context),
+        resumeExisting: true,
+      });
+      this.emitAgentLifecycle("agent.ready", context, {
+        recovered: true,
+        sessionId: live.session.sessionId,
+      });
+      const target = context.target;
+      queueMicrotask(() => void this.drainMailbox(target));
+      await this.reconnectStalePeers();
+    } catch (error) {
+      await this.failAgent(context, "Agent recovery failed");
+      throw error;
+    }
+  }
+
+  /** Stops one agent; accepts an alias, agent UUID, "agent:<uuid>" target, or run id. */
+  async stopAgent(agentRef: string, reason = "Agent stopped by user"): Promise<void> {
+    const context = this.requireAgent(agentRef);
+    return this.withAgentLock(context.agentId, () => this.stopAgentUnlocked(context, reason));
+  }
+
+  private async stopAgentUnlocked(context: AgentContext, reason: string): Promise<void> {
+    if (this.agents.get(context.agentId) !== context) {
+      throw new Error(`Agent "${context.alias}" is no longer active.`);
+    }
+    const live = this.live.get(context.target);
+    this.live.delete(context.target);
+    if (live) {
+      live.unsubscribe();
+      await live.session.disconnect().catch(() => undefined);
+      this.db.upsertSession(context.runId, live.session.sessionId, "disconnected");
+    }
+    this.agents.delete(context.agentId);
+    if (this.aliasIndex.get(context.alias) === context.agentId) {
+      this.aliasIndex.delete(context.alias);
+    }
+    this.db.finishRun(context.runId, "stopped", reason);
+    this.emit(
+      "agent.stopped",
+      { ...this.agentPayload(context), runId: context.runId, reason },
+      { runId: context.runId, memberId: context.target, target: "status", done: true },
+    );
+    await this.pruneRecipient(context.alias);
+  }
+
+  async updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>> {
+    const context = this.requireAgent(agentRef);
+    return this.withAgentLock(context.agentId, () => this.updateAgentUnlocked(context, update));
+  }
+
+  private async updateAgentUnlocked(
+    context: AgentContext,
+    update: AgentUpdate,
+  ): Promise<Record<string, unknown>> {
+    if (this.agents.get(context.agentId) !== context) {
+      throw new Error(`Agent "${context.alias}" is no longer active.`);
+    }
+    const definition = update.definition;
+    if (definition.id !== context.alias) {
+      throw new Error(
+        `Agent "${context.alias}" cannot be renamed to "${definition.id}"; aliases are durable.`,
+      );
+    }
+    this.assertPermissionCeiling([definition]);
+    this.assertMcpCeiling([definition], context.mcpServers);
+    const availableAliases = new Set(
+      [...this.aliasIndex.keys()].filter((alias) => alias !== context.alias),
+    );
+    const standardCanTalk = update.standardCanTalk ?? context.agent.standardCanTalk;
+    const validated = validateAgentDefinition(definition, { availableAliases, standardCanTalk });
+    if (!validated.valid || !validated.agent) {
+      throw new Error(
+        `Agent "${context.alias}" update is invalid: ${validated.issues
+          .map((issue) => `${issue.path}: ${issue.message}`)
+          .join("; ")}`,
+      );
+    }
+
+    const previousDefinition = context.definition;
+    const previousAgent = context.agent;
+    context.definition = definition;
+    context.agent = validated.agent;
+    try {
+      this.db.updateAgentRun(
+        context.runId,
+        context.alias,
+        this.storedAgentJson(context),
+        standardCanTalk,
+      );
+    } catch (error) {
+      context.definition = previousDefinition;
+      context.agent = previousAgent;
+      throw error;
+    }
+
+    let reconnected = false;
+    try {
+      reconnected = await this.reconnectIfConfigChanged(context);
+    } catch (error) {
+      // The reconnect failed, so restore the previous definition durably and in
+      // memory rather than leaving a committed update the live session never
+      // received, then surface the failure.
+      context.definition = previousDefinition;
+      context.agent = previousAgent;
+      this.db.updateAgentRun(
+        context.runId,
+        context.alias,
+        this.storedAgentJson(context),
+        previousAgent.standardCanTalk,
+      );
+      throw error;
+    }
+    this.emitAgentLifecycle("agent.updated", context, { reconnected });
+    return {
+      action: "updated",
+      ...this.agentPayload(context),
+      runId: context.runId,
+      reconnected,
+    };
+  }
+
+  /**
+   * Removes a departed alias from every remaining agent's outgoing ACL so no agent
+   * keeps a send tool for an agent that no longer exists, and reconnects the ones
+   * whose tools changed.
+   */
+  private async pruneRecipient(alias: string): Promise<string[]> {
+    const pruned: string[] = [];
+    for (const context of [...this.agents.values()]) {
+      if (!context.agent.recipients.has(alias)) {
         continue;
       }
-      const member = context.fleet.members.get(entry.memberId);
-      if (!member) {
-        continue;
-      }
-      this.db.upsertSession(context.runId, entry.memberId, entry.sessionId, "connected");
+      const recipients = new Set(context.agent.recipients);
+      recipients.delete(alias);
+      context.definition = {
+        ...context.definition,
+        canTalkTo: context.definition.canTalkTo.filter((entry) => entry !== alias),
+      };
+      context.agent = { ...context.agent, recipients };
+      this.db.updateAgentRun(
+        context.runId,
+        context.alias,
+        this.storedAgentJson(context),
+        context.agent.standardCanTalk,
+      );
+      pruned.push(context.alias);
       try {
-        await this.connectSession(
-          context.runId,
-          entry.target,
-          entry.memberId,
-          context.fleet.id,
-          entry.sessionId,
-          this.memberConfig(
-            member,
-            this.createPeerMessageTools(context.fleet.id, member),
-            context.mcpServers,
-            entry.target,
-          ),
-          member.recipients,
-          true,
-          true,
+        const reconnected = await this.reconnectIfConfigChanged(context);
+        this.emitAgentLifecycle("agent.updated", context, { reconnected });
+      } catch (error) {
+        this.emit(
+          "agent.error",
+          {
+            ...this.agentPayload(context),
+            message: `Reconnect after removing recipient "${alias}" failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          },
+          { runId: context.runId, memberId: STANDARD_TARGET, target: "activity", done: true },
         );
-      } catch {
-        // Best-effort restoration; a member that cannot be restored is left disconnected.
+      }
+    }
+    return pruned;
+  }
+
+  /**
+   * Reconnects an agent whenever anything its SessionConfig is derived from changed:
+   * prompt, task, model, reasoning, permissions, MCP subset, or the resolved peer
+   * send tools. The session id and conversation history are preserved.
+   */
+  private async reconnectIfConfigChanged(context: AgentContext): Promise<boolean> {
+    const live = this.live.get(context.target);
+    if (!live) {
+      return false;
+    }
+    if (this.sessionSignature(context) === live.configSignature) {
+      return false;
+    }
+    await this.reconnectAgent(context);
+    return true;
+  }
+
+  // Reconnects one agent in place, preserving its SDK session id and history while
+  // rebuilding its complete session config from the current definition and alias
+  // resolution. Several callers can be waiting on the same in-flight connection, so
+  // each pass re-enters the shared guard (which joins rather than duplicates) and
+  // then verifies the resulting session really was built from the current config;
+  // a session joined from an older connect is replaced on the next pass.
+  private async reconnectAgent(context: AgentContext): Promise<void> {
+    const target = context.target;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const pending = this.connecting.get(target);
+      if (pending) {
+        // Wait for the connection already in progress before replacing it; its own
+        // caller reports any failure, so only its completion matters here.
+        await pending.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
+      const desired = this.sessionSignature(context);
+      const live = this.live.get(target);
+      if (live && live.configSignature === desired) {
+        return;
+      }
+      const connected = await this.trackConnection(target, async () => {
+        const existing = this.live.get(target);
+        const sessionId = existing?.session.sessionId ?? this.db.session(context.runId)?.sessionId;
+        if (existing) {
+          existing.unsubscribe();
+          this.live.delete(target);
+          await existing.session.disconnect().catch(() => undefined);
+        }
+        return this.establishSession({
+          runId: context.runId,
+          target,
+          agentId: context.agentId,
+          alias: context.alias,
+          sessionId,
+          config: this.agentConfig(context),
+          configSignature: this.sessionSignature(context),
+          resumeExisting: true,
+          suppressHistory: true,
+        });
+      });
+      if (connected.configSignature === this.sessionSignature(context)) {
+        return;
+      }
+    }
+    throw new Error(
+      `Agent "${context.alias}" could not be reconnected with its current configuration.`,
+    );
+  }
+
+  // After agents start or are recovered, refreshes any live agent whose session
+  // config no longer matches — most often because a peer alias now resolves to a
+  // different UUID target.
+  private async reconnectStalePeers(): Promise<void> {
+    for (const context of [...this.agents.values()]) {
+      try {
+        await this.reconnectIfConfigChanged(context);
+      } catch (error) {
+        this.emit(
+          "agent.error",
+          {
+            ...this.agentPayload(context),
+            message: `Peer tool refresh failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          },
+          { runId: context.runId, memberId: STANDARD_TARGET, target: "activity", done: true },
+        );
       }
     }
   }
 
-  recoverableFleetRuns(): Array<Record<string, unknown>> {
-    return this.db
-      .resumableFleetRuns(this.workspace)
-      .flatMap((run) => {
-        if (!run.fleetDefinition) return [];
-        const { definition } = storedDynamicFleet(run.fleetDefinition);
-        const validation = validateFleet(definition);
-        if (!validation.valid) return [];
-        return [{
-          id: run.id,
-          fleetId: run.fleetId,
-          name: definition.name,
-          status: run.status,
-          startedAt: run.startedAt,
-          endedAt: run.endedAt,
-          members: run.sessions.map((session) => session.memberId),
-        }];
-      });
+  // Tears down an agent that could not start or recover, closing its run so no
+  // half-started agent stays addressable. The failure is reported as an error and
+  // then as a terminal agent.stopped, so the UI always sees the same lifecycle
+  // ending for a failed agent as for one that was stopped deliberately.
+  private async failAgent(context: AgentContext, message: string): Promise<void> {
+    const live = this.live.get(context.target);
+    if (live) {
+      live.unsubscribe();
+      this.live.delete(context.target);
+      await live.session.disconnect().catch(() => undefined);
+    }
+    this.agents.delete(context.agentId);
+    if (this.aliasIndex.get(context.alias) === context.agentId) {
+      this.aliasIndex.delete(context.alias);
+    }
+    this.db.finishRun(context.runId, "interrupted", message);
+    this.emit(
+      "agent.error",
+      { ...this.agentPayload(context), runId: context.runId, message },
+      { runId: context.runId, memberId: STANDARD_TARGET, target: "activity", done: true },
+    );
+    this.emit(
+      "agent.stopped",
+      { ...this.agentPayload(context), runId: context.runId, reason: message, failed: true },
+      { runId: context.runId, memberId: context.target, target: "status", done: true },
+    );
+    await this.pruneRecipient(context.alias);
   }
 
-  private memberPayload(fleetId: string, member: ResolvedMember): Record<string, unknown> {
+  private agentPayload(context: AgentContext): Record<string, unknown> {
     return {
-      id: qualifiedTarget(fleetId, member.id),
-      memberId: member.id,
-      fleetId,
-      displayName: member.displayName,
-      description: member.description,
-      recipients: [...member.recipients],
-      autoStart: member.autoStart,
-      ui: member.ui,
+      target: context.target,
+      agentId: context.agentId,
+      alias: context.alias,
+      displayName: context.agent.displayName,
+      description: context.agent.description,
+      task: context.agent.task,
+      recipients: [...context.agent.recipients],
+      standardCanTalk: context.agent.standardCanTalk,
+      ...(context.agent.ui === undefined ? {} : { ui: context.agent.ui }),
     };
   }
 
-  private fleetPayload(context: FleetContext, recovered: boolean): Record<string, unknown> {
-    const fleet = context.fleet;
-    return {
-      mode: "fleet",
-      fleetId: fleet.id,
-      name: fleet.name,
-      recovered,
-      entryMember: qualifiedTarget(fleet.id, fleet.entryMember),
-      entryMemberId: fleet.entryMember,
-      members: [...fleet.members.values()].map((member) => this.memberPayload(fleet.id, member)),
-    };
-  }
-
-  private emitFleetLoading(
-    context: FleetContext,
-    recovered: boolean,
-    connectingMembers: string[],
+  private emitAgentLifecycle(
+    type: string,
+    context: AgentContext,
+    extra: { recovered?: boolean; sessionId?: string; reconnected?: boolean },
   ): void {
     this.emit(
-      "fleet.loading",
+      type,
+      { ...this.agentPayload(context), runId: context.runId, ...extra },
       {
-        ...this.fleetPayload(context, recovered),
-        mode: "fleet-loading",
-        connectingMembers: connectingMembers.map((id) =>
-          qualifiedTarget(context.fleet.id, id)),
+        runId: context.runId,
+        memberId: context.target,
+        target: "status",
+        done: type !== "agent.loading",
       },
-      { runId: context.runId, target: "status", done: false },
     );
   }
 
-  private emitFleetUpdated(
-    context: FleetContext,
-    changes: { added: string[]; updated: string[]; removed: string[] },
-  ): void {
-    const fleetId = context.fleet.id;
-    const info = (id: string): Record<string, unknown> => {
-      const member = context.fleet.members.get(id);
-      return member
-        ? this.memberPayload(fleetId, member)
-        : { id: qualifiedTarget(fleetId, id), memberId: id, fleetId };
-    };
-    this.emit(
-      "fleet.updated",
-      {
-        fleetId,
-        entryMember: qualifiedTarget(fleetId, context.fleet.entryMember),
-        entryMemberId: context.fleet.entryMember,
-        added: changes.added.map(info),
-        updated: changes.updated.map(info),
-        removed: changes.removed.map((id) => qualifiedTarget(fleetId, id)),
-        members: [...context.fleet.members.values()].map((member) =>
-          this.memberPayload(fleetId, member)),
-      },
-      { runId: context.runId, target: "status", done: true },
-    );
+  recoverableAgentRuns(): Array<Record<string, unknown>> {
+    return this.db.resumableAgentRuns(this.workspace).flatMap((run) => {
+      if (!run.definition) {
+        return [];
+      }
+      // A row whose persisted definition cannot be parsed can no longer be resumed,
+      // so it is not offered as a recovery candidate.
+      let record: StoredAgentRecord;
+      try {
+        record = storedAgentRecord(run.definition);
+      } catch {
+        return [];
+      }
+      return [{
+        id: run.id,
+        runId: run.id,
+        target: agentTarget(run.agentId),
+        agentId: run.agentId,
+        alias: run.alias,
+        displayName: record.definition.displayName,
+        description: record.definition.description,
+        task: record.definition.task,
+        recipients: [...record.definition.canTalkTo],
+        standardCanTalk: run.standardCanTalk,
+        status: run.status,
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        ...(run.session ? { sessionId: run.session.sessionId } : {}),
+      }];
+    });
   }
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
     const live = await this.activeSession(target);
     const runId = live.runId;
     const id = randomUUID();
-    this.db.enqueueMessage(id, runId, "user", live.memberId, "user", content);
+    this.db.enqueueMessage(id, runId, "user", live.target, "user", content);
     try {
       const sdkMessageId = await live.session.send({ prompt: content, mode: "immediate" });
       this.db.completeMessage(id);
       this.emit(
         "prompt.accepted",
-        { id, sdkMessageId, source: "user", target: live.memberId, content },
+        { id, sdkMessageId, source: "user", target: live.target, content },
         { runId, memberId: live.target, target: "conversation" },
       );
       return sdkMessageId;
@@ -3314,27 +2959,44 @@ export class CopilotRuntime {
     }
   }
 
-  private async drainMailbox(fleetId: string, memberId: string): Promise<void> {
-    const context = this.fleets.get(fleetId);
-    if (!context) {
+  /** Drains one recipient's own durable mailbox; every mailbox drains independently. */
+  private async drainMailbox(target: string): Promise<void> {
+    let live = this.live.get(target);
+    if (!live && target.startsWith(AGENT_TARGET_PREFIX)) {
+      const agentId = target.slice(AGENT_TARGET_PREFIX.length);
+      if (!this.agents.has(agentId)) {
+        return;
+      }
+      try {
+        live = await this.ensureAgentSession(agentId);
+      } catch (error) {
+        this.emit(
+          "mailbox.failed",
+          {
+            message: `The recipient session could not be started: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          },
+          { memberId: target, target: "messages" },
+        );
+        return;
+      }
+    }
+    if (!live || live.busy) {
       return;
     }
-    const live = await this.ensureFleetMember(fleetId, memberId);
-    if (live.busy) {
-      return;
-    }
-    const pending = this.db.claimMessages(context.runId, memberId);
+    const pending = this.db.claimMessages(live.runId, target);
     for (const message of pending) {
       if (message.kind === "user") {
         this.db.completeMessage(message.id);
         continue;
       }
       const prompt =
-        `<fleet_message id="${message.id}" source="${message.source}">\n` +
+        `<agent_message id="${message.id}" source="${message.source}">\n` +
         `${message.content}\n` +
-        "</fleet_message>\n\n" +
-        "Process this durable message from another fleet member. Respond or act as appropriate, " +
-        "and use the relevant send_to_<agent> tool if another member needs a direct answer.";
+        "</agent_message>\n\n" +
+        "Process this durable message from another Copilot agent. Respond or act as appropriate, " +
+        "and use the relevant send tool if the sender needs a direct answer.";
       try {
         await live.session.send({ prompt, mode: "immediate" });
         this.db.completeMessage(message.id);
@@ -3374,24 +3036,29 @@ export class CopilotRuntime {
   }
 
   status(): unknown {
+    const standardLive = this.live.get(STANDARD_TARGET);
     return {
-      standard: this.standard ? { runId: this.standard.runId } : undefined,
-      fleets: [...this.fleets.entries()].map(([fleetId, context]) => ({
-        fleetId,
-        runId: context.runId,
-        name: context.fleet.name,
-        entryMember: qualifiedTarget(fleetId, context.fleet.entryMember),
-        members: [...context.fleet.members.values()].map((member) => ({
-          id: qualifiedTarget(fleetId, member.id),
-          memberId: member.id,
-          fleetId,
-          displayName: member.displayName ?? member.id,
-        })),
-      })),
-      members: [...this.live.values()].map((live) => ({
-        id: live.target,
-        memberId: live.memberId,
-        fleetId: live.fleetId,
+      standard: this.standard
+        ? {
+            runId: this.standard.runId,
+            target: STANDARD_TARGET,
+            ...(standardLive ? { sessionId: standardLive.session.sessionId } : {}),
+            state: standardLive?.foregroundBusy ? "busy" : "idle",
+          }
+        : undefined,
+      agents: [...this.agents.values()].map((context) => {
+        const live = this.live.get(context.target);
+        return {
+          ...this.agentPayload(context),
+          runId: context.runId,
+          ...(live ? { sessionId: live.session.sessionId } : {}),
+          state: this.agentState(context),
+        };
+      }),
+      sessions: [...this.live.values()].map((live) => ({
+        target: live.target,
+        agentId: live.agentId,
+        alias: live.alias,
         sessionId: live.session.sessionId,
         state: live.foregroundBusy ? "busy" : "idle",
       })),
@@ -3412,14 +3079,18 @@ export class CopilotRuntime {
     if (this.standard) {
       runIds.add(this.standard.runId);
     }
-    for (const context of this.fleets.values()) {
+    // Every agent owns its own run, so each is interrupted independently.
+    for (const context of this.agents.values()) {
       runIds.add(context.runId);
     }
     for (const live of this.live.values()) {
       live.unsubscribe();
     }
     this.live.clear();
-    this.fleets.clear();
+    this.connecting.clear();
+    this.agents.clear();
+    this.aliasIndex.clear();
+    this.pendingSpawns.length = 0;
     this.standard = undefined;
     for (const runId of runIds) {
       this.db.finishRun(runId, "interrupted", reason);
@@ -3431,8 +3102,8 @@ export class CopilotRuntime {
       try {
         await Promise.race([
           client.stop(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Copilot shutdown timed out")), 4_000);
+          new Promise<never>((_, rejectShutdown) => {
+            timer = setTimeout(() => rejectShutdown(new Error("Copilot shutdown timed out")), 4_000);
           }),
         ]);
       } catch {

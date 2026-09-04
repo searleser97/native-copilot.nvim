@@ -2,9 +2,15 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export type RunMode = "standard" | "fleet";
+export type RunMode = "standard" | "agent";
 export type RunStatus = "active" | "stopped" | "interrupted";
-export type MessageStatus = "pending" | "delivering" | "delivered" | "failed" | "settled";
+export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
+
+/**
+ * Current durable schema version. Every run is a single session — the Standard
+ * supervisor or one standalone agent — so the schema carries no group state.
+ */
+const SCHEMA_VERSION = 6;
 
 export interface StoredMessage {
   id: string;
@@ -17,13 +23,6 @@ export interface StoredMessage {
   sequence: number;
   createdAt: string;
   updatedAt: string;
-  reason?: string | null;
-}
-
-/** A message settled during an agent move, with the status it held beforehand. */
-export interface SettledMessage {
-  id: string;
-  previousStatus: MessageStatus;
 }
 
 export interface StateSnapshot {
@@ -33,21 +32,36 @@ export interface StateSnapshot {
   events: Array<Record<string, unknown>>;
 }
 
-export interface StoredFleetRun {
+export interface StoredAgentSession {
+  sessionId: string;
+  state: string;
+  lastActiveAt: string;
+}
+
+export interface StoredAgentRun {
   id: string;
-  fleetId: string;
-  fleetDefinition: string | null;
+  agentId: string;
+  alias: string;
+  definition: string | null;
+  standardCanTalk: boolean;
   status: RunStatus;
   startedAt: string;
   endedAt: string | null;
-  sessions: Array<{ memberId: string; sessionId: string; state: string; lastActiveAt: string }>;
+  session: StoredAgentSession | undefined;
+}
+
+export interface ReservedAgentAlias {
+  alias: string;
+  agentId: string;
+  runId: string;
+  status: RunStatus;
 }
 
 function now(): string {
   return new Date().toISOString();
 }
 
-export class FleetDatabase {
+export class AgentDatabase {
   readonly db: DatabaseSync;
 
   constructor(path: string) {
@@ -56,24 +70,61 @@ export class FleetDatabase {
     this.migrate();
   }
 
+  /**
+   * Brings the database to {@link SCHEMA_VERSION}. Backward compatibility with an
+   * older, pre-agent schema is deliberately not preserved: that state is dropped and
+   * the durable schema is rebuilt coherently, so an existing database always opens
+   * successfully instead of failing at startup. A database written by a *newer* host
+   * is never erased — it is rejected with an explicit error.
+   */
   private migrate(): void {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
-      PRAGMA foreign_keys = ON;
       PRAGMA busy_timeout = 5000;
 
       CREATE TABLE IF NOT EXISTS schema_meta (
         version INTEGER NOT NULL
       );
       INSERT INTO schema_meta(version)
-      SELECT 5
+      SELECT ${SCHEMA_VERSION}
       WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
-
+    `);
+    const schema = this.db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as {
+      version: number;
+    };
+    if (schema.version > SCHEMA_VERSION) {
+      throw new Error(
+        `The Copilot state database is at schema version ${schema.version}, which is newer than ` +
+          `this host understands (${SCHEMA_VERSION}). Update native-copilot.nvim instead of ` +
+          "opening it with an older host; the newer state is left untouched.",
+      );
+    }
+    if (schema.version < SCHEMA_VERSION) {
+      // Foreign keys cannot be toggled inside a transaction, so disable them around
+      // the rebuild of the obsolete tables.
+      this.db.exec("PRAGMA foreign_keys = OFF");
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        DROP TABLE IF EXISTS checkpoints;
+        DROP TABLE IF EXISTS delivery_leases;
+        DROP TABLE IF EXISTS messages;
+        DROP TABLE IF EXISTS events;
+        DROP TABLE IF EXISTS member_sessions;
+        DROP TABLE IF EXISTS agent_sessions;
+        DROP TABLE IF EXISTS runs;
+        UPDATE schema_meta SET version = ${SCHEMA_VERSION};
+        COMMIT;
+      `);
+    }
+    this.db.exec("PRAGMA foreign_keys = ON");
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY,
-        mode TEXT NOT NULL CHECK(mode IN ('standard', 'fleet')),
-        fleet_id TEXT,
-        fleet_definition TEXT,
+        mode TEXT NOT NULL CHECK(mode IN ('standard', 'agent')),
+        agent_id TEXT,
+        alias TEXT,
+        definition TEXT,
+        standard_can_talk INTEGER NOT NULL DEFAULT 0,
         workspace TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
         started_at TEXT NOT NULL,
@@ -81,14 +132,13 @@ export class FleetDatabase {
         interruption_reason TEXT,
         owner_pid INTEGER
       );
+      CREATE INDEX IF NOT EXISTS runs_agent_idx ON runs(agent_id);
 
-      CREATE TABLE IF NOT EXISTS member_sessions (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        member_id TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
         session_id TEXT NOT NULL,
         state TEXT NOT NULL,
-        last_active_at TEXT NOT NULL,
-        PRIMARY KEY(run_id, member_id)
+        last_active_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS messages (
@@ -98,11 +148,10 @@ export class FleetDatabase {
         target TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('user', 'agent', 'system')),
         content TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed', 'settled')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed')),
         sequence INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        reason TEXT,
         UNIQUE(run_id, target, sequence)
       );
 
@@ -117,94 +166,24 @@ export class FleetDatabase {
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY,
         run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
-        member_id TEXT,
+        target TEXT,
         type TEXT NOT NULL,
         payload TEXT NOT NULL,
         sequence INTEGER,
         created_at TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS events_run_member_idx
-      ON events(run_id, member_id, created_at);
+      CREATE INDEX IF NOT EXISTS events_run_target_idx
+      ON events(run_id, target, created_at);
 
       CREATE TABLE IF NOT EXISTS checkpoints (
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        member_id TEXT NOT NULL,
+        target TEXT NOT NULL,
         last_event_sequence INTEGER NOT NULL DEFAULT 0,
         unread_count INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL,
-        PRIMARY KEY(run_id, member_id)
+        PRIMARY KEY(run_id, target)
       );
     `);
-    const schema = this.db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as {
-      version: number;
-    };
-    if (schema.version < 2) {
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        CREATE TABLE member_sessions_v2 (
-          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-          member_id TEXT NOT NULL,
-          session_id TEXT NOT NULL,
-          state TEXT NOT NULL,
-          last_active_at TEXT NOT NULL,
-          PRIMARY KEY(run_id, member_id)
-        );
-        INSERT INTO member_sessions_v2(run_id, member_id, session_id, state, last_active_at)
-        SELECT run_id, member_id, session_id, state, last_active_at
-        FROM member_sessions;
-        DROP TABLE member_sessions;
-        ALTER TABLE member_sessions_v2 RENAME TO member_sessions;
-        UPDATE schema_meta SET version = 2;
-        COMMIT;
-      `);
-    }
-    if (schema.version < 3) {
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        ALTER TABLE runs ADD COLUMN owner_pid INTEGER;
-        UPDATE schema_meta SET version = 3;
-        COMMIT;
-      `);
-    }
-    if (schema.version < 4) {
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        ALTER TABLE runs ADD COLUMN fleet_definition TEXT;
-        UPDATE schema_meta SET version = 4;
-        COMMIT;
-      `);
-    }
-    if (schema.version < 5) {
-      // Expand the message status CHECK to include 'settled' and add a reason column.
-      // The messages table is referenced by delivery_leases(message_id); foreign keys
-      // cannot be toggled inside a transaction, so disable them around the rebuild.
-      this.db.exec("PRAGMA foreign_keys = OFF");
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        CREATE TABLE messages_v5 (
-          id TEXT PRIMARY KEY,
-          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-          source TEXT NOT NULL,
-          target TEXT NOT NULL,
-          kind TEXT NOT NULL CHECK(kind IN ('user', 'agent', 'system')),
-          content TEXT NOT NULL,
-          status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed', 'settled')),
-          sequence INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          reason TEXT,
-          UNIQUE(run_id, target, sequence)
-        );
-        INSERT INTO messages_v5(id, run_id, source, target, kind, content, status, sequence, created_at, updated_at, reason)
-        SELECT id, run_id, source, target, kind, content, status, sequence, created_at, updated_at, NULL
-        FROM messages;
-        DROP TABLE messages;
-        ALTER TABLE messages_v5 RENAME TO messages;
-        UPDATE schema_meta SET version = 5;
-        COMMIT;
-      `);
-      this.db.exec("PRAGMA foreign_keys = ON");
-    }
   }
 
   private transaction<T>(operation: () => T): T {
@@ -256,69 +235,138 @@ export class FleetDatabase {
     return staleIds.length;
   }
 
-  createRun(
+  createStandardRun(id: string, workspace: string, ownerPid: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO runs(id, mode, workspace, status, started_at, owner_pid)
+         VALUES (?, 'standard', ?, 'active', ?, ?)`,
+      )
+      .run(id, workspace, now(), ownerPid);
+  }
+
+  /**
+   * Moves every still-undelivered message addressed to the Standard session from
+   * earlier, no-longer-active Standard runs in this workspace into the run that now
+   * owns that mailbox. Messages an agent sent to Standard must survive a Standard
+   * session replacement or a host restart rather than being stranded on a dead run,
+   * so they are transferred instead of dropped: stale delivery leases are released,
+   * the messages are reset to 'pending', and each one is given the next free
+   * sequence in the new run so the UNIQUE(run_id, target, sequence) key cannot
+   * collide. Returns how many messages were adopted.
+   */
+  adoptStandardMessages(runId: string, workspace: string, target = "standard"): number {
+    return this.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT messages.id AS id
+           FROM messages
+           JOIN runs ON runs.id = messages.run_id
+           WHERE messages.target = ?
+             AND messages.status IN ('pending', 'delivering')
+             AND runs.mode = 'standard'
+             AND runs.workspace = ?
+             AND runs.id != ?
+             AND runs.status != 'active'
+           ORDER BY messages.created_at, messages.sequence`,
+        )
+        .all(target, workspace, runId) as unknown as Array<{ id: string }>;
+      if (rows.length === 0) {
+        return 0;
+      }
+      const timestamp = now();
+      let sequence = this.nextSequence(runId, target);
+      const adopt = this.db.prepare(
+        `UPDATE messages
+         SET run_id = ?, sequence = ?, status = 'pending', updated_at = ?
+         WHERE id = ?`,
+      );
+      const releaseLease = this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?");
+      for (const row of rows) {
+        adopt.run(runId, sequence, timestamp, row.id);
+        releaseLease.run(row.id);
+        sequence += 1;
+      }
+      return rows.length;
+    });
+  }
+
+  /** Creates the single durable run that owns one standalone agent. */
+  createAgentRun(
     id: string,
-    mode: RunMode,
-    fleetId: string | null,
+    agentId: string,
+    alias: string,
+    definition: string,
+    standardCanTalk: boolean,
     workspace: string,
     ownerPid: number,
-    fleetDefinition: string | null = null,
   ): void {
     this.db
       .prepare(
         `INSERT INTO runs(
-           id, mode, fleet_id, fleet_definition, workspace, status, started_at, owner_pid
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+           id, mode, agent_id, alias, definition, standard_can_talk,
+           workspace, status, started_at, owner_pid
+         ) VALUES (?, 'agent', ?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
-      .run(id, mode, fleetId, fleetDefinition, workspace, now(), ownerPid);
+      .run(id, agentId, alias, definition, standardCanTalk ? 1 : 0, workspace, now(), ownerPid);
   }
 
-  resumableFleetRuns(workspace: string, limit = 20): StoredFleetRun[] {
-    const runs = this.db
+  private agentRunRows(where: string, ...parameters: Array<string | number>): StoredAgentRun[] {
+    const rows = this.db
       .prepare(
-        `SELECT id, fleet_id AS fleetId, fleet_definition AS fleetDefinition,
+        `SELECT id, agent_id AS agentId, alias, definition,
+                standard_can_talk AS standardCanTalk,
                 status, started_at AS startedAt, ended_at AS endedAt
          FROM runs
-         WHERE mode = 'fleet' AND workspace = ? AND fleet_id IS NOT NULL
-           AND status != 'active'
-           AND EXISTS (SELECT 1 FROM member_sessions WHERE run_id = runs.id)
-         ORDER BY started_at DESC
-         LIMIT ?`,
+         WHERE mode = 'agent' AND agent_id IS NOT NULL AND alias IS NOT NULL AND ${where}`,
       )
-      .all(workspace, limit) as unknown as Array<Omit<StoredFleetRun, "sessions">>;
-    const sessions = this.db.prepare(
-      `SELECT member_id AS memberId, session_id AS sessionId, state,
-              last_active_at AS lastActiveAt
-       FROM member_sessions
-       WHERE run_id = ?
-       ORDER BY last_active_at DESC`,
+      .all(...parameters) as unknown as Array<
+        Omit<StoredAgentRun, "standardCanTalk" | "session"> & { standardCanTalk: number }
+      >;
+    const session = this.db.prepare(
+      `SELECT session_id AS sessionId, state, last_active_at AS lastActiveAt
+       FROM agent_sessions WHERE run_id = ?`,
     );
-    return runs.map((run) => ({
-      ...run,
-      sessions: sessions.all(run.id) as unknown as StoredFleetRun["sessions"],
+    return rows.map((row) => ({
+      ...row,
+      standardCanTalk: row.standardCanTalk === 1,
+      session: session.get(row.id) as unknown as StoredAgentSession | undefined,
     }));
   }
 
-  fleetRun(id: string, workspace: string): StoredFleetRun | undefined {
-    const run = this.db
+  /** Agent runs in this workspace that are not owned by a live host and can resume. */
+  resumableAgentRuns(workspace: string, limit = 50): StoredAgentRun[] {
+    return this.agentRunRows(
+      `workspace = ?
+         AND status != 'active'
+         AND definition IS NOT NULL
+         AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+       ORDER BY started_at DESC
+       LIMIT ?`,
+      workspace,
+      limit,
+    );
+  }
+
+  agentRun(id: string, workspace: string): StoredAgentRun | undefined {
+    return this.agentRunRows("id = ? AND workspace = ?", id, workspace)[0];
+  }
+
+  /**
+   * Every agent alias reserved in a workspace: one row per agent run that still has
+   * a stored definition, regardless of status or whether it ever produced a session.
+   * Aliases must be unique across active agents and every recoverable definition, so
+   * this is the authoritative reservation list.
+   */
+  reservedAgentAliases(workspace: string): ReservedAgentAlias[] {
+    return this.db
       .prepare(
-        `SELECT id, fleet_id AS fleetId, fleet_definition AS fleetDefinition,
-                status, started_at AS startedAt, ended_at AS endedAt
+        `SELECT alias, agent_id AS agentId, id AS runId, status
          FROM runs
-         WHERE id = ? AND mode = 'fleet' AND workspace = ? AND fleet_id IS NOT NULL`,
+         WHERE mode = 'agent' AND workspace = ?
+           AND alias IS NOT NULL AND agent_id IS NOT NULL AND definition IS NOT NULL
+         ORDER BY started_at DESC`,
       )
-      .get(id, workspace) as unknown as Omit<StoredFleetRun, "sessions"> | undefined;
-    if (!run) {
-      return undefined;
-    }
-    const sessions = this.db
-      .prepare(
-        `SELECT member_id AS memberId, session_id AS sessionId, state,
-                last_active_at AS lastActiveAt
-         FROM member_sessions WHERE run_id = ?`,
-      )
-      .all(id) as unknown as StoredFleetRun["sessions"];
-    return { ...run, sessions };
+      .all(workspace) as unknown as ReservedAgentAlias[];
   }
 
   resumeRun(id: string, ownerPid: number): void {
@@ -326,77 +374,30 @@ export class FleetDatabase {
       .prepare(
         `UPDATE runs
          SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
-         WHERE id = ? AND mode = 'fleet' AND status != 'active'`,
+         WHERE id = ? AND mode = 'agent' AND status != 'active'`,
       )
       .run(ownerPid, id);
     if (result.changes !== 1) {
-      throw new Error(`Fleet run "${id}" could not be resumed.`);
+      throw new Error(`Agent run "${id}" could not be resumed.`);
     }
   }
 
-  updateFleetDefinition(id: string, fleetDefinition: string): void {
+  updateAgentRun(
+    id: string,
+    alias: string,
+    definition: string,
+    standardCanTalk: boolean,
+  ): void {
     const result = this.db
       .prepare(
-        `UPDATE runs SET fleet_definition = ? WHERE id = ? AND mode = 'fleet'`,
+        `UPDATE runs
+         SET alias = ?, definition = ?, standard_can_talk = ?
+         WHERE id = ? AND mode = 'agent'`,
       )
-      .run(fleetDefinition, id);
+      .run(alias, definition, standardCanTalk ? 1 : 0, id);
     if (result.changes !== 1) {
-      throw new Error(`Fleet run "${id}" could not be updated with a new definition.`);
+      throw new Error(`Agent run "${id}" could not be updated with a new definition.`);
     }
-  }
-
-  // Atomically persists new definitions for several Fleet runs in one transaction.
-  // Used when moving an agent between two active Fleets so both the source and the
-  // destination definitions are committed together or not at all.
-  updateFleetDefinitions(updates: Array<{ runId: string; fleetDefinition: string }>): void {
-    this.transaction(() => {
-      const statement = this.db.prepare(
-        `UPDATE runs SET fleet_definition = ? WHERE id = ? AND mode = 'fleet'`,
-      );
-      for (const update of updates) {
-        const result = statement.run(update.fleetDefinition, update.runId);
-        if (result.changes !== 1) {
-          throw new Error(
-            `Fleet run "${update.runId}" could not be updated with a new definition.`,
-          );
-        }
-      }
-    });
-  }
-
-  // Moves a persisted member session record from one run to another in a single
-  // transaction, preserving the same SDK session id. Used when an agent is moved to
-  // another Fleet while keeping its conversation history.
-  reassociateSession(
-    fromRunId: string,
-    toRunId: string,
-    memberId: string,
-    sessionId: string,
-    state: string,
-  ): void {
-    this.transaction(() => {
-      this.db
-        .prepare("DELETE FROM member_sessions WHERE run_id = ? AND member_id = ?")
-        .run(fromRunId, memberId);
-      this.db
-        .prepare(
-          `INSERT INTO member_sessions(run_id, member_id, session_id, state, last_active_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(run_id, member_id) DO UPDATE SET
-             session_id = excluded.session_id,
-             state = excluded.state,
-             last_active_at = excluded.last_active_at`,
-        )
-        .run(toRunId, memberId, sessionId, state, now());
-    });
-  }
-
-  // Removes a single member session record, e.g. the stale source record left after
-  // an agent is moved to another Fleet without a preserved live session.
-  deleteSession(runId: string, memberId: string): void {
-    this.db
-      .prepare("DELETE FROM member_sessions WHERE run_id = ? AND member_id = ?")
-      .run(runId, memberId);
   }
 
   finishRun(id: string, status: Exclude<RunStatus, "active">, reason?: string): void {
@@ -409,32 +410,41 @@ export class FleetDatabase {
       .run(status, now(), reason ?? null, id);
   }
 
-  upsertSession(runId: string, memberId: string, sessionId: string, state: string): void {
+  /** Persists the single SDK session owned by a run. */
+  upsertSession(runId: string, sessionId: string, state: string): void {
     this.db
       .prepare(
-        `INSERT INTO member_sessions(run_id, member_id, session_id, state, last_active_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(run_id, member_id) DO UPDATE SET
+        `INSERT INTO agent_sessions(run_id, session_id, state, last_active_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET
            session_id = excluded.session_id,
            state = excluded.state,
            last_active_at = excluded.last_active_at`,
       )
-      .run(runId, memberId, sessionId, state, now());
+      .run(runId, sessionId, state, now());
   }
 
-  hasConversationActivity(runId: string, memberId: string): boolean {
+  session(runId: string): StoredAgentSession | undefined {
+    return this.db
+      .prepare(
+        `SELECT session_id AS sessionId, state, last_active_at AS lastActiveAt
+         FROM agent_sessions WHERE run_id = ?`,
+      )
+      .get(runId) as unknown as StoredAgentSession | undefined;
+  }
+
+  hasConversationActivity(runId: string): boolean {
     const row = this.db
       .prepare(
         `SELECT EXISTS(
-           SELECT 1 FROM messages
-           WHERE run_id = ? AND target = ?
+           SELECT 1 FROM messages WHERE run_id = ?
          ) OR EXISTS(
            SELECT 1 FROM events
-           WHERE run_id = ? AND member_id = ?
+           WHERE run_id = ?
              AND type IN ('user.message', 'assistant.message', 'assistant.reasoning')
          ) AS present`,
       )
-      .get(runId, memberId, runId, memberId) as { present: number };
+      .get(runId, runId) as { present: number };
     return row.present === 1;
   }
 
@@ -448,6 +458,10 @@ export class FleetDatabase {
     return row.sequence;
   }
 
+  /**
+   * Stores a durable message against the recipient's own run, so every mailbox is
+   * drained independently and no shared run is required to route it.
+   */
   enqueueMessage(
     id: string,
     runId: string,
@@ -558,62 +572,10 @@ export class FleetDatabase {
     });
   }
 
-  /**
-   * Settle every still-in-flight (pending/delivering) message addressed to a target
-   * in a run. Used when an agent is moved to another Fleet: its source-run mailbox
-   * must NOT migrate, so undelivered messages are terminally settled with a reason
-   * and any outstanding delivery lease is released. Already-delivered/failed history
-   * is preserved untouched. Returns the affected ids with their prior status so a
-   * failed move can restore them.
-   */
-  settleMovedMessages(runId: string, target: string, reason: string): SettledMessage[] {
-    return this.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT id, status FROM messages
-           WHERE run_id = ? AND target = ? AND status IN ('pending', 'delivering')`,
-        )
-        .all(runId, target) as unknown as Array<{ id: string; status: MessageStatus }>;
-      if (rows.length === 0) {
-        return [];
-      }
-      const timestamp = now();
-      const settle = this.db.prepare(
-        "UPDATE messages SET status = 'settled', reason = ?, updated_at = ? WHERE id = ?",
-      );
-      const dropLease = this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?");
-      for (const row of rows) {
-        settle.run(reason, timestamp, row.id);
-        dropLease.run(row.id);
-      }
-      return rows.map((row) => ({ id: row.id, previousStatus: row.status }));
-    });
-  }
-
-  /**
-   * Restore previously-settled messages back to a safely redeliverable 'pending'
-   * state. Used to roll back {@link settleMovedMessages} when an in-progress agent
-   * move fails after its mailbox was settled.
-   */
-  restoreMovedMessages(entries: SettledMessage[]): void {
-    if (entries.length === 0) {
-      return;
-    }
-    this.transaction(() => {
-      const timestamp = now();
-      const restore = this.db.prepare(
-        "UPDATE messages SET status = 'pending', reason = NULL, updated_at = ? WHERE id = ? AND status = 'settled'",
-      );
-      for (const entry of entries) {
-        restore.run(timestamp, entry.id);
-      }
-    });
-  }
-
   appendEvent(
     id: string,
     runId: string | null,
-    memberId: string | null,
+    target: string | null,
     type: string,
     payload: unknown,
     sequence?: number,
@@ -621,24 +583,24 @@ export class FleetDatabase {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO events(
-           id, run_id, member_id, type, payload, sequence, created_at
+           id, run_id, target, type, payload, sequence, created_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, runId, memberId, type, JSON.stringify(payload), sequence ?? null, now());
+      .run(id, runId, target, type, JSON.stringify(payload), sequence ?? null, now());
   }
 
-  checkpoint(runId: string, memberId: string, sequence: number, unreadCount: number): void {
+  checkpoint(runId: string, target: string, sequence: number, unreadCount: number): void {
     this.db
       .prepare(
         `INSERT INTO checkpoints(
-           run_id, member_id, last_event_sequence, unread_count, updated_at
+           run_id, target, last_event_sequence, unread_count, updated_at
          ) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(run_id, member_id) DO UPDATE SET
+         ON CONFLICT(run_id, target) DO UPDATE SET
            last_event_sequence = excluded.last_event_sequence,
            unread_count = excluded.unread_count,
            updated_at = excluded.updated_at`,
       )
-      .run(runId, memberId, sequence, unreadCount, now());
+      .run(runId, target, sequence, unreadCount, now());
   }
 
   snapshot(eventLimit = 500): StateSnapshot {
@@ -646,7 +608,7 @@ export class FleetDatabase {
       .prepare("SELECT * FROM runs ORDER BY started_at DESC LIMIT 50")
       .all() as Array<Record<string, unknown>>;
     const sessions = this.db
-      .prepare("SELECT * FROM member_sessions ORDER BY last_active_at DESC")
+      .prepare("SELECT * FROM agent_sessions ORDER BY last_active_at DESC")
       .all() as Array<Record<string, unknown>>;
     const messages = this.db
       .prepare(

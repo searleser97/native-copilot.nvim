@@ -641,15 +641,21 @@ tick = function()
     local draft = 'Keep this draft while changing recipients.'
     vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { draft })
     native._on_event({
-      type = 'fleet.ready',
+      type = 'agent.ready',
       payload = {
-        fleetId = 'e2e-recipient-cycle',
-        name = 'Recipient Cycle',
-        entryMember = 'e2e-recipient-cycle/planner',
-        members = {
-          { id = 'e2e-recipient-cycle/planner', displayName = 'Planner' },
-          { id = 'e2e-recipient-cycle/reviewer', displayName = 'Reviewer' },
-        },
+        target = 'agent:e2e-recipient-cycle-planner',
+        agentId = 'e2e-recipient-cycle-planner',
+        alias = 'planner',
+        displayName = 'Planner',
+      },
+    })
+    native._on_event({
+      type = 'agent.ready',
+      payload = {
+        target = 'agent:e2e-recipient-cycle-reviewer',
+        agentId = 'e2e-recipient-cycle-reviewer',
+        alias = 'reviewer',
+        displayName = 'Reviewer',
       },
     })
     prompt_mapping(']a', 'n')()
@@ -664,8 +670,8 @@ tick = function()
       return vim.fn.maparg('<C-Right>', 'i') == ''
     end)
     if not check(
-      normal_target == 'e2e-recipient-cycle/planner'
-        and public_api_target == 'e2e-recipient-cycle/reviewer'
+      normal_target == 'agent:e2e-recipient-cycle-planner'
+        and public_api_target == 'agent:e2e-recipient-cycle-reviewer'
         and normal_preserved
         and public_api_preserved
         and removed_insert_mapping,
@@ -674,13 +680,19 @@ tick = function()
       return
     end
     native._on_event({
-      type = 'fleet.stopped',
+      type = 'agent.stopped',
       payload = {
-        fleetId = 'e2e-recipient-cycle',
-        members = {
-          'e2e-recipient-cycle/planner',
-          'e2e-recipient-cycle/reviewer',
-        },
+        target = 'agent:e2e-recipient-cycle-planner',
+        agentId = 'e2e-recipient-cycle-planner',
+        alias = 'planner',
+      },
+    })
+    native._on_event({
+      type = 'agent.stopped',
+      payload = {
+        target = 'agent:e2e-recipient-cycle-reviewer',
+        agentId = 'e2e-recipient-cycle-reviewer',
+        alias = 'reviewer',
       },
     })
     submit('Delay the assistant turn start so the pending UI can be checked.')

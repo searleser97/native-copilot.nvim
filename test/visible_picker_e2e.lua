@@ -548,35 +548,35 @@ tick = function()
     local windows = vim.fn.win_findbuf(detail)
     if #windows > 0 then vim.api.nvim_win_close(windows[1], true) end
     submit('/fleet Validate command picker behavior')
-    phase = 'fleet-objective-result'
-  elseif phase == 'fleet-objective-result' then
+    phase = 'agent-objective-result'
+  elseif phase == 'agent-objective-result' then
     if not content:find(
-      'Design and create a task%-specific Copilot fleet for this objective: Validate command picker behavior'
+      'Design and spawn standalone Copilot agents for this objective: Validate command picker behavior'
     ) then
       schedule_tick()
       return
     end
-    pass('/fleet <objective> routed the generated Fleet request to Standard')
+    pass('/fleet <objective> routed the standalone agent request to Standard')
     submit('/fleet')
-    phase = 'fleet-picker'
-  elseif phase == 'fleet-picker' then
+    phase = 'agent-picker'
+  elseif phase == 'agent-picker' then
     if not picker then
       schedule_tick()
       return
     end
     choose_where(function(item) return item.kind == 'recover' end)
-    phase = 'fleet-result'
-  elseif phase == 'fleet-result' then
+    phase = 'agent-result'
+  elseif phase == 'agent-result' then
     local planner = find_buffer(function(buf)
       return vim.api.nvim_buf_get_name(buf):find(
-        'native%-copilot://e2e%-recovered%-fleet/planner/conversation'
+        'native%-copilot://agent:e2e0aaaa%-0000%-4000%-8000%-00000000e2e1/conversation'
       ) ~= nil
     end)
     if not planner then
       schedule_tick()
       return
     end
-    pass('/fleet opened Telescope and recovered the selected Fleet')
+    pass('/fleet opened Telescope and recovered the selected agent')
     native.select_commands()
     phase = 'command-picker'
   elseif phase == 'command-picker' then

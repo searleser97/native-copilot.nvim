@@ -10,9 +10,9 @@ local function client_commands()
   return {
     {
       name = 'fleet',
-      description = 'Ask Standard Copilot to design and start a task-specific Fleet',
+      description = 'Ask Standard Copilot to design and spawn task-specific agents',
       kind = 'client',
-      input = { hint = 'objective for the dynamic fleet' },
+      input = { hint = 'objective for the agents' },
     },
     {
       name = 'tasks',
@@ -113,13 +113,12 @@ local state = {
   status_buf = nil,
   selected = 'standard',
   mode = 'stopped',
-  active_fleet = nil,
-  fleets = {},
+  agents = {},
   member_meta = {},
   member_order = { 'standard' },
   tasks = {},
   environment = {},
-  recoverable_fleets = {},
+  recoverable_agents = {},
   overview = false,
   configured_buffers = {},
   command_requests = {},
@@ -444,11 +443,16 @@ local function submit_prompt_content(queue_only)
       if command.input then
         send('prompt.send', {
           target = 'standard',
-          content = 'Design and create a task-specific Copilot fleet for this objective: '
-            .. command.input,
+          content = table.concat({
+            'Design and spawn standalone Copilot agents for this objective: ',
+            command.input,
+            '. Give each agent a focused task and explicitly define every directional ',
+            'communication link, including any link to or from standard. Do not assume ',
+            'that spawned agents can communicate with standard by default.',
+          }),
         })
       else
-        M.select_fleet()
+        M.select_agents()
       end
       return true
     elseif command.name:lower() == 'resume' then
@@ -1444,12 +1448,6 @@ local function ordered_members()
   return result
 end
 
-local function target_fleet_id(member_id)
-  local slash = member_id:find('/', 1, true)
-  if not slash then return nil end
-  return member_id:sub(1, slash - 1)
-end
-
 local function order_contains(member_id)
   for _, id in ipairs(state.member_order) do
     if id == member_id then return true end
@@ -1471,8 +1469,7 @@ local function remove_from_order(member_id)
 end
 
 -- Clears one member's transient UI state and buffers without touching any other
--- member, keeping Standard and other Fleets intact during incremental lifecycle
--- transitions.
+-- independently running agent or the Standard session.
 local function reset_member(member_id, preserve_buffers)
   if not preserve_buffers then buffers.remove_member(member_id) end
   state.tasks[member_id] = nil
@@ -1490,12 +1487,7 @@ end
 
 local function member_label(member_id)
   local entry = buffers.get_member(member_id)
-  local name = entry and entry.display_name or member_id
-  local meta = state.member_meta[member_id]
-  if meta and meta.fleetName then
-    return ('%s · %s'):format(meta.fleetName, name)
-  end
-  return name
+  return entry and entry.display_name or member_id
 end
 
 function M.cycle_member(step)
@@ -1748,35 +1740,27 @@ local function update_status_buffer()
     vim.bo[state.status_buf].filetype = 'native-copilot'
     vim.b[state.status_buf].native_copilot = true
   end
-  local active_fleets = {}
-  for fleet_id in pairs(state.fleets) do table.insert(active_fleets, fleet_id) end
-  table.sort(active_fleets)
+  local active_agents = {}
+  for target in pairs(state.agents) do table.insert(active_agents, target) end
+  table.sort(active_agents)
   local lines = {
     '# Native Copilot Status',
     '',
     ('- **Mode:** %s'):format(state.mode),
     ('- **Standard:** %s'):format(buffers.get_member('standard') and 'active' or 'stopped'),
-    ('- **Active Fleets:** %d'):format(#active_fleets),
+    ('- **Active agents:** %d'):format(#active_agents),
     ('- **Selected recipient:** %s'):format(state.selected),
     '',
   }
-  for _, fleet_id in ipairs(active_fleets) do
-    local fleet = state.fleets[fleet_id]
-    table.insert(lines, ('- Fleet `%s` — %s (%d members)'):format(
-      fleet_id,
-      fleet.name or fleet_id,
-      #(fleet.members or {})
-    ))
-  end
-  if #active_fleets > 0 then table.insert(lines, '') end
-  table.insert(lines, '| Member | Fleet | State | Unread |')
-  table.insert(lines, '|---|---|---:|---:|')
+  table.insert(lines, '| Agent | Alias | Session | State | Unread |')
+  table.insert(lines, '|---|---|---|---:|---:|')
   for _, member_id in ipairs(ordered_members()) do
     local entry = buffers.get_member(member_id)
     local meta = state.member_meta[member_id]
-    table.insert(lines, ('| %s | %s | %s | %d |'):format(
+    table.insert(lines, ('| %s | %s | %s | %s | %d |'):format(
       entry.display_name,
-      meta and (meta.fleetName or meta.fleetId) or '—',
+      meta and (meta.alias or '—') or (member_id == 'standard' and 'standard' or '—'),
+      meta and (meta.sessionId or 'connecting…') or '—',
       entry.state,
       entry.unread
     ))
@@ -2060,7 +2044,7 @@ function M.select()
   ensure_ui()
   local entries = {
     { display = 'All agents overview', kind = 'overview' },
-    { display = 'Fleet status', kind = 'status' },
+    { display = 'Agent status', kind = 'status' },
   }
   for _, member_id in ipairs(ordered_members()) do
     local entry = buffers.get_member(member_id)
@@ -2109,34 +2093,34 @@ function M.reload_mcp()
   send('mcp.reload', { target = state.selected })
 end
 
-function M.select_fleet()
+function M.select_agents()
   if not start_host() then return end
   ensure_ui()
   local entries = {}
-  local active_ids = {}
-  for fleet_id in pairs(state.fleets) do
-    table.insert(active_ids, fleet_id)
+  local active_targets = {}
+  for target in pairs(state.agents) do
+    table.insert(active_targets, target)
   end
-  table.sort(active_ids)
-  for _, fleet_id in ipairs(active_ids) do
-    local fleet = state.fleets[fleet_id]
+  table.sort(active_targets)
+  for _, target in ipairs(active_targets) do
+    local agent = state.agents[target]
     table.insert(entries, {
-      display = ('Stop %s (%d members)'):format(fleet.name or fleet_id, #(fleet.members or {})),
-      ordinal = ('stop %s %s'):format(fleet_id, fleet.name or ''),
+      display = ('Stop %s (%s)'):format(agent.displayName or agent.alias or target, agent.alias or target),
+      ordinal = ('stop %s %s'):format(agent.alias or '', agent.displayName or ''),
       kind = 'stop',
-      fleetId = fleet_id,
+      target = target,
     })
   end
-  for _, run in ipairs(state.recoverable_fleets) do
+  for _, run in ipairs(state.recoverable_agents) do
     table.insert(entries, {
-      display = ('Recover %s · %s · %d sessions'):format(
-        run.name or run.fleetId,
-        run.status,
-        #(run.members or {})
+      display = ('Recover %s (%s) · %s'):format(
+        run.displayName or run.alias or run.agentId,
+        run.alias or run.agentId,
+        run.status or 'interrupted'
       ),
       ordinal = table.concat({
         'recover',
-        run.name or run.fleetId,
+        run.alias or run.agentId or '',
         run.startedAt or '',
         run.status or '',
       }, ' '),
@@ -2145,16 +2129,16 @@ function M.select_fleet()
     })
   end
   if vim.tbl_isempty(entries) then
-    notify('Describe the fleet objective in a prompt or use /fleet <objective>.', vim.log.levels.INFO)
+    notify('No active or recoverable agents. Use /fleet <objective> to spawn agents.', vim.log.levels.INFO)
     return
   end
-  picker('Copilot Fleets', entries, function(item)
+  picker('Copilot agents', entries, function(item)
     if item.kind == 'stop' then
-      send('fleet.stop', { fleetId = item.fleetId })
+      send('agent.stop', { target = item.target })
       return
     end
     if item.kind == 'recover' then
-      send('fleet.resume', { runId = item.run.id })
+      send('agent.resume', { runId = item.run.id })
       return
     end
   end)
@@ -2423,59 +2407,37 @@ end
 function M._on_event(message)
   local payload = message.payload or {}
   if message.type == 'hello' then
-    state.recoverable_fleets = payload.recoverableFleets or {}
+    state.recoverable_agents = payload.recoverableAgents or {}
     local status = payload.status or {}
-    -- Reconcile against a host that may already have Standard and Fleets running
-    -- (for example when the UI reattaches to a live host).
+    -- Reconcile against a host that may already have Standard and agents running.
     if status.standard then
       add_to_order('standard')
       ensure_member('standard', (payload.standard and payload.standard.displayName) or 'Copilot')
       if state.mode == 'stopped' then state.mode = 'standard' end
     end
-    -- status.fleets is authoritative: rebuild each reported Fleet, and after a host
-    -- restart drop any local Fleet or member the host no longer reports so stale
-    -- buffers/order entries never linger.
-    local reported_fleets = {}
-    local reported_members = {}
-    for _, fleet in ipairs(status.fleets or {}) do
-      local fleet_id = fleet.fleetId
-      reported_fleets[fleet_id] = true
-      local record = state.fleets[fleet_id] or { members = {} }
-      local previous_members = record.members or {}
-      record.name = fleet.name
-      record.entryMember = fleet.entryMember
-      record.members = {}
-      for _, member_info in ipairs(fleet.members or {}) do
-        ensure_member(member_info.id, member_info.displayName)
-        add_to_order(member_info.id)
-        table.insert(record.members, member_info.id)
-        reported_members[member_info.id] = true
-        state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = fleet.name }
-      end
-      -- Remove members this Fleet previously had but no longer reports.
-      for _, member_id in ipairs(previous_members) do
-        if not reported_members[member_id] then
-          reset_member(member_id)
-          remove_from_order(member_id)
-          if state.selected == member_id then state.selected = 'standard' end
-        end
-      end
-      state.fleets[fleet_id] = record
-    end
-    -- Remove entire Fleets the host no longer reports.
-    for fleet_id, record in pairs(state.fleets) do
-      if not reported_fleets[fleet_id] then
-        for _, member_id in ipairs(record.members or {}) do
-          reset_member(member_id)
-          remove_from_order(member_id)
-          if state.selected == member_id then state.selected = 'standard' end
-        end
-        state.fleets[fleet_id] = nil
+    local reported_agents = {}
+    for _, agent in ipairs(status.agents or {}) do
+      local target = agent.target or agent.id
+      if target then
+        reported_agents[target] = true
+        state.agents[target] = vim.deepcopy(agent)
+        state.member_meta[target] = vim.deepcopy(agent)
+        ensure_member(target, agent.displayName or agent.alias or target)
+        add_to_order(target)
       end
     end
-    for _, member_info in ipairs(status.members or {}) do
-      if buffers.get_member(member_info.id) then
-        buffers.set_state(member_info.id, member_info.state == 'busy' and 'busy' or 'idle')
+    for target in pairs(state.agents) do
+      if not reported_agents[target] then
+        reset_member(target)
+        remove_from_order(target)
+        state.agents[target] = nil
+        if state.selected == target then state.selected = 'standard' end
+      end
+    end
+    for _, agent in ipairs(status.agents or {}) do
+      local target = agent.target or agent.id
+      if target and buffers.get_member(target) then
+        buffers.set_state(target, agent.state == 'busy' and 'busy' or 'idle')
       end
     end
     if not buffers.get_member(state.selected) then state.selected = 'standard' end
@@ -2938,12 +2900,13 @@ function M._on_event(message)
     end
     notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
     return
-  elseif message.type == 'fleet.requested' then
+  elseif message.type == 'agents.requested' then
     buffers.append_activity_block(
       'standard',
-      'Fleet requested',
-      ('%s will start alongside Standard when the current turn becomes idle.'):format(
-        payload.fleetId or 'Fleet'
+      'Agents requested',
+      ('%d standalone agent%s will start when Standard becomes idle.'):format(
+        tonumber(payload.count) or #(payload.agents or {}),
+        (tonumber(payload.count) or #(payload.agents or {})) == 1 and '' or 's'
       )
     )
     return
@@ -2962,7 +2925,7 @@ function M._on_event(message)
     restore_resume_cursor_animation(100)
     return
   elseif message.type == 'session.loading' then
-    -- Only the Standard session is reloaded; concurrent Fleets are untouched.
+    -- Only the Standard session is reloaded; independent agents are untouched.
     close_task_detail()
     reset_member('standard', true)
     state.mode = 'standard-loading'
@@ -2972,113 +2935,60 @@ function M._on_event(message)
     state.selected = 'standard'
     if is_ui_open() then refresh_member('standard') end
     return
-  elseif message.type == 'fleet.loading' then
-    local fleet_id = payload.fleetId
-    state.fleets[fleet_id] = {
-      name = payload.name,
-      entryMember = payload.entryMember,
-      recovered = payload.recovered,
-      members = {},
-    }
-    local connecting = {}
-    for _, member_id in ipairs(payload.connectingMembers or {}) do connecting[member_id] = true end
-    for _, member_info in ipairs(payload.members or {}) do
-      ensure_member(member_info.id, member_info.displayName)
-      add_to_order(member_info.id)
-      table.insert(state.fleets[fleet_id].members, member_info.id)
-      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = payload.name }
-      buffers.set_state(member_info.id, connecting[member_info.id] and 'loading' or 'standby')
-    end
-    if payload.entryMember and buffers.get_member(payload.entryMember) then
+  elseif message.type == 'agent.loading' or message.type == 'agent.ready' then
+    local target = payload.target
+    if not target then return end
+    state.agents[target] = vim.deepcopy(payload)
+    state.member_meta[target] = vim.deepcopy(payload)
+    ensure_member(target, payload.displayName or payload.alias or target)
+    add_to_order(target)
+    buffers.set_state(target, message.type == 'agent.loading' and 'loading' or 'idle')
+    if message.type == 'agent.loading' then
       buffers.append_activity_block(
-        payload.entryMember,
-        payload.recovered and 'Recovering Fleet' or 'Starting Fleet',
-        ('Connecting %d of %d configured members...'):format(
-          #(payload.connectingMembers or {}),
-          #(payload.members or {})
-        )
+        target,
+        payload.recovered and 'Recovering agent' or 'Starting agent',
+        payload.alias or payload.displayName or target
       )
     end
-    if is_ui_open() and not buffers.get_member(state.selected) then
-      state.selected = payload.entryMember or state.selected
-      if buffers.get_member(state.selected) then refresh_member(state.selected) end
-    end
-    return
-  elseif message.type == 'fleet.ready' then
-    local fleet_id = payload.fleetId
-    local fleet = state.fleets[fleet_id] or { members = {} }
-    fleet.name = payload.name
-    fleet.entryMember = payload.entryMember
-    fleet.recovered = payload.recovered
-    fleet.members = {}
-    for _, member_info in ipairs(payload.members or {}) do
-      ensure_member(member_info.id, member_info.displayName)
-      add_to_order(member_info.id)
-      table.insert(fleet.members, member_info.id)
-      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = payload.name }
-    end
-    state.fleets[fleet_id] = fleet
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
-  elseif message.type == 'fleet.updated' then
-    local fleet_id = payload.fleetId
-    local fleet = state.fleets[fleet_id]
-    if not fleet then return end
-    for _, member_id in ipairs(payload.removed or {}) do
-      reset_member(member_id)
-      remove_from_order(member_id)
-      if state.selected == member_id then
-        state.selected = 'standard'
-        if is_ui_open() and buffers.get_member('standard') then refresh_member('standard') end
-      end
-    end
-    for _, member_info in ipairs(payload.added or {}) do
-      ensure_member(member_info.id, member_info.displayName)
-      add_to_order(member_info.id)
-      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = fleet.name }
-    end
-    for _, member_info in ipairs(payload.updated or {}) do
-      ensure_member(member_info.id, member_info.displayName)
-      state.member_meta[member_info.id] = { fleetId = fleet_id, fleetName = fleet.name }
-    end
-    fleet.entryMember = payload.entryMember or fleet.entryMember
-    fleet.members = {}
-    for _, member_info in ipairs(payload.members or {}) do
-      table.insert(fleet.members, member_info.id)
-    end
+  elseif message.type == 'agent.updated' then
+    local target = payload.target
+    if not target then return end
+    state.agents[target] = vim.tbl_deep_extend(
+      'force',
+      state.agents[target] or {},
+      vim.deepcopy(payload)
+    )
+    state.member_meta[target] = vim.deepcopy(state.agents[target])
+    ensure_member(target, payload.displayName or payload.alias or target)
+    add_to_order(target)
+    notify(('Updated agent %s'):format(payload.alias or target))
     return
-  elseif message.type == 'fleet.stopped' then
-    local fleet_id = payload.fleetId
-    for _, member_id in ipairs(payload.members or {}) do
-      reset_member(member_id)
-      remove_from_order(member_id)
-      if state.selected == member_id then state.selected = 'standard' end
-    end
-    state.fleets[fleet_id] = nil
+  elseif message.type == 'agent.stopped' then
+    local target = payload.target
+    if not target then return end
+    reset_member(target)
+    remove_from_order(target)
+    state.agents[target] = nil
+    if state.selected == target then state.selected = 'standard' end
     if not buffers.get_member(state.selected) then state.selected = 'standard' end
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
-  elseif message.type == 'fleet.error' then
+  elseif message.type == 'agent.error' then
+    local target = payload.target
+    if target then
+      reset_member(target)
+      remove_from_order(target)
+      state.agents[target] = nil
+      if state.selected == target then state.selected = 'standard' end
+    end
     buffers.append_activity_block(
       'standard',
-      'Fleet error',
-      ('%s: %s'):format(payload.fleetId or 'Fleet', payload.message or 'startup failed')
+      'Agent error',
+      ('%s: %s'):format(payload.alias or payload.agentId or 'Agent', payload.message or 'startup failed')
     )
-    return
-  elseif message.type == 'fleet.agent.updated' then
-    notify(('Fleet %s: %s %s'):format(
-      payload.fleetId or '?',
-      payload.action or 'updated',
-      payload.agentId or ''
-    ))
-    return
-  elseif message.type == 'fleet.agent.moved' then
-    notify(('Moved %s from Fleet %s to Fleet %s%s'):format(
-      payload.agentId or '?',
-      payload.sourceFleetId or '?',
-      payload.destinationFleetId or '?',
-      payload.sessionPreserved and ' (history preserved)' or ''
-    ))
+    if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   end
 
@@ -3250,14 +3160,14 @@ function M.setup(user_options)
   vim.keymap.set('n', options.mappings.toggle, M.toggle, {
     desc = 'Toggle native Copilot',
   })
-  vim.keymap.set('n', options.mappings.fleet, M.select_fleet, {
-    desc = 'Select or stop Copilot Fleet',
+  vim.keymap.set('n', options.mappings.fleet, M.select_agents, {
+    desc = 'Select, recover, or stop Copilot agents',
   })
   vim.keymap.set('n', options.mappings.select, M.select, {
     desc = 'Select Copilot mode, agent, or view',
   })
   vim.api.nvim_create_user_command('NativeCopilotToggle', M.toggle, {})
-  vim.api.nvim_create_user_command('NativeCopilotSelect', M.select_fleet, {})
+  vim.api.nvim_create_user_command('NativeCopilotSelect', M.select_agents, {})
   vim.api.nvim_create_user_command('NativeCopilotAgents', M.select, {})
   vim.api.nvim_create_user_command('NativeCopilotStatus', M.show_status, {})
   vim.api.nvim_create_user_command('NativeCopilotTasks', M.select_task, {})
