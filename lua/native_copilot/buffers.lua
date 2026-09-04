@@ -319,6 +319,7 @@ local function create_buffer(name, member_id, view_id)
     last_activity = nil,
     activity_records = {},
     timeline = {},
+    timeline_sequence = 0,
     deferred_timeline = {
       order = {},
       items = {},
@@ -393,6 +394,7 @@ function M.prepare_history(member_id, event_time)
   view.last_activity = nil
   view.activity_records = {}
   view.timeline = {}
+  view.timeline_sequence = 0
   view.deferred_timeline = {
     order = {},
     items = {},
@@ -1017,13 +1019,10 @@ local function shift_tracked_rows(view, start_row, count)
   shift(view.last_activity, 'start_row')
   shift(view.last_activity, 'body_start_row')
   shift(view.last_activity, 'fold_start_row')
-  for _, timeline in pairs(view.timeline) do
-    shift(timeline, 'start_row')
-  end
 end
 
 local function replace_buffer_lines(buf, start_row, end_row, lines)
-  if end_row - start_row ~= #lines or #lines == 0 then
+  if start_row == end_row or #lines == 0 then
     vim.api.nvim_buf_set_lines(buf, start_row, end_row, false, lines)
     return
   end
@@ -1073,45 +1072,154 @@ local function reconcile_environment_rows(view, item)
   return rows[1]
 end
 
-local function timeline_record_position(view, record, details)
-  local function extmark_position(id)
-    if not id then return {} end
-    return vim.api.nvim_buf_get_extmark_by_id(
-      view.buf,
-      timeline_namespace,
-      id,
-      details and { details = true } or {}
+local function timeline_style(item)
+  local highlight
+  if item.actor_message and (item.actor_kind or item.kind) == 'task' then
+    highlight = 'NativeCopilotTaskMessage'
+  elseif not item.actor_message and (item.kind == 'task' or item.kind == 'tool') then
+    highlight = 'NativeCopilotActorHeader'
+  end
+
+  local status_sign = not item.status_notice and status_signs[item.status] or nil
+  local actor_status_sign
+  if item.actor_message then
+    local actor_kind = item.actor_kind or item.kind
+    local option_name = actor_option_names[actor_kind]
+    actor_status_sign = actor_sign(
+      item.actor
+        or (option_name and options.conversation[option_name])
+        or actor_symbols[actor_kind],
+      actor_kind == 'task' and '📝' or '💬'
     )
   end
+  return {
+    highlight = highlight,
+    sign_text = actor_status_sign or (status_sign and status_sign.text or nil),
+    sign_highlight = actor_status_sign and 'NativeCopilotActorHeader'
+      or (status_sign and status_sign.highlight or nil),
+  }
+end
 
-  local position = extmark_position(record.sign_extmark)
-  if #position == 0 then position = extmark_position(record.extmark) end
-  if #position > 0 then
-    record.start_row = position[1]
-    return position
+local function set_timeline_anchor(view, record, row, lines, item)
+  local style = timeline_style(item)
+  local anchor_options = {
+    id = record.anchor,
+    end_row = row + #lines,
+    end_col = 0,
+    hl_group = style.highlight,
+    hl_eol = style.highlight ~= nil,
+    right_gravity = true,
+    end_right_gravity = false,
+    priority = 210,
+  }
+  if style.sign_text then
+    anchor_options.sign_text = style.sign_text
+    anchor_options.sign_hl_group = style.sign_highlight
   end
+  record.anchor = vim.api.nvim_buf_set_extmark(
+    view.buf,
+    timeline_namespace,
+    row,
+    0,
+    anchor_options
+  )
+end
 
-  if not record.item then return {} end
-  local expected = timeline_lines(record.item, record.created_at)[1]
-  local nearest
-  local nearest_distance
-  for index, line in ipairs(vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)) do
-    if line == expected then
-      local row = index - 1
-      local distance = math.abs(row - (record.start_row or row))
-      if not nearest_distance or distance < nearest_distance then
-        nearest = row
-        nearest_distance = distance
+local function timeline_block_matches(actual, row, lines)
+  if row < 0 or row + #lines > #actual then return false end
+  for index, line in ipairs(lines) do
+    if actual[row + index] ~= line then return false end
+  end
+  return true
+end
+
+local function timeline_blocks_equal(left, right)
+  if #left ~= #right then return false end
+  for index, line in ipairs(left) do
+    if right[index] ~= line then return false end
+  end
+  return true
+end
+
+local function timeline_record_position(view, record)
+  if not record.item then return nil end
+  local expected = timeline_lines(record.item, record.created_at)
+  if record.anchor then
+    local position = vim.api.nvim_buf_get_extmark_by_id(
+      view.buf,
+      timeline_namespace,
+      record.anchor,
+      { details = true }
+    )
+    if #position > 0 then
+      local actual = vim.api.nvim_buf_get_lines(
+        view.buf,
+        position[1],
+        position[1] + #expected,
+        false
+      )
+      if timeline_block_matches(actual, 0, expected) then
+        return position[1], position[1] + #expected
       end
     end
   end
-  if nearest == nil then return {} end
-  record.start_row = nearest
-  return {
-    nearest,
-    0,
-    details and { end_row = nearest + (record.line_count or 1), end_col = 0 } or nil,
-  }
+
+  local buffer_lines = vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)
+  local candidates = {}
+  for row = 0, #buffer_lines - #expected do
+    if timeline_block_matches(buffer_lines, row, expected) then
+      table.insert(candidates, row)
+    end
+  end
+  if #candidates == 0 then return nil end
+
+  local matching_records = {}
+  for _, candidate_record in pairs(view.timeline) do
+    if candidate_record.item
+      and timeline_blocks_equal(
+        timeline_lines(candidate_record.item, candidate_record.created_at),
+        expected
+      )
+    then
+      table.insert(matching_records, candidate_record)
+    end
+  end
+  table.sort(matching_records, function(left, right)
+    return (left.sequence or 0) < (right.sequence or 0)
+  end)
+
+  local recovered_row
+  if #matching_records == #candidates then
+    for index, candidate_record in ipairs(matching_records) do
+      if candidate_record == record then
+        recovered_row = candidates[index]
+        break
+      end
+    end
+  else
+    local occupied = {}
+    for _, candidate_record in ipairs(matching_records) do
+      if candidate_record ~= record and candidate_record.anchor then
+        local position = vim.api.nvim_buf_get_extmark_by_id(
+          view.buf,
+          timeline_namespace,
+          candidate_record.anchor,
+          {}
+        )
+        if #position > 0 and timeline_block_matches(buffer_lines, position[1], expected) then
+          occupied[position[1]] = true
+        end
+      end
+    end
+    local unoccupied = {}
+    for _, row in ipairs(candidates) do
+      if not occupied[row] then table.insert(unoccupied, row) end
+    end
+    if #unoccupied == 1 then recovered_row = unoccupied[1] end
+  end
+  if recovered_row == nil then return nil end
+  set_timeline_anchor(view, record, recovered_row, expected, record.item)
+  return recovered_row, recovered_row + #expected
 end
 
 function M.upsert_timeline(member_id, item_id, item)
@@ -1143,40 +1251,25 @@ function M.upsert_timeline(member_id, item_id, item)
     return
   end
   local record = view.timeline[item_id]
-  local start_row = reconcile_environment_rows(view, item)
-  if record
-    and record.item
-    and record.item.kind == item.kind
-    and record.item.label == item.label
-    and record.item.status == item.status
-    and record.item.detail == item.detail
-    and record.item.started_at == item.started_at
-    and record.item.completed_at == item.completed_at
-  then
-    local position = timeline_record_position(view, record, false)
-    if #position > 0 then
-      record.item = vim.deepcopy(item)
-      record.item.id = item_id
-      return
-    end
+  if not record then
+    view.timeline_sequence = view.timeline_sequence + 1
+    record = { sequence = view.timeline_sequence }
+    view.timeline[item_id] = record
   end
+  local start_row = reconcile_environment_rows(view, item)
   local overridden_time = view.timeline_time_overrides[item_id]
   view.timeline_time_overrides[item_id] = nil
   local now = record and record.created_at or overridden_time or item.created_at or options.now()
   local lines = timeline_lines(item, now)
+  local record_row
+  local record_end
+  if record then record_row, record_end = timeline_record_position(view, record) end
+  start_row = start_row or record_row
   if start_row then
+    local end_row = record_row == start_row and record_end or start_row + 1
     with_modifiable(view.buf, function()
-      replace_buffer_lines(view.buf, start_row, start_row + 1, lines)
+      replace_buffer_lines(view.buf, start_row, end_row, lines)
     end)
-  elseif record then
-    local position = timeline_record_position(view, record, true)
-    if #position > 0 then
-      start_row = position[1]
-      local end_row = start_row + record.line_count
-      with_modifiable(view.buf, function()
-        replace_buffer_lines(view.buf, start_row, end_row, lines)
-      end)
-    end
   end
 
   if not start_row then
@@ -1214,64 +1307,13 @@ function M.upsert_timeline(member_id, item_id, item)
         view.response_line_start = true
       end
     end
-    record = {}
-    view.timeline[item_id] = record
   end
   if item.kind == 'environment' then view.history_environment_started = true end
 
-  local timeline_highlight
-  if item.actor_message and (item.actor_kind or item.kind) == 'task' then
-    timeline_highlight = 'NativeCopilotTaskMessage'
-  elseif not item.actor_message and (item.kind == 'task' or item.kind == 'tool') then
-    timeline_highlight = 'NativeCopilotActorHeader'
-  end
-  local status_sign = not item.status_notice and status_signs[item.status] or nil
-  local actor_status_sign
-  if item.actor_message then
-    local actor_kind = item.actor_kind or item.kind
-    local option_name = actor_option_names[actor_kind]
-    actor_status_sign = actor_sign(
-      item.actor
-        or (option_name and options.conversation[option_name])
-        or actor_symbols[actor_kind],
-      actor_kind == 'task' and '📝' or '💬'
-    )
-  end
-  local sign_text = actor_status_sign or (status_sign and status_sign.text or nil)
-  local sign_highlight = actor_status_sign and 'NativeCopilotActorHeader'
-    or (status_sign and status_sign.highlight or nil)
-  record.extmark = vim.api.nvim_buf_set_extmark(view.buf, timeline_namespace, start_row, 0, {
-    id = record.extmark,
-    end_row = start_row + #lines,
-    end_col = 0,
-    hl_group = timeline_highlight,
-    hl_eol = timeline_highlight ~= nil,
-    right_gravity = false,
-    end_right_gravity = false,
-  })
-  if sign_text then
-    record.sign_extmark = vim.api.nvim_buf_set_extmark(
-      view.buf,
-      timeline_namespace,
-      start_row,
-      0,
-      {
-        id = record.sign_extmark,
-        sign_text = sign_text,
-        sign_hl_group = sign_highlight,
-        right_gravity = false,
-        priority = 210,
-      }
-    )
-  elseif record.sign_extmark then
-    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_extmark)
-    record.sign_extmark = nil
-  end
-  record.line_count = #lines
-  record.start_row = start_row
   record.created_at = record.created_at or now
   record.item = vim.deepcopy(item)
   record.item.id = item_id
+  set_timeline_anchor(view, record, start_row, lines, record.item)
   if item.copilot_owned and view.response_active then
     view.response_has_owned_timeline = true
   end
@@ -1306,10 +1348,9 @@ function M.remove_timeline(member_id, item_id)
   view.timeline_time_overrides[item_id] = nil
   local record = view and view.timeline[item_id]
   if not record then return end
-  local position = timeline_record_position(view, record, true)
-  pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.extmark)
-  if record.sign_extmark then
-    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_extmark)
+  local start_row, end_row = timeline_record_position(view, record)
+  if record.anchor then
+    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.anchor)
   end
   if record.item and record.item.kind == 'environment' then
     local rows = {}
@@ -1323,10 +1364,9 @@ function M.remove_timeline(member_id, item_id)
         vim.api.nvim_buf_set_lines(view.buf, rows[index], rows[index] + 1, false, {})
       end)
     end
-  elseif #position > 0 then
-    local end_row = position[1] + record.line_count
+  elseif start_row then
     with_modifiable(view.buf, function()
-      vim.api.nvim_buf_set_lines(view.buf, position[1], end_row, false, {})
+      vim.api.nvim_buf_set_lines(view.buf, start_row, end_row, false, {})
     end)
   end
   view.timeline[item_id] = nil
@@ -1361,12 +1401,9 @@ function M.timeline_item_at_cursor(buf, row)
     if view.buf == buf then
       local zero_row = row - 1
       for _, record in pairs(view.timeline) do
-        local position = timeline_record_position(view, record, true)
-        if #position > 0 then
-          local end_row = position[3].end_row or (position[1] + record.line_count)
-          if zero_row >= position[1] and zero_row < end_row then
-            return record.item, member_id
-          end
+        local start_row, end_row = timeline_record_position(view, record)
+        if start_row and zero_row >= start_row and zero_row < end_row then
+          return record.item, member_id
         end
       end
       local line = vim.api.nvim_buf_get_lines(view.buf, zero_row, zero_row + 1, false)[1] or ''
@@ -1385,7 +1422,8 @@ function M.timeline_item_at_cursor(buf, row)
             or item.show_identifier == false
           )
         then
-          local distance = math.abs((record.start_row or zero_row) - zero_row)
+          local start_row = timeline_record_position(view, record)
+          local distance = math.abs((start_row or zero_row) - zero_row)
           if not nearest_distance or distance < nearest_distance then
             nearest = item
             nearest_distance = distance

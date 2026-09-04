@@ -166,7 +166,7 @@ local function has_sign_on_empty_line(buf)
   return false
 end
 
-local function timeline_recovers_without_range_extmark(buf)
+local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
   buffers.upsert_timeline('standard', 'e2e-timeline-recovery', {
     kind = 'tool',
@@ -178,6 +178,7 @@ local function timeline_recovers_without_range_extmark(buf)
   local row = line_with(buf, 'duplicate-recovery-probe')
   if not row then return false end
   local namespace = vim.api.nvim_get_namespaces().native_copilot_timeline
+  local deleted_anchor
   for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
     buf,
     namespace,
@@ -186,7 +187,8 @@ local function timeline_recovers_without_range_extmark(buf)
     { details = true }
   )) do
     local details = mark[4] or {}
-    if not details.sign_text then
+    if details.sign_text and details.end_row then
+      deleted_anchor = mark[1]
       vim.api.nvim_buf_del_extmark(buf, namespace, mark[1])
       break
     end
@@ -201,14 +203,40 @@ local function timeline_recovers_without_range_extmark(buf)
   })
   local count = 0
   local completed = false
+  local recovered_anchor = false
+  local recovered_row
   for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
     if line:find('duplicate-recovery-probe', 1, true) then
       count = count + 1
       completed = not line:find('…', 1, true)
     end
   end
+  recovered_row = line_with(buf, 'duplicate-recovery-probe')
+  if recovered_row then
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+      buf,
+      namespace,
+      { recovered_row - 1, 0 },
+      { recovered_row, 0 },
+      { details = true }
+    )) do
+      local details = mark[4] or {}
+      recovered_anchor = recovered_anchor
+        or (
+          mark[1] == deleted_anchor
+          and vim.trim(details.sign_text or '') == '✓'
+          and details.end_row == recovered_row
+        )
+    end
+  end
   buffers.remove_timeline('standard', 'e2e-timeline-recovery')
-  return count == 1 and completed
+  local anchor_removed = deleted_anchor
+    and #vim.api.nvim_buf_get_extmark_by_id(buf, namespace, deleted_anchor, {}) == 0
+  return count == 1
+    and completed
+    and recovered_anchor
+    and anchor_removed
+    and not line_with(buf, 'duplicate-recovery-probe')
 end
 
 local function adjacent_tool_signs_survive_completion(buf)
@@ -240,6 +268,7 @@ local function adjacent_tool_signs_survive_completion(buf)
 
   local namespace = vim.api.nvim_get_namespaces().native_copilot_timeline
   local valid = true
+  local anchor_ids = {}
   for _, tool in ipairs(tools) do
     local row = line_with(buf, tool.detail)
     local signs = row and vim.api.nvim_buf_get_extmarks(
@@ -249,15 +278,163 @@ local function adjacent_tool_signs_survive_completion(buf)
       { row, 0 },
       { details = true }
     ) or {}
-    local completed_sign = false
+    local completed_anchors = 0
     for _, mark in ipairs(signs) do
       local sign = mark[4].sign_text and vim.trim(mark[4].sign_text) or nil
-      completed_sign = completed_sign or sign == '✓'
+      if sign == '✓' and mark[4].end_row == row then
+        completed_anchors = completed_anchors + 1
+        anchor_ids[mark[1]] = true
+      end
     end
-    valid = valid and completed_sign
+    valid = valid and completed_anchors == 1
   end
   for _, tool in ipairs(tools) do
     buffers.remove_timeline('standard', tool.id)
+  end
+  return valid and vim.tbl_count(anchor_ids) == #tools
+end
+
+local function identical_tools_recover_by_render_order(buf)
+  local started_at = os.time()
+  local namespace = vim.api.nvim_get_namespaces().native_copilot_timeline
+  local ids = {
+    'e2e-identical-tool-first',
+    'e2e-identical-tool-second',
+  }
+  for _, id in ipairs(ids) do
+    buffers.upsert_timeline('standard', id, {
+      kind = 'tool',
+      label = 'probe',
+      status = 'running',
+      detail = 'identical-parallel-tool',
+      started_at = started_at,
+    })
+  end
+  buffers.upsert_timeline('standard', 'e2e-identical-tool-environment', {
+    kind = 'environment',
+    label = 'Identical Tool recovery insertion',
+    status = 'completed',
+    created_at = started_at,
+  })
+
+  local rows = {}
+  for index, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find('identical-parallel-tool', 1, true) then table.insert(rows, index) end
+  end
+  if #rows ~= 2 then return false end
+
+  local second_anchor
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+    buf,
+    namespace,
+    { rows[2] - 1, 0 },
+    { rows[2], 0 },
+    { details = true }
+  )) do
+    if mark[4].sign_text and mark[4].end_row then
+      second_anchor = mark[1]
+      vim.api.nvim_buf_del_extmark(buf, namespace, mark[1])
+      break
+    end
+  end
+  buffers.upsert_timeline('standard', ids[2], {
+    kind = 'tool',
+    label = 'probe',
+    status = 'completed',
+    detail = 'identical-parallel-tool',
+    started_at = started_at,
+    completed_at = started_at + 1,
+  })
+
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local first_line = lines[rows[1]] or ''
+  local second_line = lines[rows[2]] or ''
+  local second_item = buffers.timeline_item_at_cursor(buf, rows[2])
+  local second_recovered = second_anchor
+    and #vim.api.nvim_buf_get_extmark_by_id(buf, namespace, second_anchor, {}) > 0
+  local valid = first_line:find('…', 1, true)
+    and not second_line:find('…', 1, true)
+    and second_recovered
+    and second_item
+    and second_item.id == ids[2]
+
+  buffers.remove_timeline('standard', ids[2])
+  local remaining = 0
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:find('identical-parallel-tool', 1, true) then remaining = remaining + 1 end
+  end
+  buffers.remove_timeline('standard', ids[1])
+  buffers.remove_timeline('standard', 'e2e-identical-tool-environment')
+  return valid and remaining == 1
+end
+
+local function timeline_anchors_follow_inserted_rows(buf)
+  local started_at = os.time()
+  local items = {
+    {
+      id = 'e2e-inserted-row-tool',
+      needle = 'inserted-row-tool',
+      lines = 1,
+      sign = '●',
+      item = {
+        kind = 'tool',
+        label = 'probe',
+        status = 'running',
+        detail = 'inserted-row-tool',
+        started_at = started_at,
+      },
+    },
+    {
+      id = 'e2e-inserted-row-actor',
+      needle = 'inserted-row-actor',
+      lines = 3,
+      sign = '📝',
+      item = {
+        kind = 'task',
+        actor_message = true,
+        actor_kind = 'task',
+        label = 'inserted-row-actor',
+        status = 'completed',
+        created_at = started_at,
+      },
+    },
+  }
+  for _, entry in ipairs(items) do
+    buffers.upsert_timeline('standard', entry.id, entry.item)
+  end
+  buffers.upsert_timeline('standard', 'e2e-late-environment', {
+    kind = 'environment',
+    label = 'Late environment insertion',
+    status = 'completed',
+    created_at = started_at,
+  })
+
+  local namespace = vim.api.nvim_get_namespaces().native_copilot_timeline
+  local valid = true
+  for _, entry in ipairs(items) do
+    local row = line_with(buf, entry.needle)
+    local anchors = row and vim.api.nvim_buf_get_extmarks(
+      buf,
+      namespace,
+      { row - 1, 0 },
+      { row, 0 },
+      { details = true }
+    ) or {}
+    local matches = 0
+    for _, mark in ipairs(anchors) do
+      local details = mark[4] or {}
+      if vim.trim(details.sign_text or '') == entry.sign
+        and details.end_row == row - 1 + entry.lines
+      then
+        matches = matches + 1
+      end
+    end
+    valid = valid and matches == 1
+  end
+
+  buffers.remove_timeline('standard', 'e2e-late-environment')
+  for _, entry in ipairs(items) do
+    buffers.remove_timeline('standard', entry.id)
   end
   return valid
 end
@@ -385,14 +562,26 @@ tick = function()
     if not timeline_recovery_checked then
       timeline_recovery_checked = true
       if not check(
-        timeline_recovers_without_range_extmark(buf),
-        'Tool completion reconciles the existing row when its range extmark is missing'
+        timeline_recovers_without_anchor_extmark(buf),
+        'Tool completion reconciles the existing row when its anchor extmark is missing'
       ) then
         return
       end
       if not check(
         adjacent_tool_signs_survive_completion(buf),
         'adjacent completed Tool rows retain lifecycle signs'
+      ) then
+        return
+      end
+      if not check(
+        identical_tools_recover_by_render_order(buf),
+        'identical parallel Tools recover anchors by stable render order'
+      ) then
+        return
+      end
+      if not check(
+        timeline_anchors_follow_inserted_rows(buf),
+        'timeline anchors follow their blocks across inserted environment rows'
       ) then
         return
       end
