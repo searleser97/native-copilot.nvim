@@ -528,9 +528,13 @@ tick = function()
       schedule_tick()
       return
     end
-    choose_where(function(item)
+    local selected = pcall(choose_where, function(item)
       return item.task and item.task.id == 'e2e-picker-task-completed'
     end)
+    if not selected then
+      schedule_tick()
+      return
+    end
     phase = 'task-detail'
   elseif phase == 'task-detail' then
     local detail = find_buffer(function(buf)
