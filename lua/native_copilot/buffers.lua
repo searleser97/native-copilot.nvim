@@ -1022,6 +1022,15 @@ local function shift_tracked_rows(view, start_row, count)
   end
 end
 
+local function replace_buffer_lines(buf, start_row, end_row, lines)
+  if end_row - start_row ~= #lines or #lines == 0 then
+    vim.api.nvim_buf_set_lines(buf, start_row, end_row, false, lines)
+    return
+  end
+  local existing = vim.api.nvim_buf_get_lines(buf, end_row - 1, end_row, false)[1] or ''
+  vim.api.nvim_buf_set_text(buf, start_row, 0, end_row - 1, #existing, lines)
+end
+
 function M.status_symbol(status)
   return status_symbols[status] or status_symbols.unknown
 end
@@ -1157,7 +1166,7 @@ function M.upsert_timeline(member_id, item_id, item)
   local lines = timeline_lines(item, now)
   if start_row then
     with_modifiable(view.buf, function()
-      vim.api.nvim_buf_set_lines(view.buf, start_row, start_row + 1, false, lines)
+      replace_buffer_lines(view.buf, start_row, start_row + 1, lines)
     end)
   elseif record then
     local position = timeline_record_position(view, record, true)
@@ -1165,7 +1174,7 @@ function M.upsert_timeline(member_id, item_id, item)
       start_row = position[1]
       local end_row = start_row + record.line_count
       with_modifiable(view.buf, function()
-        vim.api.nvim_buf_set_lines(view.buf, start_row, end_row, false, lines)
+        replace_buffer_lines(view.buf, start_row, end_row, lines)
       end)
     end
   end

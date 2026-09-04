@@ -211,6 +211,57 @@ local function timeline_recovers_without_range_extmark(buf)
   return count == 1 and completed
 end
 
+local function adjacent_tool_signs_survive_completion(buf)
+  local started_at = os.time()
+  local tools = {
+    { id = 'e2e-adjacent-tool-first', detail = 'adjacent-tool-first' },
+    { id = 'e2e-adjacent-tool-second', detail = 'adjacent-tool-second' },
+  }
+  for _, tool in ipairs(tools) do
+    buffers.upsert_timeline('standard', tool.id, {
+      kind = 'tool',
+      label = 'probe',
+      status = 'running',
+      detail = tool.detail,
+      started_at = started_at,
+    })
+  end
+  for index = #tools, 1, -1 do
+    local tool = tools[index]
+    buffers.upsert_timeline('standard', tool.id, {
+      kind = 'tool',
+      label = 'probe',
+      status = 'completed',
+      detail = tool.detail,
+      started_at = started_at,
+      completed_at = started_at + index,
+    })
+  end
+
+  local namespace = vim.api.nvim_get_namespaces().native_copilot_timeline
+  local valid = true
+  for _, tool in ipairs(tools) do
+    local row = line_with(buf, tool.detail)
+    local signs = row and vim.api.nvim_buf_get_extmarks(
+      buf,
+      namespace,
+      { row - 1, 0 },
+      { row, 0 },
+      { details = true }
+    ) or {}
+    local completed_sign = false
+    for _, mark in ipairs(signs) do
+      local sign = mark[4].sign_text and vim.trim(mark[4].sign_text) or nil
+      completed_sign = completed_sign or sign == '✓'
+    end
+    valid = valid and completed_sign
+  end
+  for _, tool in ipairs(tools) do
+    buffers.remove_timeline('standard', tool.id)
+  end
+  return valid
+end
+
 local function task_marker(id, task_type)
   return ('[%s_%s]'):format(task_type or 'shell_cmd', id)
 end
@@ -336,6 +387,12 @@ tick = function()
       if not check(
         timeline_recovers_without_range_extmark(buf),
         'Tool completion reconciles the existing row when its range extmark is missing'
+      ) then
+        return
+      end
+      if not check(
+        adjacent_tool_signs_survive_completion(buf),
+        'adjacent completed Tool rows retain lifecycle signs'
       ) then
         return
       end
