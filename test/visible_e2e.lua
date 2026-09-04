@@ -375,6 +375,7 @@ local function timeline_anchors_follow_inserted_rows(buf)
       id = 'e2e-inserted-row-tool',
       needle = 'inserted-row-tool',
       lines = 1,
+      anchor_offset = 0,
       sign = '●',
       item = {
         kind = 'tool',
@@ -388,6 +389,7 @@ local function timeline_anchors_follow_inserted_rows(buf)
       id = 'e2e-inserted-row-actor',
       needle = 'inserted-row-actor',
       lines = 3,
+      anchor_offset = 2,
       sign = '📝',
       item = {
         kind = 'task',
@@ -413,18 +415,19 @@ local function timeline_anchors_follow_inserted_rows(buf)
   local valid = true
   for _, entry in ipairs(items) do
     local row = line_with(buf, entry.needle)
-    local anchors = row and vim.api.nvim_buf_get_extmarks(
+    local anchor_row = row and row - entry.anchor_offset or nil
+    local anchors = anchor_row and vim.api.nvim_buf_get_extmarks(
       buf,
       namespace,
-      { row - 1, 0 },
-      { row, 0 },
+      { anchor_row - 1, 0 },
+      { anchor_row, 0 },
       { details = true }
     ) or {}
     local matches = 0
     for _, mark in ipairs(anchors) do
       local details = mark[4] or {}
       if vim.trim(details.sign_text or '') == entry.sign
-        and details.end_row == row - 1 + entry.lines
+        and details.end_row == anchor_row - 1 + entry.lines
       then
         matches = matches + 1
       end
