@@ -52,6 +52,12 @@ local function client_commands()
       kind = 'client',
       input = { hint = 'model id' },
     },
+    {
+      name = 'reasoning',
+      description = 'Inspect or switch reasoning effort for the current model',
+      kind = 'client',
+      input = { hint = 'reasoning effort' },
+    },
   }
 end
 
@@ -460,6 +466,16 @@ local function submit_prompt_content(queue_only)
         send('model.switch', { target = state.selected, modelId = command.input })
       else
         send('model.list', { target = state.selected, purpose = 'select' })
+      end
+      return true
+    elseif command.name:lower() == 'reasoning' then
+      if command.input then
+        send('reasoning.switch', {
+          target = state.selected,
+          reasoningEffort = command.input,
+        })
+      else
+        send('reasoning.list', { target = state.selected })
       end
       return true
     elseif command.name:lower() == 'mcp' then
@@ -2584,6 +2600,53 @@ function M._on_event(message)
       'conversation',
       'Copilot',
       ('Model switched to `%s`.'):format(model.modelId or model_id(model) or 'unknown')
+    )
+    return
+  elseif message.type == 'reasoning.list' then
+    local target = payload.target or event_member(message)
+    local reasoning_state = payload.state or {}
+    local current = reasoning_state.current
+    local efforts = reasoning_state.supportedReasoningEfforts or {}
+    if #efforts == 0 then
+      notify(
+        ('Model `%s` does not support configurable reasoning effort.'):format(
+          reasoning_state.modelId or 'unknown'
+        ),
+        vim.log.levels.INFO
+      )
+      return
+    end
+    local entries = {}
+    for _, effort in ipairs(efforts) do
+      table.insert(entries, {
+        display = ('%s%s'):format(effort == current and '🟢 ' or '', effort),
+        ordinal = effort,
+        effort = effort,
+      })
+    end
+    picker(
+      ('Reasoning effort — %s — current: %s'):format(
+        reasoning_state.modelId or 'unknown',
+        current or 'default'
+      ),
+      entries,
+      function(item)
+        if item.effort and item.effort ~= current then
+          send('reasoning.switch', {
+            target = target,
+            reasoningEffort = item.effort,
+          })
+        end
+      end
+    )
+    return
+  elseif message.type == 'reasoning.changed' then
+    local result = payload.result or {}
+    buffers.append_block(
+      event_member(message),
+      'conversation',
+      'Copilot',
+      ('Reasoning effort switched to `%s`.'):format(result.reasoningEffort or 'unknown')
     )
     return
   elseif message.type == 'session.metrics' then

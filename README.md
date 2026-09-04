@@ -472,6 +472,8 @@ The client-native command set is intentionally small:
 - `/tasks` browses typed SDK background tasks and opens their floating details.
 - `/resume` lists and safely resumes workspace sessions.
 - `/model` opens the selected session's model picker; `/model <id>` switches directly.
+- `/reasoning` shows the selected model's supported reasoning efforts; `/reasoning <level>`
+  switches the active session without changing models.
 - `/mcp` opens a server/action picker. `/mcp list`, `show`, `tools`, `enable`, `disable`, and
   `reload` are also available directly.
 - `/mcp-reload` reloads MCP connections without replacing the current session.
@@ -501,7 +503,7 @@ Command behavior follows the result returned by the SDK:
 - Commands requiring a subcommand open a picker; repeated `select-subcommand` results support nested
   command selection, while SDK-provided argument choices remain available through completion.
 
-Other than the explicit client-native `/fleet`, `/tasks`, `/resume`, `/model`, and `/mcp`
+Other than the explicit client-native `/fleet`, `/tasks`, `/resume`, `/model`, `/reasoning`, and `/mcp`
 integrations, commands come from `session.rpc.commands.list()`. The model and MCP overrides use
 typed session RPCs so commands that are interactive in Copilot CLI remain actionable rather than
 returning an inert completion. CLI-owned general session navigation such as `/new` and `/clear` is

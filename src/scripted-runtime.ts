@@ -942,19 +942,51 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async modelState(_target: string): Promise<unknown> {
     return {
-      current: { modelId: "scripted-model", name: "Scripted Model" },
+      current: {
+        modelId: "scripted-model",
+        name: "Scripted Model",
+        reasoningEffort: "medium",
+      },
       models: this.profile === "telescope"
         ? [
-            { modelId: "scripted-fast", name: "Scripted Fast" },
-            { modelId: "scripted-model", name: "Scripted Model" },
-            { modelId: "scripted-deep", name: "Scripted Deep" },
+            {
+              modelId: "scripted-fast",
+              name: "Scripted Fast",
+              supportedReasoningEfforts: ["low", "medium"],
+            },
+            {
+              modelId: "scripted-model",
+              name: "Scripted Model",
+              supportedReasoningEfforts: ["low", "medium", "high"],
+            },
+            {
+              modelId: "scripted-deep",
+              name: "Scripted Deep",
+              supportedReasoningEfforts: ["medium", "high", "xhigh"],
+            },
           ]
-        : [{ modelId: "scripted-model", name: "Scripted Model" }],
+        : [{
+            modelId: "scripted-model",
+            name: "Scripted Model",
+            supportedReasoningEfforts: ["low", "medium", "high"],
+          }],
     };
   }
 
   async switchModel(_target: string, modelId: string): Promise<unknown> {
     return { modelId, name: "Scripted Model" };
+  }
+
+  async reasoningState(_target: string): Promise<unknown> {
+    return {
+      modelId: "scripted-model",
+      current: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    };
+  }
+
+  async setReasoningEffort(_target: string, reasoningEffort: string): Promise<unknown> {
+    return { reasoningEffort };
   }
 
   async listMcp(_target: string): Promise<unknown[]> {

@@ -1080,6 +1080,55 @@ export class CopilotRuntime {
     return result;
   }
 
+  async reasoningState(target: string): Promise<unknown> {
+    const state = await this.modelState(target) as {
+      models?: Array<Record<string, unknown>>;
+      current?: Record<string, unknown>;
+    };
+    const current = state.current ?? {};
+    const currentModelId =
+      typeof current.modelId === "string" ? current.modelId : undefined;
+    const model = (state.models ?? []).find((candidate) => {
+      const id = typeof candidate.id === "string"
+        ? candidate.id
+        : typeof candidate.modelId === "string"
+          ? candidate.modelId
+          : undefined;
+      return id === currentModelId;
+    });
+    const supportedReasoningEfforts = Array.isArray(model?.supportedReasoningEfforts)
+      ? model.supportedReasoningEfforts.filter(
+          (effort): effort is string => typeof effort === "string",
+        )
+      : [];
+    return {
+      modelId: currentModelId,
+      current: typeof current.reasoningEffort === "string"
+        ? current.reasoningEffort
+        : undefined,
+      supportedReasoningEfforts,
+    };
+  }
+
+  async setReasoningEffort(target: string, reasoningEffort: string): Promise<unknown> {
+    const live = await this.activeSession(target);
+    const state = await this.reasoningState(target) as {
+      modelId?: string;
+      supportedReasoningEfforts?: string[];
+    };
+    const supported = state.supportedReasoningEfforts ?? [];
+    if (supported.length === 0) {
+      throw new Error(`Model "${state.modelId ?? "unknown"}" does not support reasoning effort.`);
+    }
+    if (!supported.includes(reasoningEffort)) {
+      throw new Error(
+        `Reasoning effort "${reasoningEffort}" is not supported by model ` +
+          `"${state.modelId ?? "unknown"}". Choose one of: ${supported.join(", ")}.`,
+      );
+    }
+    return live.session.rpc.model.setReasoningEffort({ reasoningEffort });
+  }
+
   async listMcp(target: string): Promise<unknown[]> {
     const live = await this.activeSession(target);
     return (await live.session.rpc.mcp.list()).servers;

@@ -421,6 +421,31 @@ tick = function()
       return
     end
     pass('/model <id> switched directly without a picker')
+    submit('/reasoning')
+    phase = 'reasoning-picker'
+  elseif phase == 'reasoning-picker' then
+    if not picker then
+      schedule_tick()
+      return
+    end
+    choose_where(function(item)
+      return item.effort == 'high'
+    end)
+    phase = 'reasoning-result'
+  elseif phase == 'reasoning-result' then
+    if not content:find('Reasoning effort switched to `high`%.') then
+      schedule_tick()
+      return
+    end
+    pass('/reasoning opened Telescope and switched reasoning effort')
+    submit('/reasoning low')
+    phase = 'reasoning-direct-result'
+  elseif phase == 'reasoning-direct-result' then
+    if not content:find('Reasoning effort switched to `low`%.') then
+      schedule_tick()
+      return
+    end
+    pass('/reasoning <level> switched reasoning effort directly')
     submit('/mcp list')
     phase = 'mcp-list-result'
   elseif phase == 'mcp-list-result' then

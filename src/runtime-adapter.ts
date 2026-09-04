@@ -12,6 +12,8 @@ export interface RuntimeAdapter {
   invokeCommand(target: string, name: string, input?: string): Promise<unknown>;
   modelState(target: string): Promise<unknown>;
   switchModel(target: string, modelId: string): Promise<unknown>;
+  reasoningState(target: string): Promise<unknown>;
+  setReasoningEffort(target: string, reasoningEffort: string): Promise<unknown>;
   listMcp(target: string): Promise<unknown[]>;
   setMcpEnabled(target: string, serverName: string, enabled: boolean): Promise<unknown>;
   listMcpTools(target: string, serverName: string): Promise<unknown[]>;

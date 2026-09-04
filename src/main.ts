@@ -199,6 +199,28 @@ async function main(): Promise<void> {
         );
         return;
       }
+      case "reasoning.list": {
+        const target = requiredString(payload, "target", command.type);
+        protocol.send(
+          "reasoning.list",
+          { target, state: await runtime.reasoningState(target) },
+          { requestId: command.id, memberId: target, target: "status", done: true },
+        );
+        return;
+      }
+      case "reasoning.switch": {
+        const target = requiredString(payload, "target", command.type);
+        const reasoningEffort = requiredString(payload, "reasoningEffort", command.type);
+        protocol.send(
+          "reasoning.changed",
+          {
+            target,
+            result: await runtime.setReasoningEffort(target, reasoningEffort),
+          },
+          { requestId: command.id, memberId: target, target: "conversation", done: true },
+        );
+        return;
+      }
       case "mcp.list": {
         const target = requiredString(payload, "target", command.type);
         const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;
