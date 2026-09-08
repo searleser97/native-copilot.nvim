@@ -4,6 +4,8 @@ export interface AgentUpdate {
   definition: DynamicAgentDefinition;
   /** Omit to keep the agent's current Standard→agent permission. */
   standardCanTalk?: boolean;
+  /** Omit to keep the agent's current Standard observation permission. */
+  standardCanObserve?: boolean;
 }
 
 export interface RuntimeAdapter {

@@ -73,6 +73,11 @@ export const dynamicAgentSchema = z.object({
       "agent id, or current SDK session id. It must not contain this agent's own alias, and it " +
       "grants no incoming permission.",
   ),
+  canObserve: z.array(z.string().min(1)).describe(
+    "Directional passive-observation grants. Each alias allows this agent to read that active " +
+      "agent's SDK event history through native_copilot_read_agent_activity without prompting or " +
+      "interrupting it. This is independent from canTalkTo.",
+  ),
   ui: z.object({
     icon: z.string().min(1).optional(),
     color: z.string().min(1).optional(),
@@ -90,6 +95,10 @@ export const spawnAgentsSchema = z.object({
       "granted: this list grants Standard→agent only, and an agent's canTalkTo entry of " +
       '"standard" grants agent→Standard only.',
   ),
+  standardCanObserve: z.array(z.string().min(1)).describe(
+    "Aliases in this request whose SDK event history the Standard session may inspect passively " +
+      "through native_copilot_read_agent_activity. This grants no messaging permission.",
+  ),
 }).strict();
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {
@@ -99,6 +108,7 @@ function addIssue(issues: ValidationIssue[], path: string, message: string): voi
 function resolveAgent(
   definition: DynamicAgentDefinition,
   standardCanTalk: boolean,
+  standardCanObserve: boolean,
 ): ResolvedAgent {
   const agent: ResolvedAgent = {
     alias: definition.id,
@@ -108,7 +118,9 @@ function resolveAgent(
     initialPrompt: definition.prompt,
     reasoningSummary: definition.reasoningSummary ?? "detailed",
     recipients: new Set(definition.canTalkTo),
+    observes: new Set(definition.canObserve),
     standardCanTalk,
+    standardCanObserve,
   };
   if (definition.model !== undefined) agent.model = definition.model;
   if (definition.reasoningEffort !== undefined) agent.reasoningEffort = definition.reasoningEffort;
@@ -126,6 +138,8 @@ export interface AgentValidationOptions {
   availableAliases: ReadonlySet<string>;
   /** Whether the Standard session is granted permission to message this agent. */
   standardCanTalk: boolean;
+  /** Whether the Standard session may inspect this agent's SDK activity. */
+  standardCanObserve: boolean;
   path?: string;
 }
 
@@ -154,24 +168,29 @@ export function validateAgentDefinition(
   if (normalized.id === STANDARD_ALIAS) {
     addIssue(issues, `${path}.id`, `"${STANDARD_ALIAS}" is reserved for the Standard session`);
   }
-  const recipients = new Set(normalized.canTalkTo);
-  if (recipients.has(normalized.id)) {
-    addIssue(issues, `${path}.canTalkTo`, "cannot include the agent itself");
-  }
-  for (const recipient of recipients) {
-    if (recipient === STANDARD_ALIAS || recipient === normalized.id) {
-      continue;
+  for (const field of ["canTalkTo", "canObserve"] as const) {
+    const aliases = new Set(normalized[field]);
+    if (aliases.has(normalized.id)) {
+      addIssue(issues, `${path}.${field}`, "cannot include the agent itself");
     }
-    if (!aliasPattern.test(recipient)) {
-      addIssue(
-        issues,
-        `${path}.canTalkTo`,
-        `"${recipient}" is not a valid alias; use a peer alias or "${STANDARD_ALIAS}"`,
-      );
-      continue;
-    }
-    if (!options.availableAliases.has(recipient)) {
-      addIssue(issues, `${path}.canTalkTo`, `references unknown agent "${recipient}"`);
+    for (const referenced of aliases) {
+      if (referenced === normalized.id) {
+        continue;
+      }
+      if (field === "canTalkTo" && referenced === STANDARD_ALIAS) {
+        continue;
+      }
+      if (!aliasPattern.test(referenced)) {
+        addIssue(
+          issues,
+          `${path}.${field}`,
+          `"${referenced}" is not a valid agent alias`,
+        );
+        continue;
+      }
+      if (!options.availableAliases.has(referenced)) {
+        addIssue(issues, `${path}.${field}`, `references unknown agent "${referenced}"`);
+      }
     }
   }
   if (issues.length > 0) {
@@ -180,7 +199,7 @@ export function validateAgentDefinition(
   return {
     valid: true,
     issues,
-    agent: resolveAgent(normalized, options.standardCanTalk),
+    agent: resolveAgent(normalized, options.standardCanTalk, options.standardCanObserve),
   };
 }
 
@@ -225,6 +244,16 @@ export function validateSpawnRequest(
       );
     }
   }
+  const standardCanObserve = new Set(normalized.standardCanObserve);
+  for (const [index, granted] of [...standardCanObserve].entries()) {
+    if (!aliases.has(granted)) {
+      addIssue(
+        issues,
+        `${path}.standardCanObserve.${index}`,
+        `references unknown agent "${granted}"`,
+      );
+    }
+  }
 
   const agents: ResolvedAgent[] = [];
   for (const [index, definition] of normalized.agents.entries()) {
@@ -233,6 +262,7 @@ export function validateSpawnRequest(
     const result = validateAgentDefinition(definition, {
       availableAliases,
       standardCanTalk: standardCanTalkTo.has(definition.id),
+      standardCanObserve: standardCanObserve.has(definition.id),
       path: `${path}.agents.${index}`,
     });
     issues.push(...result.issues);

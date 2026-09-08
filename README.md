@@ -230,10 +230,12 @@ session at the bottom, and keeps that entry visible.
 Agents are not predefined and require no external configuration file. Standard Copilot receives
 guarded `native_copilot_spawn_agents`, `native_copilot_update_agent`,
 `native_copilot_remove_agent`, `native_copilot_send_to_agent`, and
-`native_copilot_list_agents` tools. The namespace keeps plugin-owned tools distinct from Copilot
-CLI built-ins. Each generated definition selects a unique tool-safe alias, display name, role
-prompt, initial task, model, reasoning effort, permissions, MCP subset, UI metadata, and
-directional `canTalkTo` targets.
+`native_copilot_list_agents` tools. Standard and spawned agents also receive
+`native_copilot_read_agent_activity` when they need to inspect explicitly authorized agents. The
+namespace keeps plugin-owned tools distinct from Copilot CLI built-ins. Each generated definition
+selects a unique tool-safe alias, display name, role prompt, initial task, model, reasoning effort,
+permissions, MCP subset, UI metadata, directional `canTalkTo` targets, and independent
+`canObserve` targets.
 
 Every generated agent receives:
 
@@ -302,21 +304,22 @@ ordinary prompt or from `/fleet <objective>`. Requests made while Standard is bu
 turn becomes idle. Each requested agent then starts independently and receives its own `task`.
 
 `native_copilot_update_agent` replaces one complete definition and may change its role prompt,
-model, reasoning, permissions, MCP subset, task, or communication ACL. Configuration changes
-reconnect the SDK session while preserving its session ID and conversation history.
+model, reasoning, permissions, MCP subset, task, communication ACL, or observation ACL.
+Configuration changes reconnect the SDK session while preserving its session ID and conversation
+history.
 `native_copilot_remove_agent` stops only the selected agent. `/fleet` without an objective opens
 per-agent stop and recovery actions.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
-mailbox, communication ACL, and original MCP ceiling. Active runs owned by another Neovim instance
-are never offered.
+mailbox, communication and observation ACLs, and original MCP ceiling. Active runs owned by another
+Neovim instance are never offered.
 
 ### Validation
 
 A generated agent request is rejected before startup when it contains duplicate or unsafe aliases,
-unknown or self-referential communication targets, unavailable MCP servers, malformed permission
-policies, or an `approveAll` request exceeding Standard's authority. Roles and display names need not
-be unique; aliases must be unique across active and recoverable agents.
+unknown or self-referential communication or observation targets, unavailable MCP servers,
+malformed permission policies, or an `approveAll` request exceeding Standard's authority. Roles and
+display names need not be unique; aliases must be unique across active and recoverable agents.
 
 ### Models
 
@@ -345,11 +348,31 @@ Standard-to-agent communication is a separate permission granted through `standa
 guarded `native_copilot_send_to_agent` tool rejects every agent not explicitly listed. Neither
 direction is enabled merely because Standard spawned the agent.
 
+## Passive agent activity
+
+`canObserve` is independent from `canTalkTo`. It grants one agent permission to call
+`native_copilot_read_agent_activity` for another active agent without sending that agent a prompt.
+`standardCanObserve` grants the same passive access to Standard. Both ACLs are revalidated on every
+read and may be replaced dynamically with `native_copilot_update_agent`.
+
+The activity tool reads the target's authoritative SDK history with `session.getEvents()` and
+returns raw chronological events so the caller can infer status generically. Completed user and
+assistant messages, intents, reasoning summaries emitted by the model, tool activity, errors, and
+future SDK event types pass through unchanged. Streaming message and reasoning deltas are omitted
+because their completed durable events already contain the useful content. Private hidden
+chain-of-thought is never exposed by the SDK.
+
+Each caller-target pair has an independent cursor. A successful read returns only activity after
+that caller's previous page and advances through the last returned event. Results are bounded to
+100 complete events and approximately 30 KiB of serialized content; if more remains, `hasMore` is
+true and the next call continues from the saved cursor. A single oversized event is returned whole
+rather than corrupted by truncation.
+
 Messages are written transactionally to SQLite before delivery. Busy recipients are not interrupted; their mailbox is drained after the session becomes idle. Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after restart.
 
 Copilot’s session store remains authoritative for full conversation history. SQLite stores
-UUID/session mappings, standalone runs, durable mail, selected lifecycle events, leases, and
-recovery checkpoints.
+UUID/session mappings, standalone runs, communication and observation rules, durable mail, delivery
+leases, and per-caller activity cursors. It does not duplicate conversation or SDK event history.
 
 Restarting Neovim surfaces recoverable agents but does not automatically restart them or spend
 additional credits.

@@ -447,8 +447,9 @@ local function submit_prompt_content(queue_only)
             'Design and spawn standalone Copilot agents for this objective: ',
             command.input,
             '. Give each agent a focused task and explicitly define every directional ',
-            'communication link, including any link to or from standard. Do not assume ',
-            'that spawned agents can communicate with standard by default.',
+            'communication link, including links to or from standard, and every passive ',
+            'observation grant between agents or from standard. Do not assume any access ',
+            'is granted by default.',
           }),
         })
       else

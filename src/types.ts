@@ -45,6 +45,8 @@ export interface DynamicAgentDefinition {
   mcpServers?: string[];
   /** Directional outgoing recipients: peer aliases in the same request, or "standard". */
   canTalkTo: string[];
+  /** Agents whose SDK activity this agent may inspect passively. */
+  canObserve: string[];
   ui?: {
     icon?: string;
     color?: string;
@@ -59,6 +61,8 @@ export interface SpawnAgentsRequest {
   agents: DynamicAgentDefinition[];
   /** Aliases in this request the Standard session is explicitly allowed to message. */
   standardCanTalkTo: string[];
+  /** Aliases in this request whose SDK activity Standard may inspect passively. */
+  standardCanObserve: string[];
 }
 
 export interface ResolvedAgent {
@@ -74,8 +78,12 @@ export interface ResolvedAgent {
   mcpServers?: Set<string>;
   /** Outgoing recipient aliases, possibly including the reserved alias "standard". */
   recipients: Set<string>;
+  /** Agent aliases whose SDK activity this agent may inspect passively. */
+  observes: Set<string>;
   /** Whether the Standard session was explicitly granted permission to message this agent. */
   standardCanTalk: boolean;
+  /** Whether the Standard session may inspect this agent's SDK activity. */
+  standardCanObserve: boolean;
   ui?: DynamicAgentDefinition["ui"];
 }
 

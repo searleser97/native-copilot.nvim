@@ -294,9 +294,24 @@ async function main(): Promise<void> {
               (alias): alias is string => typeof alias === "string",
             )
           : [];
+        const standardCanObserve = Array.isArray(payload.standardCanObserve)
+          ? payload.standardCanObserve.filter(
+              (alias): alias is string => typeof alias === "string",
+            )
+          : [];
         const request: SpawnAgentsRequest = {
-          agents: payload.agents as DynamicAgentDefinition[],
+          agents: payload.agents.map((definition) => {
+            if (typeof definition !== "object" || definition === null) {
+              return definition;
+            }
+            const candidate = definition as Record<string, unknown>;
+            return {
+              ...candidate,
+              canObserve: Array.isArray(candidate.canObserve) ? candidate.canObserve : [],
+            };
+          }) as DynamicAgentDefinition[],
           standardCanTalkTo,
+          standardCanObserve,
         };
         protocol.send(
           "agents.spawned",
@@ -335,10 +350,17 @@ async function main(): Promise<void> {
         if (typeof payload.definition !== "object" || payload.definition === null) {
           throw new Error(`${command.type} requires payload.definition`);
         }
+        const candidate = payload.definition as Record<string, unknown>;
         const result = await runtime.updateAgent(agentRef, {
-          definition: payload.definition as DynamicAgentDefinition,
+          definition: {
+            ...candidate,
+            canObserve: Array.isArray(candidate.canObserve) ? candidate.canObserve : [],
+          } as DynamicAgentDefinition,
           ...(typeof payload.standardCanTalk === "boolean"
             ? { standardCanTalk: payload.standardCanTalk }
+            : {}),
+          ...(typeof payload.standardCanObserve === "boolean"
+            ? { standardCanObserve: payload.standardCanObserve }
             : {}),
         });
         protocol.send("agent.updated", result, {

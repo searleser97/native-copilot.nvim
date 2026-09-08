@@ -299,6 +299,7 @@ interface StoredAgentRecord {
   definition: DynamicAgentDefinition;
   mcpServers: string[];
   standardCanTalk: boolean;
+  standardCanObserve: boolean;
 }
 
 function storedAgentRecord(value: string): StoredAgentRecord {
@@ -310,23 +311,23 @@ function storedAgentRecord(value: string): StoredAgentRecord {
   ) {
     throw new Error("The stored agent definition is invalid.");
   }
+  const definition = parsed.definition as DynamicAgentDefinition;
   return {
-    definition: parsed.definition,
+    definition: {
+      ...definition,
+      canObserve: Array.isArray(definition.canObserve) ? definition.canObserve : [],
+    },
     mcpServers: parsed.mcpServers.filter((server): server is string => typeof server === "string"),
     standardCanTalk: parsed.standardCanTalk === true,
+    standardCanObserve: parsed.standardCanObserve === true,
   };
 }
 
-const persistEventTypes = new Set<SessionEvent["type"]>([
-  "assistant.message",
-  "assistant.reasoning",
-  "assistant.intent",
-  "assistant.turn_start",
-  "assistant.turn_end",
-  "tool.execution_start",
-  "tool.execution_complete",
-  "session.error",
-  "session.shutdown",
+const ACTIVITY_MAX_BYTES = 30 * 1024;
+const ACTIVITY_MAX_EVENTS = 100;
+const omittedActivityEventTypes = new Set<SessionEvent["type"]>([
+  "assistant.message_delta",
+  "assistant.reasoning_delta",
 ]);
 
 const environmentProbes: EnvironmentProbe[] = [
@@ -1331,7 +1332,10 @@ export class CopilotRuntime implements RuntimeAdapter {
     config.includeSubAgentStreamingEvents = false;
     config.reasoningSummary = agent.reasoningSummary;
     config.systemMessage = { mode: "append", content: agent.initialPrompt };
-    config.tools = this.createAgentMessagingTools(context);
+    config.tools = [
+      ...this.createAgentMessagingTools(context),
+      this.readAgentActivityTool(context),
+    ];
     if (agent.permission && !("mode" in agent.permission)) {
       // Narrow: the agent allowlist replaces the inherited native allowlist.
       config.availableTools = sdkToolPatterns(agent.permission.tools.allow);
@@ -1370,6 +1374,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.removeAgentTool(),
       this.sendToAgentTool(),
       this.listAgentsTool(),
+      this.readAgentActivityTool(),
     ];
     return config;
   }
@@ -1383,7 +1388,8 @@ export class CopilotRuntime implements RuntimeAdapter {
         "initial task, least-privilege permissions, only the MCP servers it needs, and directional " +
         "canTalkTo recipients. Every agent receives stable native_copilot_list_recipients and " +
         "native_copilot_send_message tools; the host resolves their authorized aliases, agent " +
-        "ids, and SDK session ids. The " +
+        "ids, and SDK session ids. canObserve independently grants passive access through " +
+        "native_copilot_read_agent_activity. The " +
         'reserved alias "standard" lets an agent message this session. Communication is denied by ' +
         "default in both directions: list an alias in standardCanTalkTo to allow this session to " +
         "message that agent. This request is not a group — every agent gets its own durable " +
@@ -1406,9 +1412,12 @@ export class CopilotRuntime implements RuntimeAdapter {
               description: agent.description,
               task: agent.task,
               recipients: [...agent.recipients],
+              observes: [...agent.observes],
               standardCanTalk: agent.standardCanTalk,
+              standardCanObserve: agent.standardCanObserve,
             })),
             standardCanTalkTo: [...spawn.standardCanTalkTo],
+            standardCanObserve: [...spawn.standardCanObserve],
             startsWhen: "session.idle",
           },
           { memberId: STANDARD_TARGET, target: "activity", done: true },
@@ -1444,13 +1453,21 @@ export class CopilotRuntime implements RuntimeAdapter {
           .describe(
             "Whether this Standard session may message the agent; omit to keep the current grant.",
           ),
+        standardCanObserve: z
+          .boolean()
+          .optional()
+          .describe(
+            "Whether this Standard session may inspect the agent's SDK event history; omit to " +
+              "keep the current grant.",
+          ),
       }),
       skipPermission: true,
       defer: "never",
-      handler: async ({ agent, definition, standardCanTalk }) => {
+      handler: async ({ agent, definition, standardCanTalk, standardCanObserve }) => {
         const summary = await this.updateAgent(agent, {
           definition: definition as DynamicAgentDefinition,
           ...(standardCanTalk === undefined ? {} : { standardCanTalk }),
+          ...(standardCanObserve === undefined ? {} : { standardCanObserve }),
         });
         return { accepted: true, ...summary };
       },
@@ -1537,6 +1554,115 @@ export class CopilotRuntime implements RuntimeAdapter {
           };
         }),
       }),
+    });
+  }
+
+  private readAgentActivityTool(observer?: AgentContext): Tool<any> {
+    const observerAgentId = observer?.agentId;
+    return defineTool(nativeCopilotTool("read_agent_activity"), {
+      description:
+        "Read the target agent's raw SDK events since this caller last checked, without sending " +
+        "the target a prompt. The caller must have an explicit canObserve grant. Results preserve " +
+        "unknown future event types, omit streaming message/reasoning deltas, and advance a " +
+        "per-caller cursor only through the events returned in this page.",
+      parameters: z.object({
+        agent: z
+          .string()
+          .min(1)
+          .describe("Active target agent alias, durable agent id, target id, run id, or session id."),
+      }),
+      skipPermission: true,
+      defer: "never",
+      handler: async ({ agent }) => {
+        const source =
+          observerAgentId === undefined ? undefined : this.agents.get(observerAgentId);
+        if (observerAgentId !== undefined && !source) {
+          throw new Error(`Agent "${observer?.alias ?? observerAgentId}" is no longer active.`);
+        }
+        const target = this.requireAgent(agent);
+        if (source?.agentId !== target.agentId) {
+          const allowed =
+            source === undefined
+              ? target.agent.standardCanObserve
+              : source.agent.observes.has(target.alias);
+          if (!allowed) {
+            const caller = source?.alias ?? STANDARD_ALIAS;
+            throw new Error(
+              `Agent "${caller}" is not allowed to inspect "${target.alias}" under the current ` +
+                "observation rules.",
+            );
+          }
+        }
+
+        const live = await this.activeSession(target.target);
+        const history = await live.session.getEvents();
+        const observerId = source?.agentId ?? STANDARD_TARGET;
+        const cursor = this.db.activityCursor(observerId, target.agentId);
+        let cursorReset = false;
+        let startIndex = 0;
+        if (cursor?.sessionId === live.session.sessionId) {
+          const cursorIndex = history.findIndex((event) => event.id === cursor.lastEventId);
+          if (cursorIndex >= 0) {
+            startIndex = cursorIndex + 1;
+          } else {
+            cursorReset = true;
+          }
+        } else if (cursor !== undefined) {
+          cursorReset = true;
+        }
+
+        const events: SessionEvent[] = [];
+        let serializedBytes = 0;
+        let lastReturnedEventId: string | undefined;
+        let index = startIndex;
+        for (; index < history.length; index += 1) {
+          const event = history[index]!;
+          if (omittedActivityEventTypes.has(event.type)) {
+            continue;
+          }
+          const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+          if (
+            events.length >= ACTIVITY_MAX_EVENTS ||
+            (events.length > 0 && serializedBytes + eventBytes > ACTIVITY_MAX_BYTES)
+          ) {
+            break;
+          }
+          events.push(event);
+          serializedBytes += eventBytes;
+          lastReturnedEventId = event.id;
+        }
+
+        if (lastReturnedEventId !== undefined) {
+          this.db.advanceActivityCursor(
+            observerId,
+            target.agentId,
+            live.session.sessionId,
+            lastReturnedEventId,
+          );
+        }
+        return {
+          agent: {
+            alias: target.alias,
+            agentId: target.agentId,
+            sessionId: live.session.sessionId,
+          },
+          currentState: this.agentState(target),
+          events,
+          eventCount: events.length,
+          serializedBytes,
+          hasMore: index < history.length,
+          ...(cursor === undefined ? {} : { previouslySeenThrough: cursor.lastEventId }),
+          ...(lastReturnedEventId === undefined
+            ? {}
+            : { observedThrough: lastReturnedEventId }),
+          ...(cursorReset ? { cursorReset: true } : {}),
+          ...(serializedBytes > ACTIVITY_MAX_BYTES ? { oversizedSingleEvent: true } : {}),
+          limits: {
+            maxEvents: ACTIVITY_MAX_EVENTS,
+            maxBytes: ACTIVITY_MAX_BYTES,
+          },
+        };
+      },
     });
   }
 
@@ -1641,7 +1767,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       return this.agents.get(aliasAgentId);
     }
     for (const context of this.agents.values()) {
-      if (context.runId === agentRef) {
+      if (context.runId === agentRef || this.agentSessionId(context) === agentRef) {
         return context;
       }
     }
@@ -1669,6 +1795,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       definition: context.definition,
       mcpServers: [...context.mcpServers],
       standardCanTalk: context.agent.standardCanTalk,
+      standardCanObserve: context.agent.standardCanObserve,
     };
     return JSON.stringify(record);
   }
@@ -2102,16 +2229,6 @@ export class CopilotRuntime implements RuntimeAdapter {
     live.seenEventIds.add(event.id);
     live.lastEventAt = Date.now();
     live.sequence += 1;
-    if (persistEventTypes.has(event.type)) {
-      this.db.appendEvent(
-        event.id,
-        live.runId,
-        live.target,
-        event.type,
-        event.data,
-        live.sequence,
-      );
-    }
     const fields = {
       runId: live.runId,
       memberId: live.target,
@@ -2537,6 +2654,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         context.alias,
         this.storedAgentJson(context),
         agent.standardCanTalk,
+        agent.standardCanObserve,
         this.workspace,
         process.pid,
       );
@@ -2598,13 +2716,13 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     const record = storedAgentRecord(stored.definition);
     const definition = record.definition;
-    // A recovered agent keeps the exact ACL it was persisted with, so its recipients
-    // are validated against themselves. A recipient that is not currently active
-    // still gets its send tool; that tool reports the peer is not active instead of
-    // silently delivering elsewhere.
+    // A recovered agent keeps the exact ACLs it was persisted with, so referenced
+    // aliases are validated against the union of its persisted communication and
+    // observation grants.
     const validated = validateAgentDefinition(definition, {
-      availableAliases: new Set(definition.canTalkTo),
+      availableAliases: new Set([...definition.canTalkTo, ...definition.canObserve]),
       standardCanTalk: stored.standardCanTalk || record.standardCanTalk,
+      standardCanObserve: stored.standardCanObserve,
     });
     if (!validated.valid || !validated.agent) {
       throw new Error(
@@ -2643,6 +2761,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       context.alias,
       this.storedAgentJson(context),
       validated.agent.standardCanTalk,
+      validated.agent.standardCanObserve,
     );
     this.emitAgentLifecycle("agent.loading", context, {
       recovered: true,
@@ -2725,7 +2844,13 @@ export class CopilotRuntime implements RuntimeAdapter {
       [...this.aliasIndex.keys()].filter((alias) => alias !== context.alias),
     );
     const standardCanTalk = update.standardCanTalk ?? context.agent.standardCanTalk;
-    const validated = validateAgentDefinition(definition, { availableAliases, standardCanTalk });
+    const standardCanObserve =
+      update.standardCanObserve ?? context.agent.standardCanObserve;
+    const validated = validateAgentDefinition(definition, {
+      availableAliases,
+      standardCanTalk,
+      standardCanObserve,
+    });
     if (!validated.valid || !validated.agent) {
       throw new Error(
         `Agent "${context.alias}" update is invalid: ${validated.issues
@@ -2744,6 +2869,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         context.alias,
         this.storedAgentJson(context),
         standardCanTalk,
+        standardCanObserve,
       );
     } catch (error) {
       context.definition = previousDefinition;
@@ -2765,6 +2891,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         context.alias,
         this.storedAgentJson(context),
         previousAgent.standardCanTalk,
+        previousAgent.standardCanObserve,
       );
       throw error;
     }
@@ -2777,25 +2904,29 @@ export class CopilotRuntime implements RuntimeAdapter {
     };
   }
 
-  /** Removes a departed alias from every remaining agent's outgoing ACL. */
+  /** Removes a departed alias from every remaining communication and observation ACL. */
   private async pruneRecipient(alias: string): Promise<string[]> {
     const pruned: string[] = [];
     for (const context of [...this.agents.values()]) {
-      if (!context.agent.recipients.has(alias)) {
+      if (!context.agent.recipients.has(alias) && !context.agent.observes.has(alias)) {
         continue;
       }
       const recipients = new Set(context.agent.recipients);
+      const observes = new Set(context.agent.observes);
       recipients.delete(alias);
+      observes.delete(alias);
       context.definition = {
         ...context.definition,
         canTalkTo: context.definition.canTalkTo.filter((entry) => entry !== alias),
+        canObserve: context.definition.canObserve.filter((entry) => entry !== alias),
       };
-      context.agent = { ...context.agent, recipients };
+      context.agent = { ...context.agent, recipients, observes };
       this.db.updateAgentRun(
         context.runId,
         context.alias,
         this.storedAgentJson(context),
         context.agent.standardCanTalk,
+        context.agent.standardCanObserve,
       );
       pruned.push(context.alias);
       try {
@@ -2924,7 +3055,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       description: context.agent.description,
       task: context.agent.task,
       recipients: [...context.agent.recipients],
+      observes: [...context.agent.observes],
       standardCanTalk: context.agent.standardCanTalk,
+      standardCanObserve: context.agent.standardCanObserve,
       ...(context.agent.ui === undefined ? {} : { ui: context.agent.ui }),
     };
   }
@@ -2969,7 +3102,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         description: record.definition.description,
         task: record.definition.task,
         recipients: [...record.definition.canTalkTo],
+        observes: [...record.definition.canObserve],
         standardCanTalk: run.standardCanTalk,
+        standardCanObserve: run.standardCanObserve,
         status: run.status,
         startedAt: run.startedAt,
         endedAt: run.endedAt,

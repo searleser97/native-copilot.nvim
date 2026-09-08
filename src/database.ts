@@ -10,7 +10,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is a single session — the Standard
  * supervisor or one standalone agent — so the schema carries no group state.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export interface StoredMessage {
   id: string;
@@ -29,7 +29,6 @@ export interface StateSnapshot {
   runs: Array<Record<string, unknown>>;
   sessions: Array<Record<string, unknown>>;
   messages: StoredMessage[];
-  events: Array<Record<string, unknown>>;
 }
 
 export interface StoredAgentSession {
@@ -44,10 +43,17 @@ export interface StoredAgentRun {
   alias: string;
   definition: string | null;
   standardCanTalk: boolean;
+  standardCanObserve: boolean;
   status: RunStatus;
   startedAt: string;
   endedAt: string | null;
   session: StoredAgentSession | undefined;
+}
+
+export interface ActivityCursor {
+  sessionId: string;
+  lastEventId: string;
+  updatedAt: string;
 }
 
 export interface ReservedAgentAlias {
@@ -99,12 +105,13 @@ export class AgentDatabase {
           "opening it with an older host; the newer state is left untouched.",
       );
     }
-    if (schema.version < SCHEMA_VERSION) {
+    if (schema.version < 6) {
       // Foreign keys cannot be toggled inside a transaction, so disable them around
       // the rebuild of the obsolete tables.
       this.db.exec("PRAGMA foreign_keys = OFF");
       this.db.exec(`
         BEGIN IMMEDIATE;
+        DROP TABLE IF EXISTS activity_cursors;
         DROP TABLE IF EXISTS checkpoints;
         DROP TABLE IF EXISTS delivery_leases;
         DROP TABLE IF EXISTS messages;
@@ -112,6 +119,15 @@ export class AgentDatabase {
         DROP TABLE IF EXISTS member_sessions;
         DROP TABLE IF EXISTS agent_sessions;
         DROP TABLE IF EXISTS runs;
+        UPDATE schema_meta SET version = ${SCHEMA_VERSION};
+        COMMIT;
+      `);
+    } else if (schema.version === 6) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE runs ADD COLUMN standard_can_observe INTEGER NOT NULL DEFAULT 0;
+        DROP TABLE IF EXISTS checkpoints;
+        DROP TABLE IF EXISTS events;
         UPDATE schema_meta SET version = ${SCHEMA_VERSION};
         COMMIT;
       `);
@@ -125,6 +141,7 @@ export class AgentDatabase {
         alias TEXT,
         definition TEXT,
         standard_can_talk INTEGER NOT NULL DEFAULT 0,
+        standard_can_observe INTEGER NOT NULL DEFAULT 0,
         workspace TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
         started_at TEXT NOT NULL,
@@ -163,25 +180,13 @@ export class AgentDatabase {
         last_error TEXT
       );
 
-      CREATE TABLE IF NOT EXISTS events (
-        id TEXT PRIMARY KEY,
-        run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
-        target TEXT,
-        type TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        sequence INTEGER,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS events_run_target_idx
-      ON events(run_id, target, created_at);
-
-      CREATE TABLE IF NOT EXISTS checkpoints (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        target TEXT NOT NULL,
-        last_event_sequence INTEGER NOT NULL DEFAULT 0,
-        unread_count INTEGER NOT NULL DEFAULT 0,
+      CREATE TABLE IF NOT EXISTS activity_cursors (
+        observer_id TEXT NOT NULL,
+        target_agent_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        last_event_id TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        PRIMARY KEY(run_id, target)
+        PRIMARY KEY(observer_id, target_agent_id)
       );
     `);
   }
@@ -297,17 +302,28 @@ export class AgentDatabase {
     alias: string,
     definition: string,
     standardCanTalk: boolean,
+    standardCanObserve: boolean,
     workspace: string,
     ownerPid: number,
   ): void {
     this.db
       .prepare(
         `INSERT INTO runs(
-           id, mode, agent_id, alias, definition, standard_can_talk,
+           id, mode, agent_id, alias, definition, standard_can_talk, standard_can_observe,
            workspace, status, started_at, owner_pid
-         ) VALUES (?, 'agent', ?, ?, ?, ?, ?, 'active', ?, ?)`,
+         ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
-      .run(id, agentId, alias, definition, standardCanTalk ? 1 : 0, workspace, now(), ownerPid);
+      .run(
+        id,
+        agentId,
+        alias,
+        definition,
+        standardCanTalk ? 1 : 0,
+        standardCanObserve ? 1 : 0,
+        workspace,
+        now(),
+        ownerPid,
+      );
   }
 
   private agentRunRows(where: string, ...parameters: Array<string | number>): StoredAgentRun[] {
@@ -315,12 +331,16 @@ export class AgentDatabase {
       .prepare(
         `SELECT id, agent_id AS agentId, alias, definition,
                 standard_can_talk AS standardCanTalk,
+                standard_can_observe AS standardCanObserve,
                 status, started_at AS startedAt, ended_at AS endedAt
          FROM runs
          WHERE mode = 'agent' AND agent_id IS NOT NULL AND alias IS NOT NULL AND ${where}`,
       )
       .all(...parameters) as unknown as Array<
-        Omit<StoredAgentRun, "standardCanTalk" | "session"> & { standardCanTalk: number }
+        Omit<StoredAgentRun, "standardCanTalk" | "standardCanObserve" | "session"> & {
+          standardCanTalk: number;
+          standardCanObserve: number;
+        }
       >;
     const session = this.db.prepare(
       `SELECT session_id AS sessionId, state, last_active_at AS lastActiveAt
@@ -329,6 +349,7 @@ export class AgentDatabase {
     return rows.map((row) => ({
       ...row,
       standardCanTalk: row.standardCanTalk === 1,
+      standardCanObserve: row.standardCanObserve === 1,
       session: session.get(row.id) as unknown as StoredAgentSession | undefined,
     }));
   }
@@ -387,14 +408,15 @@ export class AgentDatabase {
     alias: string,
     definition: string,
     standardCanTalk: boolean,
+    standardCanObserve: boolean,
   ): void {
     const result = this.db
       .prepare(
         `UPDATE runs
-         SET alias = ?, definition = ?, standard_can_talk = ?
+         SET alias = ?, definition = ?, standard_can_talk = ?, standard_can_observe = ?
          WHERE id = ? AND mode = 'agent'`,
       )
-      .run(alias, definition, standardCanTalk ? 1 : 0, id);
+      .run(alias, definition, standardCanTalk ? 1 : 0, standardCanObserve ? 1 : 0, id);
     if (result.changes !== 1) {
       throw new Error(`Agent run "${id}" could not be updated with a new definition.`);
     }
@@ -438,13 +460,9 @@ export class AgentDatabase {
       .prepare(
         `SELECT EXISTS(
            SELECT 1 FROM messages WHERE run_id = ?
-         ) OR EXISTS(
-           SELECT 1 FROM events
-           WHERE run_id = ?
-             AND type IN ('user.message', 'assistant.message', 'assistant.reasoning')
          ) AS present`,
       )
-      .get(runId, runId) as { present: number };
+      .get(runId) as { present: number };
     return row.present === 1;
   }
 
@@ -572,38 +590,36 @@ export class AgentDatabase {
     });
   }
 
-  appendEvent(
-    id: string,
-    runId: string | null,
-    target: string | null,
-    type: string,
-    payload: unknown,
-    sequence?: number,
+  activityCursor(observerId: string, targetAgentId: string): ActivityCursor | undefined {
+    return this.db
+      .prepare(
+        `SELECT session_id AS sessionId, last_event_id AS lastEventId, updated_at AS updatedAt
+         FROM activity_cursors
+         WHERE observer_id = ? AND target_agent_id = ?`,
+      )
+      .get(observerId, targetAgentId) as unknown as ActivityCursor | undefined;
+  }
+
+  advanceActivityCursor(
+    observerId: string,
+    targetAgentId: string,
+    sessionId: string,
+    lastEventId: string,
   ): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO events(
-           id, run_id, target, type, payload, sequence, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(id, runId, target, type, JSON.stringify(payload), sequence ?? null, now());
-  }
-
-  checkpoint(runId: string, target: string, sequence: number, unreadCount: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO checkpoints(
-           run_id, target, last_event_sequence, unread_count, updated_at
+        `INSERT INTO activity_cursors(
+           observer_id, target_agent_id, session_id, last_event_id, updated_at
          ) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(run_id, target) DO UPDATE SET
-           last_event_sequence = excluded.last_event_sequence,
-           unread_count = excluded.unread_count,
+         ON CONFLICT(observer_id, target_agent_id) DO UPDATE SET
+           session_id = excluded.session_id,
+           last_event_id = excluded.last_event_id,
            updated_at = excluded.updated_at`,
       )
-      .run(runId, target, sequence, unreadCount, now());
+      .run(observerId, targetAgentId, sessionId, lastEventId, now());
   }
 
-  snapshot(eventLimit = 500): StateSnapshot {
+  snapshot(): StateSnapshot {
     const runs = this.db
       .prepare("SELECT * FROM runs ORDER BY started_at DESC LIMIT 50")
       .all() as Array<Record<string, unknown>>;
@@ -618,10 +634,7 @@ export class AgentDatabase {
          FROM messages ORDER BY created_at, sequence`,
       )
       .all() as unknown as StoredMessage[];
-    const events = this.db
-      .prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?")
-      .all(eventLimit) as Array<Record<string, unknown>>;
-    return { runs, sessions, messages, events };
+    return { runs, sessions, messages };
   }
 
   close(): void {

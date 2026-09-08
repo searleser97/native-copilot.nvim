@@ -31,7 +31,9 @@ interface ScriptedAgent {
   description: string;
   task: string;
   recipients: string[];
+  observes: string[];
   standardCanTalk: boolean;
+  standardCanObserve: boolean;
   runId: string;
   sessionId: string;
 }
@@ -504,7 +506,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         description: agent.description,
         task: agent.task,
         recipients: agent.recipients,
+        observes: agent.observes,
         standardCanTalk: agent.standardCanTalk,
+        standardCanObserve: agent.standardCanObserve,
         runId: agent.runId,
         sessionId: agent.sessionId,
         state: "idle",
@@ -529,7 +533,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       description: "Plan the workspace validation",
       task: "Plan the workspace validation and report the plan.",
       recipients: ["standard"],
+      observes: [],
       standardCanTalk: true,
+      standardCanObserve: true,
       status: "interrupted",
       startedAt: "2026-08-31T14:00:00.000Z",
       endedAt: "2026-08-31T14:30:00.000Z",
@@ -1103,7 +1109,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       description: agent.description,
       task: agent.task,
       recipients: agent.recipients,
+      observes: agent.observes,
       standardCanTalk: agent.standardCanTalk,
+      standardCanObserve: agent.standardCanObserve,
       runId: agent.runId,
     };
   }
@@ -1125,6 +1133,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async spawnAgents(request: SpawnAgentsRequest): Promise<Array<Record<string, unknown>>> {
     const standardCanTalkTo = new Set(request.standardCanTalkTo);
+    const standardCanObserve = new Set(request.standardCanObserve);
     const results: Array<Record<string, unknown>> = [];
     for (const definition of request.agents) {
       const agentId = randomUUID();
@@ -1136,7 +1145,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         description: definition.description,
         task: definition.task,
         recipients: [...definition.canTalkTo],
+        observes: [...definition.canObserve],
         standardCanTalk: standardCanTalkTo.has(definition.id),
+        standardCanObserve: standardCanObserve.has(definition.id),
         runId: randomUUID(),
         sessionId: `e2e-agent-session-${definition.id}`,
       };
@@ -1176,7 +1187,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       description: "Plan the workspace validation",
       task: "Plan the workspace validation and report the plan.",
       recipients: ["standard"],
+      observes: [],
       standardCanTalk: true,
+      standardCanObserve: true,
       runId: RECOVERABLE_AGENT_RUN_ID,
       sessionId: "e2e-recovered-agent-session",
     };
@@ -1223,8 +1236,12 @@ export class ScriptedRuntime implements RuntimeAdapter {
     agent.description = update.definition.description;
     agent.task = update.definition.task;
     agent.recipients = [...update.definition.canTalkTo];
+    agent.observes = [...update.definition.canObserve];
     if (update.standardCanTalk !== undefined) {
       agent.standardCanTalk = update.standardCanTalk;
+    }
+    if (update.standardCanObserve !== undefined) {
+      agent.standardCanObserve = update.standardCanObserve;
     }
     this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: false }, {
       runId: agent.runId,
