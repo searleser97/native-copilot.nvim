@@ -325,6 +325,7 @@ function storedAgentRecord(value: string): StoredAgentRecord {
 
 const ACTIVITY_MAX_BYTES = 30 * 1024;
 const ACTIVITY_MAX_EVENTS = 100;
+const ACTIVITY_MAX_READS = 32;
 const omittedActivityEventTypes = new Set<SessionEvent["type"]>([
   "assistant.message_delta",
   "assistant.reasoning_delta",
@@ -1617,16 +1618,23 @@ export class CopilotRuntime implements RuntimeAdapter {
         let serializedBytes = 0;
         let nextCursor = readCursor;
         let hasMore = false;
+        let readCount = 0;
         let cursorReset = storedCursor !== undefined &&
           storedCursor.sessionId !== live.session.sessionId;
         while (events.length < ACTIVITY_MAX_EVENTS) {
+          if (readCount >= ACTIVITY_MAX_READS) {
+            hasMore = true;
+            break;
+          }
           const remaining = ACTIVITY_MAX_EVENTS - events.length;
           const requested = Math.min(20, remaining);
+          const requestCursor = readCursor;
           let page = await live.session.rpc.eventLog.read({
             ...(readCursor === undefined ? {} : { cursor: readCursor }),
             max: requested,
             includeEphemeral: false,
           });
+          readCount += 1;
           if (page.cursorStatus === "expired") {
             cursorReset = true;
             events.length = 0;
@@ -1654,11 +1662,16 @@ export class CopilotRuntime implements RuntimeAdapter {
             pageEvents.length > 1 &&
             serializedBytes + pageBytes > ACTIVITY_MAX_BYTES
           ) {
+            if (readCount >= ACTIVITY_MAX_READS) {
+              hasMore = true;
+              break;
+            }
             page = await live.session.rpc.eventLog.read({
               ...(readCursor === undefined ? {} : { cursor: readCursor }),
               max: 1,
               includeEphemeral: false,
             });
+            readCount += 1;
             if (page.cursorStatus === "expired") {
               cursorReset = true;
               events.length = 0;
@@ -1685,6 +1698,10 @@ export class CopilotRuntime implements RuntimeAdapter {
           readCursor = page.cursor;
           nextCursor = page.cursor;
           hasMore = page.hasMore;
+          if (page.hasMore && page.cursor === requestCursor) {
+            hasMore = true;
+            break;
+          }
 
           if (!page.hasMore) {
             break;
@@ -1718,6 +1735,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           limits: {
             maxEvents: ACTIVITY_MAX_EVENTS,
             maxBytes: ACTIVITY_MAX_BYTES,
+            maxReads: ACTIVITY_MAX_READS,
           },
         };
       },
