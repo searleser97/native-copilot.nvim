@@ -28,9 +28,8 @@ export type DynamicPermission =
 
 /**
  * The complete runtime definition of one standalone durable agent. `id` is the
- * tool-safe alias used in generated `native_copilot_send_to_<alias>` tool names
- * and in every user-facing reference; the runtime assigns the durable agent UUID
- * separately.
+ * tool-safe alias used in messaging and every user-facing reference; the runtime
+ * assigns the durable agent UUID separately.
  */
 export interface DynamicAgentDefinition {
   id: string;

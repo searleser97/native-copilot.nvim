@@ -189,9 +189,8 @@ interface LiveSession {
   // Tool-safe alias; "standard" for the supervisor session.
   alias: string;
   // Deterministic signature of everything this session's SessionConfig was built
-  // from — the complete agent definition plus its resolved outgoing peer targets.
-  // Any difference means the live session must be reconnected with a rebuilt config
-  // while preserving its session id and history.
+  // from. Any difference means the live session must be reconnected with a rebuilt
+  // config while preserving its session id and history.
   configSignature: string;
   modelId: string | undefined;
   aicUsed: number;
@@ -235,13 +234,6 @@ interface AgentContext {
   agent: ResolvedAgent;
   /** MCP server ceiling captured from the Standard session when the agent started. */
   mcpServers: Set<string>;
-}
-
-/** One outgoing communication edge, resolved from an alias to a concrete target. */
-interface PeerBinding {
-  alias: string;
-  agentId: string | undefined;
-  target: string | undefined;
 }
 
 /**
@@ -1339,7 +1331,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     config.includeSubAgentStreamingEvents = false;
     config.reasoningSummary = agent.reasoningSummary;
     config.systemMessage = { mode: "append", content: agent.initialPrompt };
-    config.tools = this.createPeerMessageTools(context);
+    config.tools = this.createAgentMessagingTools(context);
     if (agent.permission && !("mode" in agent.permission)) {
       // Narrow: the agent allowlist replaces the inherited native allowlist.
       config.availableTools = sdkToolPatterns(agent.permission.tools.allow);
@@ -1389,8 +1381,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         "agents or when independent planning, implementation, testing, or review would materially " +
         "improve the result. Define every agent completely at runtime: a focused prompt, a concrete " +
         "initial task, least-privilege permissions, only the MCP servers it needs, and directional " +
-        "canTalkTo recipients. Each recipient becomes a dedicated " +
-        "native_copilot_send_to_<alias> tool, and the " +
+        "canTalkTo recipients. Every agent receives stable native_copilot_list_recipients and " +
+        "native_copilot_send_message tools; the host resolves their authorized aliases, agent " +
+        "ids, and SDK session ids. The " +
         'reserved alias "standard" lets an agent message this session. Communication is denied by ' +
         "default in both directions: list an alias in standardCanTalkTo to allow this session to " +
         "message that agent. This request is not a group — every agent gets its own durable " +
@@ -1438,8 +1431,8 @@ export class CopilotRuntime implements RuntimeAdapter {
         "durable and cannot be changed. Provide a complete definition — prompt, task, permissions, " +
         "MCP servers, and canTalkTo — which must respect the permission and MCP ceilings. Set " +
         "standardCanTalk to grant or revoke this session's permission to message the agent. If the " +
-        "agent's outgoing recipients change, its live session is reconnected with updated " +
-        "native_copilot_send_to_<alias> tools while preserving its session id and history.",
+        "agent's configuration changes, its live session is reconnected while preserving its " +
+        "session id and history.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the active agent to update."),
         definition: dynamicAgentSchema.describe(
@@ -1535,10 +1528,14 @@ export class CopilotRuntime implements RuntimeAdapter {
       skipPermission: true,
       defer: "never",
       handler: () => ({
-        agents: [...this.agents.values()].map((context) => ({
-          ...this.agentPayload(context),
-          state: this.agentState(context),
-        })),
+        agents: [...this.agents.values()].map((context) => {
+          const sessionId = this.agentSessionId(context);
+          return {
+            ...this.agentPayload(context),
+            ...(sessionId === undefined ? {} : { sessionId }),
+            state: this.agentState(context),
+          };
+        }),
       }),
     });
   }
@@ -1685,39 +1682,13 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   /**
-   * Resolves an agent's outgoing ACL aliases to concrete targets at configuration
-   * time. An alias that is not currently active resolves to no target; its tool is
-   * still created so the model gets an explicit "not active" error instead of a
-   * silently dropped message.
-   */
-  private peerBindings(agent: ResolvedAgent): PeerBinding[] {
-    return [...agent.recipients].sort().map((alias) => {
-      if (alias === STANDARD_ALIAS) {
-        return { alias, agentId: undefined, target: STANDARD_TARGET };
-      }
-      const agentId = this.aliasIndex.get(alias);
-      return {
-        alias,
-        agentId,
-        target: agentId === undefined ? undefined : agentTarget(agentId),
-      };
-    });
-  }
-
-  /**
-   * The complete signature of the SessionConfig an agent would be connected with
-   * right now: its full definition (prompt, task, model, reasoning, permissions, MCP
-   * subset, ACL) and the concrete targets its peer aliases currently resolve to. Any
-   * change here — not just a peer change — requires reconnecting the live session.
+   * The complete signature of the SessionConfig an agent would be connected with:
+   * its full definition plus its original MCP ceiling.
    */
   private sessionSignature(context: AgentContext): string {
     return stableStringify({
       definition: context.definition,
       mcpCeiling: [...context.mcpServers].sort(),
-      peers: this.peerBindings(context.agent).map((binding) => [
-        binding.alias,
-        binding.target ?? null,
-      ]),
     });
   }
 
@@ -1735,6 +1706,56 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Agent "${alias}" is not active; the message was not delivered.`);
     }
     return { runId: context.runId, target: context.target, alias: context.alias };
+  }
+
+  private agentSessionId(context: AgentContext): string | undefined {
+    return (
+      this.live.get(context.target)?.session.sessionId ??
+      this.db.session(context.runId)?.sessionId
+    );
+  }
+
+  private allowedRecipient(
+    source: AgentContext,
+    selector: string,
+  ): { recipient: MailboxRecipient; sessionId: string | undefined } {
+    const current = this.agents.get(source.agentId);
+    if (!current) {
+      throw new Error(`Agent "${source.alias}" is no longer active.`);
+    }
+
+    const standardSessionId = this.live.get(STANDARD_TARGET)?.session.sessionId;
+    if (
+      selector === STANDARD_ALIAS ||
+      selector === STANDARD_TARGET ||
+      selector === standardSessionId
+    ) {
+      if (!current.agent.recipients.has(STANDARD_ALIAS)) {
+        throw new Error(`Agent "${current.alias}" is not permitted to message "standard".`);
+      }
+      return { recipient: this.standardRecipient(), sessionId: standardSessionId };
+    }
+
+    const matched = [...this.agents.values()].find((candidate) => {
+      if (!current.agent.recipients.has(candidate.alias)) {
+        return false;
+      }
+      return (
+        selector === candidate.alias ||
+        selector === candidate.agentId ||
+        selector === this.agentSessionId(candidate)
+      );
+    });
+    if (!matched) {
+      throw new Error(
+        `Recipient "${selector}" is not an active agent permitted by "${current.alias}". ` +
+          "Call native_copilot_list_recipients to refresh the authorized mapping.",
+      );
+    }
+    return {
+      recipient: this.agentRecipient(matched.alias, matched.agentId),
+      sessionId: this.agentSessionId(matched),
+    };
   }
 
   /**
@@ -1767,52 +1788,85 @@ export class CopilotRuntime implements RuntimeAdapter {
     return id;
   }
 
-  /**
-   * Builds the dedicated outgoing send tools for one agent: exactly one
-   * `native_copilot_send_to_<alias>` per entry in its explicit ACL, plus
-   * `native_copilot_send_to_standard` only when its canTalkTo contains the reserved
-   * alias. The ACL is re-enforced inside every handler so a stale tool can never
-   * widen permission.
-   */
-  private createPeerMessageTools(context: AgentContext): Tool<any>[] {
+  /** Builds stable messaging tools whose handlers enforce the agent's current ACL. */
+  private createAgentMessagingTools(context: AgentContext): Tool<any>[] {
     const agentId = context.agentId;
-    return this.peerBindings(context.agent).map((binding) =>
-      defineTool(nativeCopilotTool(`send_to_${binding.alias}`), {
+    return [
+      defineTool(nativeCopilotTool("list_recipients"), {
         description:
-          binding.alias === STANDARD_ALIAS
-            ? "Send a durable asynchronous message to the Standard Copilot session."
-            : `Send a durable asynchronous message to the "${binding.alias}" agent.`,
+          "List only the recipients this agent is currently authorized to message, including " +
+          "their stable alias, durable agent id, current SDK session id, and runtime state.",
+        parameters: z.object({}),
+        skipPermission: true,
+        defer: "never",
+        handler: () => {
+          const source = this.agents.get(agentId);
+          if (!source) {
+            throw new Error(`Agent "${context.alias}" is no longer active.`);
+          }
+          const recipients = [...source.agent.recipients].sort().map((alias) => {
+            if (alias === STANDARD_ALIAS) {
+              const sessionId = this.live.get(STANDARD_TARGET)?.session.sessionId;
+              return {
+                alias,
+                target: STANDARD_TARGET,
+                ...(sessionId === undefined ? {} : { sessionId }),
+                state: this.standard && this.live.has(STANDARD_TARGET) ? "active" : "inactive",
+              };
+            }
+            const recipientId = this.aliasIndex.get(alias);
+            const recipient =
+              recipientId === undefined ? undefined : this.agents.get(recipientId);
+            const sessionId = recipient === undefined ? undefined : this.agentSessionId(recipient);
+            return {
+              alias,
+              ...(recipient === undefined
+                ? {}
+                : { agentId: recipient.agentId, target: recipient.target }),
+              ...(sessionId === undefined ? {} : { sessionId }),
+              state: recipient === undefined ? "inactive" : this.agentState(recipient),
+            };
+          });
+          return { recipients };
+        },
+      }),
+      defineTool(nativeCopilotTool("send_message"), {
+        description:
+          "Send a durable asynchronous message to one authorized recipient. Identify it with an " +
+          "alias, durable agent id, or current SDK session id returned by " +
+          "native_copilot_list_recipients. The host revalidates the current ACL; knowing a session " +
+          "id never grants permission.",
         parameters: z.object({
+          recipient: z
+            .string()
+            .min(1)
+            .describe("Authorized recipient alias, durable agent id, or current SDK session id."),
           subject: z.string().min(1).optional(),
           message: z.string().min(1),
         }),
         skipPermission: true,
         defer: "never",
-        handler: ({ subject, message }) => {
+        handler: ({ recipient: selector, subject, message }) => {
           const source = this.agents.get(agentId);
           if (!source) {
             throw new Error(`Agent "${context.alias}" is no longer active.`);
           }
-          if (!source.agent.recipients.has(binding.alias)) {
-            throw new Error(
-              `Agent "${source.alias}" is not permitted to message "${binding.alias}".`,
-            );
-          }
-          const recipient =
-            binding.alias === STANDARD_ALIAS
-              ? this.standardRecipient()
-              : this.agentRecipient(binding.alias, binding.agentId);
+          const resolved = this.allowedRecipient(source, selector);
           const id = this.enqueueDurableMessage(
             source.alias,
-            recipient,
+            resolved.recipient,
             subject,
             message,
             source.target,
           );
-          return { deliveredToMailbox: recipient.alias, messageId: id };
+          return {
+            deliveredToMailbox: resolved.recipient.alias,
+            ...(resolved.sessionId === undefined ? {} : { sessionId: resolved.sessionId }),
+            messageId: id,
+          };
         },
-      })
-    );
+      }),
+    ];
   }
 
   private async connectSession(options: {
@@ -2513,7 +2567,6 @@ export class CopilotRuntime implements RuntimeAdapter {
         });
       }
     }
-    await this.reconnectStalePeers();
     return results;
   }
 
@@ -2609,7 +2662,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       });
       const target = context.target;
       queueMicrotask(() => void this.drainMailbox(target));
-      await this.reconnectStalePeers();
     } catch (error) {
       await this.failAgent(context, "Agent recovery failed");
       throw error;
@@ -2722,11 +2774,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     };
   }
 
-  /**
-   * Removes a departed alias from every remaining agent's outgoing ACL so no agent
-   * keeps a send tool for an agent that no longer exists, and reconnects the ones
-   * whose tools changed.
-   */
+  /** Removes a departed alias from every remaining agent's outgoing ACL. */
   private async pruneRecipient(alias: string): Promise<string[]> {
     const pruned: string[] = [];
     for (const context of [...this.agents.values()]) {
@@ -2768,8 +2816,8 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   /**
    * Reconnects an agent whenever anything its SessionConfig is derived from changed:
-   * prompt, task, model, reasoning, permissions, MCP subset, or the resolved peer
-   * send tools. The session id and conversation history are preserved.
+   * prompt, task, model, reasoning, permissions, MCP subset, or ACL. The session id
+   * and conversation history are preserved.
    */
   private async reconnectIfConfigChanged(context: AgentContext): Promise<boolean> {
     const live = this.live.get(context.target);
@@ -2784,11 +2832,11 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   // Reconnects one agent in place, preserving its SDK session id and history while
-  // rebuilding its complete session config from the current definition and alias
-  // resolution. Several callers can be waiting on the same in-flight connection, so
-  // each pass re-enters the shared guard (which joins rather than duplicates) and
-  // then verifies the resulting session really was built from the current config;
-  // a session joined from an older connect is replaced on the next pass.
+  // rebuilding its complete session config from the current definition. Several
+  // callers can be waiting on the same in-flight connection, so each pass re-enters
+  // the shared guard (which joins rather than duplicates) and then verifies the
+  // resulting session really was built from the current config; a session joined
+  // from an older connect is replaced on the next pass.
   private async reconnectAgent(context: AgentContext): Promise<void> {
     const target = context.target;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -2833,28 +2881,6 @@ export class CopilotRuntime implements RuntimeAdapter {
     throw new Error(
       `Agent "${context.alias}" could not be reconnected with its current configuration.`,
     );
-  }
-
-  // After agents start or are recovered, refreshes any live agent whose session
-  // config no longer matches — most often because a peer alias now resolves to a
-  // different UUID target.
-  private async reconnectStalePeers(): Promise<void> {
-    for (const context of [...this.agents.values()]) {
-      try {
-        await this.reconnectIfConfigChanged(context);
-      } catch (error) {
-        this.emit(
-          "agent.error",
-          {
-            ...this.agentPayload(context),
-            message: `Peer tool refresh failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          },
-          { runId: context.runId, memberId: STANDARD_TARGET, target: "activity", done: true },
-        );
-      }
-    }
   }
 
   // Tears down an agent that could not start or recover, closing its run so no

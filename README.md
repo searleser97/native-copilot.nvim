@@ -248,9 +248,8 @@ stoppable, recoverable, configurable, and addressable. If Standard needs to reme
 team or workflow, it may keep that relationship in its conversation or a workspace file; the host
 does not interpret or own that grouping.
 
-Aliases must be unique among active and recoverable agents in the workspace. They are used in
-generated tool names, while UUID targets prevent routing ambiguity and remain stable if display
-names change.
+Aliases must be unique among active and recoverable agents in the workspace. UUID targets prevent
+routing ambiguity and remain stable if display names change.
 
 Each Neovim process owns an independent host and runtime. Active runs record their owning host
 process, so another Neovim instance never recovers or modifies live work. Runs whose owning host has
@@ -327,12 +326,22 @@ the Copilot runtime chooses its default model.
 
 ## Messaging and recovery
 
-Every agent receives one tool per explicitly declared outgoing recipient:
-`native_copilot_send_to_planner`, `native_copilot_send_to_tester`, and so on.
-`native_copilot_send_to_standard` exists only when that agent's `canTalkTo` explicitly contains
-`standard`. Standard-to-agent communication is a separate permission granted through
-`standardCanTalkTo`; the guarded `native_copilot_send_to_agent` tool rejects every agent not
-explicitly listed. Neither direction is enabled merely because Standard spawned the agent.
+Every agent receives the same two stable tools:
+
+- `native_copilot_list_recipients` returns only its explicitly authorized recipients with their
+  alias, durable UUID, current SDK session ID, and runtime state.
+- `native_copilot_send_message` sends to one of those recipients by alias, UUID, or current session
+  ID.
+
+There are no generated per-recipient tools. The model may retain aliases such as `reviewer1` and
+`reviewer2` in conversation memory or a workspace coordination file, but the host's SQLite-backed
+agent registry remains authoritative for delivery. The host resolves the supplied identifier and
+rechecks the source agent's current `canTalkTo` ACL; possessing or guessing another session ID never
+grants access.
+
+Standard-to-agent communication is a separate permission granted through `standardCanTalkTo`; the
+guarded `native_copilot_send_to_agent` tool rejects every agent not explicitly listed. Neither
+direction is enabled merely because Standard spawned the agent.
 
 Messages are written transactionally to SQLite before delivery. Busy recipients are not interrupted; their mailbox is drained after the session becomes idle. Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after restart.
 

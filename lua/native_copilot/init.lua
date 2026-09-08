@@ -830,6 +830,13 @@ local function task_at_cursor()
   return item, member_id
 end
 
+local function is_agent_message_tool(name)
+  return name == 'write_agent'
+    or name == 'native_copilot_send_message'
+    or name == 'native_copilot_send_to_agent'
+    or name:find('^send_to_') ~= nil
+end
+
 local function tool_timeline_detail(tool_name, arguments, status)
   if type(arguments) ~= 'table' then return end
 
@@ -839,7 +846,7 @@ local function tool_timeline_detail(tool_name, arguments, status)
     detail = json_value(arguments.description)
       or json_value(arguments.summary)
       or json_value(arguments.prompt)
-  elseif name == 'write_agent' or name:find('^send_to_') then
+  elseif is_agent_message_tool(name) then
     detail = json_value(arguments.message) or json_value(arguments.content)
       or json_value(arguments.description)
       or json_value(arguments.summary)
@@ -884,7 +891,7 @@ local function agent_tool_prompt(tool_name, arguments)
   local name = tostring(tool_name or ''):lower()
   if name == 'task' then
     return json_value(arguments.prompt)
-  elseif name == 'write_agent' or name:find('^send_to_') then
+  elseif is_agent_message_tool(name) then
     return json_value(arguments.message) or json_value(arguments.content)
   end
 end
