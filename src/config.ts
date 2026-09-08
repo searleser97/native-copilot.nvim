@@ -74,9 +74,10 @@ export const dynamicAgentSchema = z.object({
       "grants no incoming permission.",
   ),
   canObserve: z.array(z.string().min(1)).describe(
-    "Directional passive-observation grants. Each alias allows this agent to read that active " +
-      "agent's SDK event history through native_copilot_read_agent_activity without prompting or " +
-      "interrupting it. This is independent from canTalkTo.",
+    'Directional passive-observation grants. Each peer alias, or the reserved alias "standard", ' +
+      "allows this agent to read that session's SDK event history through " +
+      "native_copilot_read_agent_activity without prompting or interrupting it. This is " +
+      "independent from canTalkTo.",
   ),
   ui: z.object({
     icon: z.string().min(1).optional(),
@@ -177,7 +178,7 @@ export function validateAgentDefinition(
       if (referenced === normalized.id) {
         continue;
       }
-      if (field === "canTalkTo" && referenced === STANDARD_ALIAS) {
+      if (referenced === STANDARD_ALIAS) {
         continue;
       }
       if (!aliasPattern.test(referenced)) {

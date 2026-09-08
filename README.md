@@ -351,9 +351,10 @@ direction is enabled merely because Standard spawned the agent.
 ## Passive agent activity
 
 `canObserve` is independent from `canTalkTo`. It grants one agent permission to call
-`native_copilot_read_agent_activity` for another active agent without sending that agent a prompt.
-`standardCanObserve` grants the same passive access to Standard. Both ACLs are revalidated on every
-read and may be replaced dynamically with `native_copilot_update_agent`.
+`native_copilot_read_agent_activity` for another active agent, or for the reserved `standard`
+session, without sending that session a prompt. `standardCanObserve` grants Standard the same
+passive access to a spawned agent. Both ACLs are revalidated on every read and may be replaced
+dynamically with `native_copilot_update_agent`.
 
 The activity tool reads the target's authoritative SDK history with `session.getEvents()` and
 returns raw chronological events so the caller can infer status generically. Completed user and

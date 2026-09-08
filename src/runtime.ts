@@ -1586,24 +1586,37 @@ export class CopilotRuntime implements RuntimeAdapter {
         if (observerAgentId !== undefined && !source) {
           throw new Error(`Agent "${observer?.alias ?? observerAgentId}" is no longer active.`);
         }
-        const target = this.requireAgent(agent);
-        if (source?.agentId !== target.agentId) {
+        const standardLive = this.live.get(STANDARD_TARGET);
+        const targetsStandard =
+          agent === STANDARD_ALIAS ||
+          agent === STANDARD_TARGET ||
+          agent === standardLive?.session.sessionId;
+        const targetAgent = targetsStandard ? undefined : this.requireAgent(agent);
+        const targetId = targetAgent?.agentId ?? STANDARD_TARGET;
+        const targetAlias = targetAgent?.alias ?? STANDARD_ALIAS;
+        const targetRuntimeId = targetAgent?.target ?? STANDARD_TARGET;
+        if (!targetsStandard && source?.agentId !== targetAgent!.agentId) {
           const allowed =
             source === undefined
-              ? target.agent.standardCanObserve
-              : source.agent.observes.has(target.alias);
+              ? targetAgent!.agent.standardCanObserve
+              : source.agent.observes.has(targetAlias);
           if (!allowed) {
             const caller = source?.alias ?? STANDARD_ALIAS;
             throw new Error(
-              `Agent "${caller}" is not allowed to inspect "${target.alias}" under the current ` +
+              `Agent "${caller}" is not allowed to inspect "${targetAlias}" under the current ` +
                 "observation rules.",
             );
           }
+        } else if (targetsStandard && source !== undefined && !source.agent.observes.has(STANDARD_ALIAS)) {
+          throw new Error(
+            `Agent "${source.alias}" is not allowed to inspect "standard" under the current ` +
+              "observation rules.",
+          );
         }
 
-        const live = await this.activeSession(target.target);
+        const live = await this.activeSession(targetRuntimeId);
         const observerId = source?.agentId ?? STANDARD_TARGET;
-        const storedCursor = this.db.activityCursor(observerId, target.agentId);
+        const storedCursor = this.db.activityCursor(observerId, targetId);
         let readCursor =
           acknowledgeCursor ??
           (storedCursor?.sessionId === live.session.sessionId
@@ -1645,7 +1658,7 @@ export class CopilotRuntime implements RuntimeAdapter {
             if (page.cursorStatus === "ok") {
               this.db.advanceActivityCursor(
                 observerId,
-                target.agentId,
+                targetId,
                 live.session.sessionId,
                 acknowledgeCursor!,
               );
@@ -1719,11 +1732,14 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
         return {
           agent: {
-            alias: target.alias,
-            agentId: target.agentId,
+            alias: targetAlias,
+            ...(targetAgent === undefined ? {} : { agentId: targetAgent.agentId }),
             sessionId: live.session.sessionId,
           },
-          currentState: this.agentState(target),
+          currentState:
+            targetAgent === undefined
+              ? (live.foregroundBusy ? "busy" : "idle")
+              : this.agentState(targetAgent),
           events,
           eventCount: events.length,
           serializedBytes,
