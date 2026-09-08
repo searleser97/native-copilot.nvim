@@ -337,7 +337,9 @@ There are no generated per-recipient tools. The model may retain aliases such as
 `reviewer2` in conversation memory or a workspace coordination file, but the host's SQLite-backed
 agent registry remains authoritative for delivery. The host resolves the supplied identifier and
 rechecks the source agent's current `canTalkTo` ACL; possessing or guessing another session ID never
-grants access.
+grants access. Identity resolution and authorization are separate: a known but unauthorized
+alias, UUID, or session ID returns an explicit communication-rule denial, while an identifier that
+does not resolve to an active managed agent returns an unknown-recipient error.
 
 Standard-to-agent communication is a separate permission granted through `standardCanTalkTo`; the
 guarded `native_copilot_send_to_agent` tool rejects every agent not explicitly listed. Neither

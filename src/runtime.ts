@@ -1736,20 +1736,23 @@ export class CopilotRuntime implements RuntimeAdapter {
       return { recipient: this.standardRecipient(), sessionId: standardSessionId };
     }
 
-    const matched = [...this.agents.values()].find((candidate) => {
-      if (!current.agent.recipients.has(candidate.alias)) {
-        return false;
-      }
-      return (
+    const matched = [...this.agents.values()].find(
+      (candidate) =>
         selector === candidate.alias ||
         selector === candidate.agentId ||
-        selector === this.agentSessionId(candidate)
-      );
-    });
+        selector === this.agentSessionId(candidate),
+    );
     if (!matched) {
       throw new Error(
-        `Recipient "${selector}" is not an active agent permitted by "${current.alias}". ` +
-          "Call native_copilot_list_recipients to refresh the authorized mapping.",
+        `Recipient "${selector}" is not a known active agent. Call ` +
+          "native_copilot_list_recipients to refresh the authorized mapping.",
+      );
+    }
+    if (!current.agent.recipients.has(matched.alias)) {
+      throw new Error(
+        `Agent "${current.alias}" is not allowed to send messages to "${matched.alias}" under ` +
+          `the current communication rules. "${matched.alias}" is not in this agent's canTalkTo ` +
+          "ACL.",
       );
     }
     return {
