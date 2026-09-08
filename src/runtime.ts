@@ -2158,7 +2158,15 @@ export class CopilotRuntime implements RuntimeAdapter {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const missing = message.includes("Session not found:");
-        if (!resumeExisting || !missing || this.db.hasConversationActivity(runId)) {
+        // A managed agent has already received a durable definition and initial task.
+        // Replacing a missing SDK session with an empty one would silently discard
+        // that task and any schedules or state created while executing it.
+        if (
+          !resumeExisting ||
+          !missing ||
+          agentId !== undefined ||
+          this.db.hasConversationActivity(runId)
+        ) {
           throw error;
         }
         session = await client.createSession(config);
