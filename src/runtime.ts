@@ -1627,7 +1627,12 @@ export class CopilotRuntime implements RuntimeAdapter {
             max: requested,
             includeEphemeral: false,
           });
-          cursorReset ||= page.cursorStatus === "expired";
+          if (page.cursorStatus === "expired") {
+            cursorReset = true;
+            events.length = 0;
+            serializedBytes = 0;
+            acknowledgedCursor = undefined;
+          }
           if (acknowledgementPending) {
             if (page.cursorStatus === "ok") {
               this.db.advanceActivityCursor(
@@ -1654,7 +1659,12 @@ export class CopilotRuntime implements RuntimeAdapter {
               max: 1,
               includeEphemeral: false,
             });
-            cursorReset ||= page.cursorStatus === "expired";
+            if (page.cursorStatus === "expired") {
+              cursorReset = true;
+              events.length = 0;
+              serializedBytes = 0;
+              acknowledgedCursor = undefined;
+            }
             pageEvents = page.events.filter(
               (event) => !omittedActivityEventTypes.has(event.type),
             );
