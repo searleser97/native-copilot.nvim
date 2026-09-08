@@ -1563,17 +1563,23 @@ export class CopilotRuntime implements RuntimeAdapter {
       description:
         "Read the target agent's raw SDK events since this caller last checked, without sending " +
         "the target a prompt. The caller must have an explicit canObserve grant. Results preserve " +
-        "unknown future event types, omit streaming message/reasoning deltas, and advance a " +
-        "per-caller cursor only through the events returned in this page.",
+        "unknown future event types and omit streaming message/reasoning deltas. Pass the previous " +
+        "result's nextCursor as acknowledgeCursor on the next call; only that acknowledgement " +
+        "durably advances the per-caller position, so a result lost in transit is replayed.",
       parameters: z.object({
         agent: z
           .string()
           .min(1)
           .describe("Active target agent alias, durable agent id, target id, run id, or session id."),
+        acknowledgeCursor: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("The exact nextCursor received from the previous successful page."),
       }),
       skipPermission: true,
       defer: "never",
-      handler: async ({ agent }) => {
+      handler: async ({ agent, acknowledgeCursor }) => {
         const source =
           observerAgentId === undefined ? undefined : this.agents.get(observerAgentId);
         if (observerAgentId !== undefined && !source) {
@@ -1595,50 +1601,94 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
 
         const live = await this.activeSession(target.target);
-        const history = await live.session.getEvents();
         const observerId = source?.agentId ?? STANDARD_TARGET;
-        const cursor = this.db.activityCursor(observerId, target.agentId);
-        let cursorReset = false;
-        let startIndex = 0;
-        if (cursor?.sessionId === live.session.sessionId) {
-          const cursorIndex = history.findIndex((event) => event.id === cursor.lastEventId);
-          if (cursorIndex >= 0) {
-            startIndex = cursorIndex + 1;
-          } else {
-            cursorReset = true;
-          }
-        } else if (cursor !== undefined) {
-          cursorReset = true;
-        }
-
+        const storedCursor = this.db.activityCursor(observerId, target.agentId);
+        let readCursor =
+          acknowledgeCursor ??
+          (storedCursor?.sessionId === live.session.sessionId
+            ? storedCursor.cursor
+            : undefined);
+        let acknowledgedCursor =
+          storedCursor?.sessionId === live.session.sessionId
+            ? storedCursor.cursor
+            : undefined;
+        let acknowledgementPending = acknowledgeCursor !== undefined;
         const events: SessionEvent[] = [];
         let serializedBytes = 0;
-        let lastReturnedEventId: string | undefined;
-        let index = startIndex;
-        for (; index < history.length; index += 1) {
-          const event = history[index]!;
-          if (omittedActivityEventTypes.has(event.type)) {
-            continue;
+        let nextCursor = readCursor;
+        let hasMore = false;
+        let cursorReset = storedCursor !== undefined &&
+          storedCursor.sessionId !== live.session.sessionId;
+        while (events.length < ACTIVITY_MAX_EVENTS) {
+          const remaining = ACTIVITY_MAX_EVENTS - events.length;
+          const requested = Math.min(20, remaining);
+          let page = await live.session.rpc.eventLog.read({
+            ...(readCursor === undefined ? {} : { cursor: readCursor }),
+            max: requested,
+            includeEphemeral: false,
+          });
+          cursorReset ||= page.cursorStatus === "expired";
+          if (acknowledgementPending) {
+            if (page.cursorStatus === "ok") {
+              this.db.advanceActivityCursor(
+                observerId,
+                target.agentId,
+                live.session.sessionId,
+                acknowledgeCursor!,
+              );
+              acknowledgedCursor = acknowledgeCursor;
+            }
+            acknowledgementPending = false;
           }
-          const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+          let pageEvents = page.events.filter(
+            (event) => !omittedActivityEventTypes.has(event.type),
+          );
+          let pageBytes = Buffer.byteLength(JSON.stringify(pageEvents), "utf8");
+
           if (
-            events.length >= ACTIVITY_MAX_EVENTS ||
-            (events.length > 0 && serializedBytes + eventBytes > ACTIVITY_MAX_BYTES)
+            pageEvents.length > 1 &&
+            serializedBytes + pageBytes > ACTIVITY_MAX_BYTES
           ) {
+            page = await live.session.rpc.eventLog.read({
+              ...(readCursor === undefined ? {} : { cursor: readCursor }),
+              max: 1,
+              includeEphemeral: false,
+            });
+            cursorReset ||= page.cursorStatus === "expired";
+            pageEvents = page.events.filter(
+              (event) => !omittedActivityEventTypes.has(event.type),
+            );
+            pageBytes = Buffer.byteLength(JSON.stringify(pageEvents), "utf8");
+          }
+
+          if (
+            pageEvents.length > 0 &&
+            events.length > 0 &&
+            serializedBytes + pageBytes > ACTIVITY_MAX_BYTES
+          ) {
+            hasMore = true;
             break;
           }
-          events.push(event);
-          serializedBytes += eventBytes;
-          lastReturnedEventId = event.id;
-        }
 
-        if (lastReturnedEventId !== undefined) {
-          this.db.advanceActivityCursor(
-            observerId,
-            target.agentId,
-            live.session.sessionId,
-            lastReturnedEventId,
-          );
+          events.push(...pageEvents);
+          serializedBytes += pageBytes;
+          readCursor = page.cursor;
+          nextCursor = page.cursor;
+          hasMore = page.hasMore;
+
+          if (!page.hasMore) {
+            break;
+          }
+          if (page.events.length === 0) {
+            break;
+          }
+          if (serializedBytes >= ACTIVITY_MAX_BYTES) {
+            hasMore = true;
+            break;
+          }
+          if (pageEvents.length === 0) {
+            continue;
+          }
         }
         return {
           agent: {
@@ -1650,11 +1700,9 @@ export class CopilotRuntime implements RuntimeAdapter {
           events,
           eventCount: events.length,
           serializedBytes,
-          hasMore: index < history.length,
-          ...(cursor === undefined ? {} : { previouslySeenThrough: cursor.lastEventId }),
-          ...(lastReturnedEventId === undefined
-            ? {}
-            : { observedThrough: lastReturnedEventId }),
+          hasMore,
+          ...(acknowledgedCursor === undefined ? {} : { acknowledgedThrough: acknowledgedCursor }),
+          ...(nextCursor === undefined ? {} : { nextCursor }),
           ...(cursorReset ? { cursorReset: true } : {}),
           ...(serializedBytes > ACTIVITY_MAX_BYTES ? { oversizedSingleEvent: true } : {}),
           limits: {

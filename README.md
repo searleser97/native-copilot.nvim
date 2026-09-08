@@ -362,11 +362,15 @@ future SDK event types pass through unchanged. Streaming message and reasoning d
 because their completed durable events already contain the useful content. Private hidden
 chain-of-thought is never exposed by the SDK.
 
-Each caller-target pair has an independent cursor. A successful read returns only activity after
-that caller's previous page and advances through the last returned event. Results are bounded to
-100 complete events and approximately 30 KiB of serialized content; if more remains, `hasMore` is
-true and the next call continues from the saved cursor. A single oversized event is returned whole
-rather than corrupted by truncation.
+Each caller-target pair has an independent acknowledged SDK event-log cursor. A read returns
+`nextCursor`; the caller passes it as `acknowledgeCursor` on its next call. Only that later
+acknowledgement becomes durable, so a page lost during result delivery is replayed instead of
+silently skipped. Reads use the SDK's bounded event-log pagination rather than loading the complete
+session history on every request.
+
+Results are bounded to 100 complete events and approximately 30 KiB of serialized content. If more
+remains, `hasMore` is true and the next acknowledged call continues from the returned cursor. A
+single oversized event is returned whole rather than corrupted by truncation.
 
 Messages are written transactionally to SQLite before delivery. Busy recipients are not interrupted; their mailbox is drained after the session becomes idle. Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after restart.
 

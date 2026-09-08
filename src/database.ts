@@ -10,7 +10,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is a single session — the Standard
  * supervisor or one standalone agent — so the schema carries no group state.
  */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export interface StoredMessage {
   id: string;
@@ -52,7 +52,7 @@ export interface StoredAgentRun {
 
 export interface ActivityCursor {
   sessionId: string;
-  lastEventId: string;
+  cursor: string;
   updatedAt: string;
 }
 
@@ -131,6 +131,13 @@ export class AgentDatabase {
         UPDATE schema_meta SET version = ${SCHEMA_VERSION};
         COMMIT;
       `);
+    } else if (schema.version === 7) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        DROP TABLE IF EXISTS activity_cursors;
+        UPDATE schema_meta SET version = ${SCHEMA_VERSION};
+        COMMIT;
+      `);
     }
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(`
@@ -184,7 +191,7 @@ export class AgentDatabase {
         observer_id TEXT NOT NULL,
         target_agent_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
-        last_event_id TEXT NOT NULL,
+        event_cursor TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY(observer_id, target_agent_id)
       );
@@ -593,7 +600,7 @@ export class AgentDatabase {
   activityCursor(observerId: string, targetAgentId: string): ActivityCursor | undefined {
     return this.db
       .prepare(
-        `SELECT session_id AS sessionId, last_event_id AS lastEventId, updated_at AS updatedAt
+        `SELECT session_id AS sessionId, event_cursor AS cursor, updated_at AS updatedAt
          FROM activity_cursors
          WHERE observer_id = ? AND target_agent_id = ?`,
       )
@@ -604,19 +611,19 @@ export class AgentDatabase {
     observerId: string,
     targetAgentId: string,
     sessionId: string,
-    lastEventId: string,
+    cursor: string,
   ): void {
     this.db
       .prepare(
         `INSERT INTO activity_cursors(
-           observer_id, target_agent_id, session_id, last_event_id, updated_at
+           observer_id, target_agent_id, session_id, event_cursor, updated_at
          ) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(observer_id, target_agent_id) DO UPDATE SET
            session_id = excluded.session_id,
-           last_event_id = excluded.last_event_id,
+           event_cursor = excluded.event_cursor,
            updated_at = excluded.updated_at`,
       )
-      .run(observerId, targetAgentId, sessionId, lastEventId, now());
+      .run(observerId, targetAgentId, sessionId, cursor, now());
   }
 
   snapshot(): StateSnapshot {
