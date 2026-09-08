@@ -16,10 +16,10 @@ const alias = z.string().min(1).regex(
   aliasPattern,
   "must start with a lowercase letter and contain only lowercase letters, numbers, and underscores",
 ).describe(
-  "Tool-safe alias used in generated send_to_<alias> tool names and in every user-facing " +
-    "reference to this agent. It must be unique among active and recoverable agents, and must " +
-    'not be the reserved alias "standard". Several agents may share a role or display name as ' +
-    "long as their aliases differ.",
+  "Tool-safe alias used in generated native_copilot_send_to_<alias> tool names and in every " +
+    "user-facing reference to this agent. It must be unique among active and recoverable agents, " +
+    'and must not be the reserved alias "standard". Several agents may share a role or display ' +
+    "name as long as their aliases differ.",
 );
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
@@ -70,8 +70,8 @@ export const dynamicAgentSchema = z.object({
   ),
   canTalkTo: z.array(z.string().min(1)).describe(
     'Directional outgoing recipients: peer aliases, or the reserved alias "standard". Each ' +
-      "entry creates a dedicated send_to_<alias> tool for this agent. It must not contain this " +
-      "agent's own alias, and it grants no incoming permission.",
+      "entry creates a dedicated native_copilot_send_to_<alias> tool for this agent. It must not " +
+      "contain this agent's own alias, and it grants no incoming permission.",
   ),
   ui: z.object({
     icon: z.string().min(1).optional(),
@@ -86,9 +86,9 @@ export const spawnAgentsSchema = z.object({
   ),
   standardCanTalkTo: z.array(z.string().min(1)).describe(
     "Aliases in this request that the Standard session is explicitly allowed to message with " +
-      "send_to_agent. Communication is denied in both directions unless explicitly granted: this " +
-      "list grants Standard→agent only, and an agent's canTalkTo entry of \"standard\" grants " +
-      "agent→Standard only.",
+      "native_copilot_send_to_agent. Communication is denied in both directions unless explicitly " +
+      "granted: this list grants Standard→agent only, and an agent's canTalkTo entry of " +
+      '"standard" grants agent→Standard only.',
   ),
 }).strict();
 

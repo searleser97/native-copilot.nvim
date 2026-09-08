@@ -91,8 +91,9 @@ parsed native policy, so children inherit it by default (see
 [Inherited native configuration](#inherited-native-configuration)). The former
 `vim.g.native_copilot_command`, `NVIM_COPILOT_CMD`, and `COPILOT_CLI_CMD` inputs are not read. If no
 resolver is configured, the SDK's bundled Copilot runtime is used. No agent configuration file is
-required: the `spawn_agents` tool schema lets Standard define agents at runtime. Reusable agent
-recipes can be stored as ordinary prompt snippets and submitted through the prompt buffer.
+required: the `native_copilot_spawn_agents` tool schema lets Standard define agents at runtime.
+Reusable agent recipes can be stored as ordinary prompt snippets and submitted through the prompt
+buffer.
 
 Runtime state is stored at:
 
@@ -227,9 +228,12 @@ session at the bottom, and keeps that entry visible.
 ## Configuration
 
 Agents are not predefined and require no external configuration file. Standard Copilot receives
-guarded `spawn_agents`, `update_agent`, `remove_agent`, `send_to_agent`, and `list_agents` tools.
-Each generated definition selects a unique tool-safe alias, display name, role prompt, initial task,
-model, reasoning effort, permissions, MCP subset, UI metadata, and directional `canTalkTo` targets.
+guarded `native_copilot_spawn_agents`, `native_copilot_update_agent`,
+`native_copilot_remove_agent`, `native_copilot_send_to_agent`, and
+`native_copilot_list_agents` tools. The namespace keeps plugin-owned tools distinct from Copilot
+CLI built-ins. Each generated definition selects a unique tool-safe alias, display name, role
+prompt, initial task, model, reasoning effort, permissions, MCP subset, UI metadata, and
+directional `canTalkTo` targets.
 
 Every generated agent receives:
 
@@ -238,11 +242,11 @@ Every generated agent receives:
 - Its own top-level Copilot SDK session and `session.sessionId`.
 - Its own SQLite run, recovery state, mailbox, permissions, and conversation buffer.
 
-A call to `spawn_agents` may create several agents, but the request is not persisted as a group and
-does not become a lifecycle or routing boundary. Agents remain independently stoppable,
-recoverable, configurable, and addressable. If Standard needs to remember a conceptual team or
-workflow, it may keep that relationship in its conversation or a workspace file; the host does not
-interpret or own that grouping.
+A call to `native_copilot_spawn_agents` may create several agents, but the request is not persisted
+as a group and does not become a lifecycle or routing boundary. Agents remain independently
+stoppable, recoverable, configurable, and addressable. If Standard needs to remember a conceptual
+team or workflow, it may keep that relationship in its conversation or a workspace file; the host
+does not interpret or own that grouping.
 
 Aliases must be unique among active and recoverable agents in the workspace. They are used in
 generated tool names, while UUID targets prevent routing ambiguity and remain stable if display
@@ -294,14 +298,15 @@ recreate a parallel definition:
 Omitting any of these fields inherits the main session's value.
 
 Neovim always starts Standard Copilot with one supervisor session that stays connected for the host
-lifetime. Agents are created when Standard invokes `spawn_agents`, either from an ordinary prompt or
-from `/fleet <objective>`. Requests made while Standard is busy queue until that turn becomes idle.
-Each requested agent then starts independently and receives its own `task`.
+lifetime. Agents are created when Standard invokes `native_copilot_spawn_agents`, either from an
+ordinary prompt or from `/fleet <objective>`. Requests made while Standard is busy queue until that
+turn becomes idle. Each requested agent then starts independently and receives its own `task`.
 
-`update_agent` replaces one complete definition and may change its role prompt, model, reasoning,
-permissions, MCP subset, task, or communication ACL. Configuration changes reconnect the SDK
-session while preserving its session ID and conversation history. `remove_agent` stops only the
-selected agent. `/fleet` without an objective opens per-agent stop and recovery actions.
+`native_copilot_update_agent` replaces one complete definition and may change its role prompt,
+model, reasoning, permissions, MCP subset, task, or communication ACL. Configuration changes
+reconnect the SDK session while preserving its session ID and conversation history.
+`native_copilot_remove_agent` stops only the selected agent. `/fleet` without an objective opens
+per-agent stop and recovery actions.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
 mailbox, communication ACL, and original MCP ceiling. Active runs owned by another Neovim instance
@@ -322,11 +327,12 @@ the Copilot runtime chooses its default model.
 
 ## Messaging and recovery
 
-Every agent receives one tool per explicitly declared outgoing recipient: `send_to_planner`,
-`send_to_tester`, and so on. `send_to_standard` exists only when that agent's `canTalkTo` explicitly
-contains `standard`. Standard-to-agent communication is a separate permission granted through
-`standardCanTalkTo`; the guarded `send_to_agent` tool rejects every agent not explicitly listed.
-Neither direction is enabled merely because Standard spawned the agent.
+Every agent receives one tool per explicitly declared outgoing recipient:
+`native_copilot_send_to_planner`, `native_copilot_send_to_tester`, and so on.
+`native_copilot_send_to_standard` exists only when that agent's `canTalkTo` explicitly contains
+`standard`. Standard-to-agent communication is a separate permission granted through
+`standardCanTalkTo`; the guarded `native_copilot_send_to_agent` tool rejects every agent not
+explicitly listed. Neither direction is enabled merely because Standard spawned the agent.
 
 Messages are written transactionally to SQLite before delivery. Busy recipients are not interrupted; their mailbox is drained after the session becomes idle. Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after restart.
 

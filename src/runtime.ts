@@ -34,6 +34,12 @@ import type {
   SpawnAgentsRequest,
 } from "./types.js";
 
+const TOOL_PREFIX = "native_copilot_";
+
+function nativeCopilotTool(name: string): string {
+  return `${TOOL_PREFIX}${name}`;
+}
+
 export interface RuntimeEmitter {
   (
     type: string,
@@ -1377,13 +1383,14 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private spawnAgentsTool(): Tool<any> {
-    return defineTool("spawn_agents", {
+    return defineTool(nativeCopilotTool("spawn_agents"), {
       description:
         "Spawn one or more standalone durable Copilot agents when the user asks for additional " +
         "agents or when independent planning, implementation, testing, or review would materially " +
         "improve the result. Define every agent completely at runtime: a focused prompt, a concrete " +
         "initial task, least-privilege permissions, only the MCP servers it needs, and directional " +
-        "canTalkTo recipients. Each recipient becomes a dedicated send_to_<alias> tool, and the " +
+        "canTalkTo recipients. Each recipient becomes a dedicated " +
+        "native_copilot_send_to_<alias> tool, and the " +
         'reserved alias "standard" lets an agent message this session. Communication is denied by ' +
         "default in both directions: list an alias in standardCanTalkTo to allow this session to " +
         "message that agent. This request is not a group — every agent gets its own durable " +
@@ -1424,7 +1431,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private updateAgentTool(): Tool<any> {
-    return defineTool("update_agent", {
+    return defineTool(nativeCopilotTool("update_agent"), {
       description:
         "Replace the complete definition of one active agent in place, without disturbing this " +
         "session or any other agent. Identify the agent by alias or by its agent id; the alias is " +
@@ -1432,7 +1439,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         "MCP servers, and canTalkTo — which must respect the permission and MCP ceilings. Set " +
         "standardCanTalk to grant or revoke this session's permission to message the agent. If the " +
         "agent's outgoing recipients change, its live session is reconnected with updated " +
-        "send_to_<alias> tools while preserving its session id and history.",
+        "native_copilot_send_to_<alias> tools while preserving its session id and history.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the active agent to update."),
         definition: dynamicAgentSchema.describe(
@@ -1458,7 +1465,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private removeAgentTool(): Tool<any> {
-    return defineTool("remove_agent", {
+    return defineTool(nativeCopilotTool("remove_agent"), {
       description:
         "Stop and remove one active agent, identified by alias or agent id, without disturbing " +
         "this session or any other agent. The agent is disconnected, its run is closed, and every " +
@@ -1485,11 +1492,12 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private sendToAgentTool(): Tool<any> {
-    return defineTool("send_to_agent", {
+    return defineTool(nativeCopilotTool("send_to_agent"), {
       description:
         "Send a durable asynchronous message to one active agent, identified by alias or agent id. " +
         "This is only permitted for agents explicitly granted to this session through " +
-        "standardCanTalkTo (or a later update_agent); messaging any other agent is rejected.",
+        "standardCanTalkTo (or a later native_copilot_update_agent); messaging any other agent " +
+        "is rejected.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the recipient agent."),
         subject: z.string().min(1).optional(),
@@ -1502,7 +1510,8 @@ export class CopilotRuntime implements RuntimeAdapter {
         if (!context.agent.standardCanTalk) {
           throw new Error(
             `Standard Copilot is not permitted to message agent "${context.alias}". Grant it with ` +
-              "standardCanTalkTo when spawning the agent, or with update_agent.",
+              "standardCanTalkTo when spawning the agent, or with " +
+              "native_copilot_update_agent.",
           );
         }
         const id = this.enqueueDurableMessage(
@@ -1518,7 +1527,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private listAgentsTool(): Tool<any> {
-    return defineTool("list_agents", {
+    return defineTool(nativeCopilotTool("list_agents"), {
       description:
         "List every currently active standalone agent with its alias, agent id, task, outgoing " +
         "recipients, and whether this session is permitted to message it.",
@@ -1760,14 +1769,15 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   /**
    * Builds the dedicated outgoing send tools for one agent: exactly one
-   * `send_to_<alias>` per entry in its explicit ACL, plus `send_to_standard` only
-   * when its canTalkTo contains the reserved alias. The ACL is re-enforced inside
-   * every handler so a stale tool can never widen permission.
+   * `native_copilot_send_to_<alias>` per entry in its explicit ACL, plus
+   * `native_copilot_send_to_standard` only when its canTalkTo contains the reserved
+   * alias. The ACL is re-enforced inside every handler so a stale tool can never
+   * widen permission.
    */
   private createPeerMessageTools(context: AgentContext): Tool<any>[] {
     const agentId = context.agentId;
     return this.peerBindings(context.agent).map((binding) =>
-      defineTool(`send_to_${binding.alias}`, {
+      defineTool(nativeCopilotTool(`send_to_${binding.alias}`), {
         description:
           binding.alias === STANDARD_ALIAS
             ? "Send a durable asynchronous message to the Standard Copilot session."
