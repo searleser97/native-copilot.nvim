@@ -247,13 +247,14 @@ Every participant receives:
 
 A call to `native_copilot_spawn_agents` may create several agents, but the request is not persisted
 as a group and does not become a lifecycle or routing boundary. Agents remain independently
-stoppable, recoverable, configurable, and addressable. If the primary agent needs to remember a
-conceptual team or workflow, it may keep that relationship in its conversation or a workspace file;
-the host does not interpret or own that grouping.
+stoppable, recoverable, configurable, and addressable. Their run rows and aliases are reserved in
+one transaction before any child is announced; SDK session startup remains independent. If the
+primary agent needs to remember a conceptual team or workflow, it may keep that relationship in its
+conversation or a workspace file; the host does not interpret or own that grouping.
 
-Aliases must be unique among active and recoverable additional agents in the workspace. The
-primary uses the default alias `copilot` (migration chooses a nonconflicting fallback if a
-v8 worker already owns it). Aliases are mutable selectors, not ACL
+Aliases cannot collide between the primary and any persisted additional-agent definition in the
+workspace. The primary prefers `copilot` and atomically falls back to `primary`, `primary_2`, and so
+on when a persisted worker already reserves a candidate. Aliases are mutable selectors, not ACL
 principals: UUID targets prevent routing ambiguity, and established grants remain valid when an
 alias or display name changes.
 
@@ -405,9 +406,9 @@ Copilot’s session store remains authoritative for full conversation history. S
 UUID/session mappings, all agent runs (including the primary), UUID-backed communication and
 observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v10
 migrates v8 worker definitions and mailboxes in place, adopts legacy primary-session state into the
-new primary agent when available, enforces non-primary alias reservations atomically, and keeps
-failed primary replacements out of future recovery selection. It does not duplicate conversation
-or SDK event history.
+new primary agent when available, enforces primary/non-primary alias reservations atomically, and
+keeps failed primary replacements out of future recovery selection. It does not duplicate
+conversation or SDK event history.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.

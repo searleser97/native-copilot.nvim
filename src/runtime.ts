@@ -17,7 +17,7 @@ import {
   type Tool,
 } from "@github/copilot-sdk";
 import { z } from "zod";
-import { AgentDatabase } from "./database.js";
+import { AgentAliasConflictError, AgentDatabase } from "./database.js";
 import {
   CALLER_SELECTOR,
   LEGACY_PRIMARY_SELECTOR,
@@ -332,9 +332,19 @@ function storedAgentRecord(value: string): StoredAgentRecord {
   };
 }
 
-function primaryAgentDefinition(): DynamicAgentDefinition {
+function primaryAliasCandidate(attempt: number): string {
+  if (attempt === 0) {
+    return PRIMARY_ALIAS;
+  }
+  if (attempt === 1) {
+    return "primary";
+  }
+  return `primary_${attempt}`;
+}
+
+function primaryAgentDefinition(alias: string): DynamicAgentDefinition {
   return {
-    id: PRIMARY_ALIAS,
+    id: alias,
     displayName: "Copilot",
     description: "Primary user-facing Copilot agent",
     task: "Assist the user in the primary Neovim conversation.",
@@ -1955,6 +1965,12 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private registerAgent(context: AgentContext): void {
+    const existingAgentId = this.aliasIndex.get(context.alias);
+    if (existingAgentId !== undefined && existingAgentId !== context.agentId) {
+      throw new Error(
+        `Alias "${context.alias}" is already used by active agent "${existingAgentId}".`,
+      );
+    }
     this.agents.set(context.agentId, context);
     this.aliasIndex.set(context.alias, context.agentId);
   }
@@ -2640,6 +2656,43 @@ export class CopilotRuntime implements RuntimeAdapter {
     return validated.agent;
   }
 
+  private createFreshPrimaryContext(): AgentContext {
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    for (let attempt = 0; ; attempt += 1) {
+      const alias = primaryAliasCandidate(attempt);
+      const definition = primaryAgentDefinition(alias);
+      const context: AgentContext = {
+        agentId,
+        target: agentTarget(agentId),
+        alias,
+        runId,
+        definition,
+        agent: this.resolveStoredDefinition(definition),
+        canTalkTo: new Set(),
+        canObserve: new Set(),
+        mcpServers: new Set(),
+      };
+      try {
+        this.db.createAgentRun(
+          context.runId,
+          context.agentId,
+          context.alias,
+          this.storedAgentJson(context),
+          this.workspace,
+          process.pid,
+          true,
+        );
+        return context;
+      } catch (error) {
+        if (error instanceof AgentAliasConflictError) {
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
   private claimPrimaryContext(createIfMissing: boolean): PrimaryContextClaim | undefined {
     const stored = this.db.resumablePrimaryRun(this.workspace);
     let context: AgentContext;
@@ -2668,33 +2721,12 @@ export class CopilotRuntime implements RuntimeAdapter {
       if (!createIfMissing) {
         return undefined;
       }
-      const definition = primaryAgentDefinition();
-      const agentId = randomUUID();
-      context = {
-        agentId,
-        target: agentTarget(agentId),
-        alias: definition.id,
-        runId: randomUUID(),
-        definition,
-        agent: this.resolveStoredDefinition(definition),
-        canTalkTo: new Set(),
-        canObserve: new Set(),
-        mcpServers: new Set(),
-      };
-      this.db.createAgentRun(
-        context.runId,
-        context.agentId,
-        context.alias,
-        this.storedAgentJson(context),
-        this.workspace,
-        process.pid,
-        true,
-      );
+      context = this.createFreshPrimaryContext();
     }
 
     this.primaryAgentId = context.agentId;
-    this.registerAgent(context);
     try {
+      this.registerAgent(context);
       const adoptedMessages = this.db.adoptPrimaryMessages(
         context.runId,
         this.workspace,
@@ -2900,9 +2932,6 @@ export class CopilotRuntime implements RuntimeAdapter {
         primaryContext.runId = oldRunId;
         let durableRollbackCompleted = false;
         try {
-          if (oldRunStopped) {
-            this.db.resumeRun(oldRunId, process.pid);
-          }
           let restoredMessages = 0;
           if (newRunCreated) {
             restoredMessages = this.db.rollbackPrimaryReplacement(
@@ -2911,9 +2940,12 @@ export class CopilotRuntime implements RuntimeAdapter {
               this.workspace,
               primaryContext.agentId,
               primaryContext.target,
+              process.pid,
               failureReason,
             );
             durableRollbackCompleted = true;
+          } else if (oldRunStopped) {
+            this.db.resumeRun(oldRunId, process.pid);
           }
           if (oldSessionId === undefined) {
             throw new Error(
@@ -3070,9 +3102,9 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   /**
-   * Starts every agent named by an ephemeral spawn request. Each agent gets its own
-   * durable UUID, run, SDK session, and mailbox and starts independently: one
-   * failure never prevents the others from starting.
+   * Atomically reserves every agent named by an ephemeral spawn request, then starts
+   * their independent SDK sessions. Once reservation and caller ACL persistence
+   * succeed, one session-start failure never prevents the others from starting.
    */
   async spawnAgents(request: SpawnAgentsRequest): Promise<Array<Record<string, unknown>>> {
     await this.openPrimary();
@@ -3122,27 +3154,18 @@ export class CopilotRuntime implements RuntimeAdapter {
         canObserve,
         mcpServers: new Set(mcpServers),
       };
-      this.registerAgent(context);
-      try {
-        this.db.createAgentRun(
-          context.runId,
-          agentId,
-          context.alias,
-          this.storedAgentJson(context),
-          this.workspace,
-          process.pid,
-        );
-      } catch (error) {
-        this.unregisterAgent(context);
-        for (const created of contexts) {
-          this.unregisterAgent(created);
-          this.db.finishRun(created.runId, "interrupted", "Agent batch registration failed");
-        }
-        throw error;
-      }
       contexts.push(context);
-      this.emitAgentLifecycle("agent.loading", context, { recovered: false });
     }
+    this.db.createAgentRuns(
+      contexts.map((context) => ({
+        id: context.runId,
+        agentId: context.agentId,
+        alias: context.alias,
+        definition: this.storedAgentJson(context),
+        workspace: this.workspace,
+        ownerPid: process.pid,
+      })),
+    );
 
     const previousCallerTalk = caller.canTalkTo;
     const previousCallerObserve = caller.canObserve;
@@ -3159,15 +3182,30 @@ export class CopilotRuntime implements RuntimeAdapter {
     } catch (error) {
       caller.canTalkTo = previousCallerTalk;
       caller.canObserve = previousCallerObserve;
-      for (const context of contexts) {
-        this.unregisterAgent(context);
-        this.db.finishRun(
-          context.runId,
-          "interrupted",
+      try {
+        this.db.abandonAgentRunReservations(
+          contexts.map((context) => context.runId),
+          this.workspace,
           "Could not persist the spawning caller's ACL grants",
+        );
+      } catch (cleanupError) {
+        const originalMessage = error instanceof Error ? error.message : String(error);
+        const cleanupMessage =
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        throw new Error(
+          `Could not persist the spawning caller's ACL grants: ${originalMessage}. ` +
+            `The reserved agent batch also could not be abandoned: ${cleanupMessage}`,
+          { cause: error },
         );
       }
       throw error;
+    }
+
+    for (const context of contexts) {
+      this.registerAgent(context);
+    }
+    for (const context of contexts) {
+      this.emitAgentLifecycle("agent.loading", context, { recovered: false });
     }
 
     const results: Array<Record<string, unknown>> = [];
@@ -3241,6 +3279,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     const available = await this.availableMcpServers();
     const mcpServers = new Set(record.mcpServers.filter((server) => available.has(server)));
     this.assertMcpCeiling([definition], mcpServers);
+    this.assertAliasesAvailable([definition.id], stored.agentId);
 
     this.db.resumeRun(runId, process.pid);
     const context: AgentContext = {

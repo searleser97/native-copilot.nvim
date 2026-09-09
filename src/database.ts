@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 const LEGACY_PRIMARY_IDENTITY = "standard";
 const PRIMARY_ALIAS = "copilot";
 const RESERVED_AGENT_ALIAS_INDEX = "runs_reserved_agent_alias_uq";
+const AGENT_ALIAS_CONFLICT_MARKER = "agent alias reservation conflict";
 
 type LegacyRunMode = "standard" | "agent";
 export type RunStatus = "active" | "stopped" | "interrupted";
@@ -66,6 +67,30 @@ export interface ReservedAgentAlias {
   agentId: string;
   runId: string;
   status: RunStatus;
+}
+
+export interface AgentRunReservation {
+  id: string;
+  agentId: string;
+  alias: string;
+  definition: string;
+  workspace: string;
+  ownerPid: number;
+  isPrimary?: boolean;
+}
+
+export class AgentAliasConflictError extends Error {
+  readonly code = "AGENT_ALIAS_CONFLICT";
+
+  constructor(
+    readonly alias: string,
+    readonly workspace: string | undefined,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "AgentAliasConflictError";
+  }
 }
 
 function now(): string {
@@ -287,6 +312,46 @@ export class AgentDatabase {
           "Resolve the duplicate aliases before starting native-copilot.nvim.",
       );
     }
+
+    const primaryCollisions = this.db
+      .prepare(
+        `SELECT primary_run.workspace, primary_run.alias,
+                primary_run.id AS primaryRunId, worker_run.id AS workerRunId
+         FROM runs AS primary_run
+         JOIN runs AS worker_run
+           ON worker_run.workspace = primary_run.workspace
+          AND worker_run.alias = primary_run.alias
+         WHERE primary_run.mode = 'agent' AND primary_run.is_primary = 1
+           AND primary_run.alias IS NOT NULL
+           AND primary_run.agent_id IS NOT NULL
+           AND primary_run.definition IS NOT NULL
+           AND worker_run.mode = 'agent' AND worker_run.is_primary = 0
+           AND worker_run.alias IS NOT NULL
+           AND worker_run.agent_id IS NOT NULL
+           AND worker_run.definition IS NOT NULL
+         ORDER BY primary_run.workspace, primary_run.alias,
+                  primary_run.started_at DESC, worker_run.started_at DESC`,
+      )
+      .all() as unknown as Array<{
+        workspace: string;
+        alias: string;
+        primaryRunId: string;
+        workerRunId: string;
+      }>;
+    if (primaryCollisions.length > 0) {
+      const details = primaryCollisions
+        .map(
+          (conflict) =>
+            `alias "${conflict.alias}" in workspace "${conflict.workspace}" is shared by ` +
+            `primary run "${conflict.primaryRunId}" and non-primary run ` +
+            `"${conflict.workerRunId}"`,
+        )
+        .join("; ");
+      throw new Error(
+        `The Copilot state database contains primary/non-primary alias collisions: ${details}. ` +
+          "Resolve the conflicting persisted aliases before starting native-copilot.nvim.",
+      );
+    }
   }
 
   private ensureAgentAliasConstraints(): void {
@@ -312,6 +377,80 @@ export class AgentDatabase {
           BEGIN
             SELECT RAISE(ABORT, 'agent alias "${LEGACY_PRIMARY_IDENTITY}" is reserved');
           END;
+
+          CREATE TRIGGER IF NOT EXISTS runs_primary_alias_reservation_insert
+          BEFORE INSERT ON runs
+          WHEN NEW.mode = 'agent' AND NEW.is_primary = 1
+            AND NEW.alias IS NOT NULL AND NEW.agent_id IS NOT NULL
+            AND NEW.definition IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM runs AS reserved
+              WHERE reserved.workspace = NEW.workspace
+                AND reserved.alias = NEW.alias
+                AND reserved.mode = 'agent' AND reserved.is_primary = 0
+                AND reserved.alias IS NOT NULL
+                AND reserved.agent_id IS NOT NULL
+                AND reserved.definition IS NOT NULL
+            )
+          BEGIN
+            SELECT RAISE(ABORT, '${AGENT_ALIAS_CONFLICT_MARKER}');
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS runs_primary_alias_reservation_update
+          BEFORE UPDATE OF mode, is_primary, workspace, alias, agent_id, definition ON runs
+          WHEN NEW.mode = 'agent' AND NEW.is_primary = 1
+            AND NEW.alias IS NOT NULL AND NEW.agent_id IS NOT NULL
+            AND NEW.definition IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM runs AS reserved
+              WHERE reserved.id != NEW.id
+                AND reserved.workspace = NEW.workspace
+                AND reserved.alias = NEW.alias
+                AND reserved.mode = 'agent' AND reserved.is_primary = 0
+                AND reserved.alias IS NOT NULL
+                AND reserved.agent_id IS NOT NULL
+                AND reserved.definition IS NOT NULL
+            )
+          BEGIN
+            SELECT RAISE(ABORT, '${AGENT_ALIAS_CONFLICT_MARKER}');
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS runs_non_primary_alias_reservation_insert
+          BEFORE INSERT ON runs
+          WHEN NEW.mode = 'agent' AND NEW.is_primary = 0
+            AND NEW.alias IS NOT NULL AND NEW.agent_id IS NOT NULL
+            AND NEW.definition IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM runs AS reserved
+              WHERE reserved.workspace = NEW.workspace
+                AND reserved.alias = NEW.alias
+                AND reserved.mode = 'agent' AND reserved.is_primary = 1
+                AND reserved.alias IS NOT NULL
+                AND reserved.agent_id IS NOT NULL
+                AND reserved.definition IS NOT NULL
+            )
+          BEGIN
+            SELECT RAISE(ABORT, '${AGENT_ALIAS_CONFLICT_MARKER}');
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS runs_non_primary_alias_reservation_update
+          BEFORE UPDATE OF mode, is_primary, workspace, alias, agent_id, definition ON runs
+          WHEN NEW.mode = 'agent' AND NEW.is_primary = 0
+            AND NEW.alias IS NOT NULL AND NEW.agent_id IS NOT NULL
+            AND NEW.definition IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM runs AS reserved
+              WHERE reserved.id != NEW.id
+                AND reserved.workspace = NEW.workspace
+                AND reserved.alias = NEW.alias
+                AND reserved.mode = 'agent' AND reserved.is_primary = 1
+                AND reserved.alias IS NOT NULL
+                AND reserved.agent_id IS NOT NULL
+                AND reserved.definition IS NOT NULL
+            )
+          BEGIN
+            SELECT RAISE(ABORT, '${AGENT_ALIAS_CONFLICT_MARKER}');
+          END;
         `);
       } catch (error) {
         if (this.isAliasConstraintFailure(error)) {
@@ -331,6 +470,7 @@ export class AgentDatabase {
     return (
       message.includes(RESERVED_AGENT_ALIAS_INDEX) ||
       message.includes("UNIQUE constraint failed: runs.workspace, runs.alias") ||
+      message.includes(AGENT_ALIAS_CONFLICT_MARKER) ||
       message.includes(`agent alias "${LEGACY_PRIMARY_IDENTITY}" is reserved`)
     );
   }
@@ -340,14 +480,18 @@ export class AgentDatabase {
       throw error;
     }
     if (alias === LEGACY_PRIMARY_IDENTITY) {
-      throw new Error(
+      throw new AgentAliasConflictError(
+        alias,
+        workspace,
         `Alias "${alias}" is reserved for primary-agent compatibility and cannot be assigned ` +
           "to an agent.",
         { cause: error },
       );
     }
-    throw new Error(
-      `Alias "${alias}" is already reserved by another recoverable non-primary agent` +
+    throw new AgentAliasConflictError(
+      alias,
+      workspace,
+      `Alias "${alias}" is already reserved by another primary or recoverable agent` +
         `${workspace === undefined ? "" : ` in workspace "${workspace}"`}.`,
       { cause: error },
     );
@@ -835,8 +979,8 @@ export class AgentDatabase {
   }
 
   /**
-   * Atomically adopts pending mail back into the restored primary run and makes the
-   * failed replacement ineligible for all future startup recovery.
+   * Atomically disqualifies a failed replacement, adopts pending mail back into the
+   * previous primary run, and reactivates that run for the current owner.
    */
   rollbackPrimaryReplacement(
     failedRunId: string,
@@ -844,9 +988,14 @@ export class AgentDatabase {
     workspace: string,
     agentId: string,
     target: string,
+    ownerPid: number,
     reason: string,
   ): number {
+    if (failedRunId === restoredRunId) {
+      throw new Error("A failed primary replacement cannot restore the same run.");
+    }
     return this.transaction(() => {
+      const timestamp = now();
       const result = this.db
         .prepare(
           `UPDATE runs
@@ -858,19 +1007,73 @@ export class AgentDatabase {
            WHERE id = ? AND workspace = ? AND mode = 'agent'
              AND is_primary = 1 AND agent_id = ?`,
         )
-        .run(now(), reason, failedRunId, workspace, agentId);
+        .run(timestamp, reason, failedRunId, workspace, agentId);
       if (result.changes !== 1) {
         throw new Error(
           `Failed primary replacement run "${failedRunId}" could not be rolled back.`,
         );
       }
-      return this.adoptAgentMessagesInTransaction(
+      const adoptedMessages = this.adoptAgentMessagesInTransaction(
         restoredRunId,
         workspace,
         agentId,
         target,
       );
+      const restored = this.db
+        .prepare(
+          `UPDATE runs
+           SET recovery_eligible = 1,
+               status = 'active',
+               ended_at = NULL,
+               interruption_reason = NULL,
+               owner_pid = ?
+           WHERE id = ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ? AND status != 'active'`,
+        )
+        .run(ownerPid, restoredRunId, workspace, agentId);
+      if (restored.changes !== 1) {
+        throw new Error(
+          `Previous primary agent run "${restoredRunId}" could not be reactivated.`,
+        );
+      }
+      return adoptedMessages;
     });
+  }
+
+  /** Atomically reserves every durable run in a newly accepted agent batch. */
+  createAgentRuns(runs: readonly AgentRunReservation[]): void {
+    if (runs.length === 0) {
+      return;
+    }
+    let current: AgentRunReservation | undefined;
+    try {
+      this.transaction(() => {
+        const insert = this.db.prepare(
+          `INSERT INTO runs(
+             id, mode, agent_id, alias, definition, is_primary, workspace,
+             status, started_at, owner_pid
+           ) VALUES (?, 'agent', ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        );
+        for (const run of runs) {
+          current = run;
+          insert.run(
+            run.id,
+            run.agentId,
+            run.alias,
+            run.definition,
+            run.isPrimary === true ? 1 : 0,
+            run.workspace,
+            now(),
+            run.ownerPid,
+          );
+        }
+      });
+    } catch (error) {
+      if (current) {
+        this.aliasConflict(error, current.alias, current.workspace);
+      }
+      throw error;
+    }
   }
 
   /** Creates one durable run owned by one UUID-backed agent. */
@@ -883,27 +1086,59 @@ export class AgentDatabase {
     ownerPid: number,
     isPrimary = false,
   ): void {
-    try {
-      this.db
-        .prepare(
-          `INSERT INTO runs(
-             id, mode, agent_id, alias, definition, is_primary, workspace,
-             status, started_at, owner_pid
-           ) VALUES (?, 'agent', ?, ?, ?, ?, ?, 'active', ?, ?)`,
-        )
-        .run(
-          id,
-          agentId,
-          alias,
-          definition,
-          isPrimary ? 1 : 0,
-          workspace,
-          now(),
-          ownerPid,
-        );
-    } catch (error) {
-      this.aliasConflict(error, alias, workspace);
+    this.createAgentRuns([
+      {
+        id,
+        agentId,
+        alias,
+        definition,
+        workspace,
+        ownerPid,
+        isPrimary,
+      },
+    ]);
+  }
+
+  /**
+   * Atomically makes a no-session worker batch non-reserving after its caller ACL
+   * update fails, so none of its aliases can be stranded.
+   */
+  abandonAgentRunReservations(
+    runIds: readonly string[],
+    workspace: string,
+    reason: string,
+  ): void {
+    const ids = [...new Set(runIds)];
+    if (ids.length === 0) {
+      return;
     }
+    if (ids.length !== runIds.length) {
+      throw new Error("Agent run reservation ids must be unique.");
+    }
+    this.transaction(() => {
+      const placeholders = ids.map(() => "?").join(", ");
+      const result = this.db
+        .prepare(
+          `UPDATE runs
+           SET definition = NULL,
+               recovery_eligible = 0,
+               status = 'interrupted',
+               ended_at = COALESCE(ended_at, ?),
+               interruption_reason = ?,
+               owner_pid = NULL
+           WHERE workspace = ? AND mode = 'agent' AND is_primary = 0
+             AND id IN (${placeholders})
+             AND NOT EXISTS (
+               SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+             )`,
+        )
+        .run(now(), reason, workspace, ...ids);
+      if (result.changes !== ids.length) {
+        throw new Error(
+          "The no-session agent batch could not be abandoned safely; no aliases were released.",
+        );
+      }
+    });
   }
 
   private agentRunRows(where: string, ...parameters: Array<string | number>): StoredAgentRun[] {
