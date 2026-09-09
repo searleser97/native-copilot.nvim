@@ -322,6 +322,8 @@ The primary agent is reclaimed through the same stored context/session path on h
 `/resume` keeps its durable agent UUID and dynamic UI target while creating a coherent replacement
 run for the selected SDK conversation. If a managed SDK session is missing, the host reports the
 failure instead of silently creating an empty conversation and losing schedules or state.
+If replacement fails, pending mail is adopted back into the restored run atomically; the failed
+replacement remains available for diagnostics but is excluded from future startup recovery.
 
 ### Validation
 
@@ -401,9 +403,11 @@ becomes idle. Delivery uses leases and idempotent message IDs, so interrupted de
 
 Copilot’s session store remains authoritative for full conversation history. SQLite stores
 UUID/session mappings, all agent runs (including the primary), UUID-backed communication and
-observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v9
-migrates v8 worker definitions and mailboxes in place and adopts legacy primary-session state into the
-new primary agent when available. It does not duplicate conversation or SDK event history.
+observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v10
+migrates v8 worker definitions and mailboxes in place, adopts legacy primary-session state into the
+new primary agent when available, enforces non-primary alias reservations atomically, and keeps
+failed primary replacements out of future recovery selection. It does not duplicate conversation
+or SDK event history.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.

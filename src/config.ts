@@ -10,6 +10,8 @@ import type {
 
 /** Request-local selector for the agent invoking a management tool. */
 export const CALLER_SELECTOR = "caller";
+/** Deprecated compatibility selector that resolves to the current primary agent. */
+export const LEGACY_PRIMARY_SELECTOR = "standard";
 /** Default alias of the agent attached to the primary user-facing buffer. */
 export const PRIMARY_ALIAS = "copilot";
 
@@ -20,7 +22,8 @@ const alias = z.string().min(1).regex(
 ).describe(
   "Tool-safe alias used in agent messaging and every user-facing reference to this agent. It must " +
     `be unique among active and recoverable agents, and must not be the request-local selector ` +
-    `"${CALLER_SELECTOR}". Several agents may share a display name as long as their aliases differ.`,
+    `"${CALLER_SELECTOR}" or a host-reserved compatibility selector. Several agents may share a ` +
+    "display name as long as their aliases differ.",
 );
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
@@ -162,6 +165,13 @@ export function validateAgentDefinition(
   if (normalized.id === CALLER_SELECTOR && options.allowCallerAlias !== true) {
     addIssue(issues, `${path}.id`, `"${CALLER_SELECTOR}" is a request-local selector`);
   }
+  if (normalized.id === LEGACY_PRIMARY_SELECTOR) {
+    addIssue(
+      issues,
+      `${path}.id`,
+      `"${LEGACY_PRIMARY_SELECTOR}" is a reserved compatibility selector`,
+    );
+  }
   for (const field of ["canTalkTo", "canObserve"] as const) {
     const aliases = new Set(normalized[field]);
     if (aliases.has(normalized.id)) {
@@ -171,7 +181,10 @@ export function validateAgentDefinition(
       if (referenced === normalized.id) {
         continue;
       }
-      if (referenced === CALLER_SELECTOR) {
+      if (
+        referenced === CALLER_SELECTOR ||
+        referenced === LEGACY_PRIMARY_SELECTOR
+      ) {
         continue;
       }
       if (referenced.startsWith("agent:") && referenced.length > "agent:".length) {

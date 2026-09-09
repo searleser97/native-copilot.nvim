@@ -20,6 +20,7 @@ import { z } from "zod";
 import { AgentDatabase } from "./database.js";
 import {
   CALLER_SELECTOR,
+  LEGACY_PRIMARY_SELECTOR,
   PRIMARY_ALIAS,
   dynamicAgentSchema,
   spawnAgentsSchema,
@@ -231,6 +232,13 @@ interface AgentContext {
   canObserve: Set<string>;
   /** MCP server ceiling captured from the primary session when the agent started. */
   mcpServers: Set<string>;
+}
+
+interface PrimaryContextClaim {
+  context: AgentContext;
+  recovered: boolean;
+  sessionId: string | undefined;
+  adoptedMessages: number;
 }
 
 /**
@@ -1814,6 +1822,12 @@ export class CopilotRuntime implements RuntimeAdapter {
   private assertAliasesAvailable(aliases: string[], ignoreAgentId?: string): void {
     const reserved = this.db.reservedAgentAliases(this.workspace);
     for (const alias of aliases) {
+      if (alias === LEGACY_PRIMARY_SELECTOR) {
+        throw new Error(
+          `Alias "${alias}" is reserved for primary-agent compatibility and cannot be assigned ` +
+            "to an agent.",
+        );
+      }
       const activeAgentId = this.aliasIndex.get(alias);
       if (activeAgentId !== undefined && activeAgentId !== ignoreAgentId) {
         throw new Error(`Alias "${alias}" is already used by an active agent.`);
@@ -1837,6 +1851,11 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private resolveAgentRef(agentRef: string): AgentContext | undefined {
+    if (agentRef === LEGACY_PRIMARY_SELECTOR) {
+      return this.primaryAgentId === undefined
+        ? undefined
+        : this.agents.get(this.primaryAgentId);
+    }
     if (agentRef.startsWith(AGENT_TARGET_PREFIX)) {
       return this.agents.get(agentRef.slice(AGENT_TARGET_PREFIX.length));
     }
@@ -1958,6 +1977,8 @@ export class CopilotRuntime implements RuntimeAdapter {
       let agentId: string | undefined;
       if (selector === CALLER_SELECTOR) {
         agentId = caller.agentId;
+      } else if (selector === LEGACY_PRIMARY_SELECTOR) {
+        agentId = this.primaryAgentId;
       } else {
         agentId = batchAliases.get(selector) ?? this.aliasIndex.get(selector);
         if (agentId === undefined && selector.startsWith(AGENT_TARGET_PREFIX)) {
@@ -1999,13 +2020,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Agent "${source.alias}" is no longer active.`);
     }
 
-    const matched = [...this.agents.values()].find(
-      (candidate) =>
-        selector === candidate.alias ||
-        selector === candidate.agentId ||
-        selector === candidate.target ||
-        selector === this.agentSessionId(candidate),
-    );
+    const matched = this.resolveAgentRef(selector);
     if (!matched) {
       throw new Error(
         `Recipient "${selector}" is not a known active agent. Call ` +
@@ -2625,18 +2640,11 @@ export class CopilotRuntime implements RuntimeAdapter {
     return validated.agent;
   }
 
-  async openPrimary(): Promise<void> {
-    if (this.primaryAgentId !== undefined) {
-      const existing = this.agents.get(this.primaryAgentId);
-      if (existing) {
-        await this.ensureAgentSession(existing.agentId);
-        return;
-      }
-    }
-
+  private claimPrimaryContext(createIfMissing: boolean): PrimaryContextClaim | undefined {
     const stored = this.db.resumablePrimaryRun(this.workspace);
     let context: AgentContext;
     let recovered = false;
+    let sessionId: string | undefined;
     if (stored) {
       if (!stored.definition) {
         throw new Error(`Primary agent run "${stored.id}" has no stored definition.`);
@@ -2655,7 +2663,11 @@ export class CopilotRuntime implements RuntimeAdapter {
       };
       this.db.resumeRun(stored.id, process.pid);
       recovered = true;
+      sessionId = stored.session?.sessionId;
     } else {
+      if (!createIfMissing) {
+        return undefined;
+      }
       const definition = primaryAgentDefinition();
       const agentId = randomUUID();
       context = {
@@ -2682,23 +2694,61 @@ export class CopilotRuntime implements RuntimeAdapter {
 
     this.primaryAgentId = context.agentId;
     this.registerAgent(context);
-    const adoptedMessages = this.db.adoptPrimaryMessages(
-      context.runId,
-      this.workspace,
-      context.agentId,
-      context.target,
-    );
+    try {
+      const adoptedMessages = this.db.adoptPrimaryMessages(
+        context.runId,
+        this.workspace,
+        context.agentId,
+        context.target,
+      );
+      return { context, recovered, sessionId, adoptedMessages };
+    } catch (error) {
+      this.unregisterAgent(context);
+      this.primaryAgentId = undefined;
+      this.db.finishRun(context.runId, "interrupted", "Primary mailbox recovery failed");
+      throw error;
+    }
+  }
+
+  private async discardLiveRun(target: string, runId: string): Promise<void> {
+    const live = this.live.get(target);
+    if (!live || live.runId !== runId) {
+      return;
+    }
+    this.live.delete(target);
+    live.unsubscribe();
+    await live.session.disconnect().catch(() => undefined);
+    this.db.upsertSession(runId, live.session.sessionId, "disconnected");
+  }
+
+  async openPrimary(): Promise<void> {
+    if (this.primaryAgentId !== undefined) {
+      const existing = this.agents.get(this.primaryAgentId);
+      if (existing) {
+        await this.ensureAgentSession(existing.agentId);
+        return;
+      }
+    }
+
+    const claimed = this.claimPrimaryContext(true)!;
+    const { context, recovered, sessionId, adoptedMessages } = claimed;
     this.emitAgentLifecycle("agent.loading", context, { recovered });
     try {
+      if (recovered && sessionId === undefined) {
+        throw new Error(
+          `Primary agent run "${context.runId}" has no managed SDK session and cannot resume ` +
+            "safely. Use /resume to select an existing Copilot session.",
+        );
+      }
       const live = await this.connectSession({
         runId: context.runId,
         target: context.target,
         agentId: context.agentId,
         alias: context.alias,
-        sessionId: stored?.session?.sessionId,
+        sessionId,
         config: this.agentConfig(context),
         configSignature: this.sessionSignature(context),
-        resumeExisting: stored?.session !== undefined,
+        resumeExisting: recovered,
       });
       this.emitAgentLifecycle("agent.ready", context, {
         recovered,
@@ -2718,6 +2768,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       );
       queueMicrotask(() => void this.drainMailbox(context.target));
     } catch (error) {
+      await this.discardLiveRun(context.target, context.runId);
       const message = error instanceof Error ? error.message : String(error);
       this.emit(
         "agent.error",
@@ -2751,104 +2802,221 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Session "${sessionId}" is active in another process.`);
     }
 
-    await this.openPrimary();
-    const context = this.requirePrimary();
-    await this.withAgentLock(context.agentId, async () => {
-      const oldLive = await this.activeSession(context.target);
-      const oldRunId = context.runId;
-      const oldSessionId = oldLive.session.sessionId;
+    let context =
+      this.primaryAgentId === undefined
+        ? undefined
+        : this.agents.get(this.primaryAgentId);
+    let claimed: PrimaryContextClaim | undefined;
+    if (!context) {
+      claimed = this.claimPrimaryContext(false);
+      if (claimed) {
+        context = claimed.context;
+        this.emitAgentLifecycle("agent.loading", context, { recovered: true });
+      } else {
+        await this.openPrimary();
+        context = this.requirePrimary();
+      }
+    }
+    const claimedContext = claimed !== undefined;
+    const primaryContext = context!;
+    await this.withAgentLock(primaryContext.agentId, async () => {
+      const oldLive = this.live.get(primaryContext.target);
+      const oldRunId = primaryContext.runId;
+      const oldSessionId =
+        oldLive?.session.sessionId ?? this.db.session(oldRunId)?.sessionId;
       const runId = randomUUID();
       this.emit(
         "session.loading",
         {
           mode: "primary-loading",
           sessionId,
-          target: context.target,
-          agentId: context.agentId,
+          target: primaryContext.target,
+          agentId: primaryContext.agentId,
         },
-        { runId, memberId: context.target, target: "status", done: false },
+        { runId, memberId: primaryContext.target, target: "status", done: false },
       );
-      oldLive.unsubscribe();
-      this.live.delete(context.target);
-      await oldLive.session.disconnect().catch(() => undefined);
-      this.db.upsertSession(oldRunId, oldSessionId, "disconnected");
-      this.db.finishRun(oldRunId, "stopped", `Resuming session ${sessionId}`);
-      context.runId = runId;
-      this.db.createAgentRun(
-        runId,
-        context.agentId,
-        context.alias,
-        this.storedAgentJson(context),
-        this.workspace,
-        process.pid,
-        true,
-      );
-      const adoptedMessages = this.db.adoptAgentMessages(
-        runId,
-        this.workspace,
-        context.agentId,
-        context.target,
-      );
+      let oldRunStopped = false;
+      let newRunCreated = false;
       try {
+        if (oldLive) {
+          oldLive.unsubscribe();
+          this.live.delete(primaryContext.target);
+          await oldLive.session.disconnect().catch(() => undefined);
+          this.db.upsertSession(oldRunId, oldLive.session.sessionId, "disconnected");
+        }
+        this.db.finishRun(oldRunId, "stopped", `Resuming session ${sessionId}`);
+        oldRunStopped = true;
+        primaryContext.runId = runId;
+        this.db.createAgentRun(
+          runId,
+          primaryContext.agentId,
+          primaryContext.alias,
+          this.storedAgentJson(primaryContext),
+          this.workspace,
+          process.pid,
+          true,
+        );
+        newRunCreated = true;
+        const adoptedMessages = this.db.adoptAgentMessages(
+          runId,
+          this.workspace,
+          primaryContext.agentId,
+          primaryContext.target,
+        );
         const live = await this.connectSession({
           runId,
-          target: context.target,
-          agentId: context.agentId,
-          alias: context.alias,
+          target: primaryContext.target,
+          agentId: primaryContext.agentId,
+          alias: primaryContext.alias,
           sessionId,
-          config: this.agentConfig(context),
-          configSignature: this.sessionSignature(context),
+          config: this.agentConfig(primaryContext),
+          configSignature: this.sessionSignature(primaryContext),
           resumeExisting: true,
         });
+        if (claimedContext) {
+          this.emitAgentLifecycle("agent.ready", primaryContext, {
+            recovered: true,
+            sessionId: live.session.sessionId,
+          });
+        }
         this.emit(
           "primary.ready",
           {
-            ...this.agentPayload(context),
+            ...this.agentPayload(primaryContext),
             mode: "primary",
             recovered: true,
             sessionId,
             adoptedMessages,
             runId,
           },
-          { runId, memberId: context.target, target: "status", done: true },
+          { runId, memberId: primaryContext.target, target: "status", done: true },
         );
-        queueMicrotask(() => void this.drainMailbox(context.target));
+        queueMicrotask(() => void this.drainMailbox(primaryContext.target));
       } catch (error) {
-        this.db.finishRun(runId, "interrupted", "Primary session replacement failed");
-        context.runId = oldRunId;
+        await this.discardLiveRun(primaryContext.target, runId);
+        const replacementMessage = error instanceof Error ? error.message : String(error);
+        const failureReason =
+          `Primary session replacement with "${sessionId}" failed: ${replacementMessage}`;
+        primaryContext.runId = oldRunId;
+        let durableRollbackCompleted = false;
         try {
-          this.db.resumeRun(oldRunId, process.pid);
-          this.db.adoptAgentMessages(
-            oldRunId,
-            this.workspace,
-            context.agentId,
-            context.target,
-          );
+          if (oldRunStopped) {
+            this.db.resumeRun(oldRunId, process.pid);
+          }
+          let restoredMessages = 0;
+          if (newRunCreated) {
+            restoredMessages = this.db.rollbackPrimaryReplacement(
+              runId,
+              oldRunId,
+              this.workspace,
+              primaryContext.agentId,
+              primaryContext.target,
+              failureReason,
+            );
+            durableRollbackCompleted = true;
+          }
+          if (oldSessionId === undefined) {
+            throw new Error(
+              `Previous primary agent run "${oldRunId}" has no managed SDK session and cannot ` +
+                "be restored safely.",
+            );
+          }
           const restored = await this.connectSession({
             runId: oldRunId,
-            target: context.target,
-            agentId: context.agentId,
-            alias: context.alias,
+            target: primaryContext.target,
+            agentId: primaryContext.agentId,
+            alias: primaryContext.alias,
             sessionId: oldSessionId,
-            config: this.agentConfig(context),
-            configSignature: this.sessionSignature(context),
+            config: this.agentConfig(primaryContext),
+            configSignature: this.sessionSignature(primaryContext),
             resumeExisting: true,
           });
+          if (claimedContext) {
+            this.emitAgentLifecycle("agent.ready", primaryContext, {
+              recovered: true,
+              sessionId: restored.session.sessionId,
+            });
+          }
           this.emit(
             "primary.ready",
             {
-              ...this.agentPayload(context),
+              ...this.agentPayload(primaryContext),
               mode: "primary",
               recovered: true,
               sessionId: restored.session.sessionId,
               runId: oldRunId,
               replacementFailed: true,
+              failedRunId: newRunCreated ? runId : undefined,
+              restoredMessages,
             },
-            { runId: oldRunId, memberId: context.target, target: "status", done: true },
+            { runId: oldRunId, memberId: primaryContext.target, target: "status", done: true },
           );
-        } catch {
-          this.unregisterAgent(context);
+          queueMicrotask(() => void this.drainMailbox(primaryContext.target));
+        } catch (recoveryError) {
+          await this.discardLiveRun(primaryContext.target, oldRunId);
+          let disqualificationError: unknown;
+          if (newRunCreated && !durableRollbackCompleted) {
+            try {
+              this.db.disqualifyPrimaryRun(
+                runId,
+                this.workspace,
+                primaryContext.agentId,
+                failureReason,
+              );
+            } catch (rollbackError) {
+              disqualificationError = rollbackError;
+            }
+          }
+          let oldRunFinalizationError: unknown;
+          try {
+            this.db.finishRun(
+              oldRunId,
+              "interrupted",
+              "Previous primary session could not be restored after replacement failure",
+            );
+          } catch (finalizationError) {
+            oldRunFinalizationError = finalizationError;
+          }
+          this.unregisterAgent(primaryContext);
           this.primaryAgentId = undefined;
+          const recoveryMessage =
+            recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+          const durableDetails = [
+            disqualificationError === undefined
+              ? undefined
+              : `failed replacement disqualification failed: ${
+                  disqualificationError instanceof Error
+                    ? disqualificationError.message
+                    : String(disqualificationError)
+                }`,
+            oldRunFinalizationError === undefined
+              ? undefined
+              : `old run finalization failed: ${
+                  oldRunFinalizationError instanceof Error
+                    ? oldRunFinalizationError.message
+                    : String(oldRunFinalizationError)
+                }`,
+          ].filter((detail): detail is string => detail !== undefined);
+          const combinedMessage =
+            `${failureReason}. Restoring the previous primary session also failed: ` +
+            `${recoveryMessage}` +
+            (durableDetails.length === 0 ? "" : `. ${durableDetails.join("; ")}`);
+          this.emit(
+            "agent.error",
+            {
+              ...this.agentPayload(primaryContext),
+              primary: true,
+              runId: oldRunId,
+              message: combinedMessage,
+              replacementFailed: true,
+              recoveryFailed: true,
+              failedRunId: newRunCreated ? runId : undefined,
+              failedReplacementDisqualified:
+                newRunCreated && (durableRollbackCompleted || disqualificationError === undefined),
+            },
+            { runId: oldRunId, memberId: primaryContext.target, target: "activity", done: true },
+          );
+          throw new Error(combinedMessage, { cause: error });
         }
         throw error;
       }
