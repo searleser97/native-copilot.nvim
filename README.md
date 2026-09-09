@@ -248,9 +248,13 @@ Every participant receives:
 A call to `native_copilot_spawn_agents` may create several agents, but the request is not persisted
 as a group and does not become a lifecycle or routing boundary. Agents remain independently
 stoppable, recoverable, configurable, and addressable. Their run rows and aliases are reserved in
-one transaction before any child is announced; SDK session startup remains independent. If the
-primary agent needs to remember a conceptual team or workflow, it may keep that relationship in its
-conversation or a workspace file; the host does not interpret or own that grouping.
+one transaction before any child is announced; SDK session startup remains independent. A reserved
+additional-agent run becomes recoverable only after its SDK session is persisted and its initial
+task is accepted.
+If one child fails before that point, its alias reservation is released and its UUID is removed
+from the caller/peer ACLs without preventing the other children from starting. If the primary agent
+needs to remember a conceptual team or workflow, it may keep that relationship in its conversation
+or a workspace file; the host does not interpret or own that grouping.
 
 Aliases cannot collide between the primary and any persisted additional-agent definition in the
 workspace. The primary prefers `copilot` and atomically falls back to `primary`, `primary_2`, and so
@@ -311,7 +315,9 @@ idle. Each requested agent then starts independently and receives its own `task`
 `native_copilot_update_agent` replaces one complete definition and may change its operating prompt,
 model, reasoning, permissions, MCP subset, task, communication ACL, or observation ACL.
 Configuration changes reconnect the SDK session while preserving its session ID and conversation
-history.
+history. While a stop, replacement, recovery, or reconnect is in progress, that agent is explicitly
+transitioning: passive activity reads return a temporary-unavailable error, and ordinary activation
+or mailbox work cannot recreate or attach to the superseded run.
 `native_copilot_remove_agent` stops only the selected agent. `/fleet` without an objective opens
 per-agent stop and recovery actions.
 
@@ -398,16 +404,19 @@ remains, `hasMore` is true and the next acknowledged call continues from the ret
 single oversized event is returned whole rather than corrupted by truncation.
 
 Messages store UUID-backed source/target identities and are written transactionally to SQLite
-before delivery. Busy recipients are not interrupted; their mailbox is drained after the session
-becomes idle. Delivery uses leases and idempotent message IDs, so interrupted delivery returns to
-`pending` after restart.
+before delivery. Busy recipients are not interrupted; each idle cycle claims and submits at most one
+message in SDK `immediate` mode. A transmission failure releases the claim to `pending` and schedules
+a bounded-backoff wakeup, while a message is marked delivered only after the SDK accepts it.
+Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after
+restart.
 
 Copilot’s session store remains authoritative for full conversation history. SQLite stores
 UUID/session mappings, all agent runs (including the primary), UUID-backed communication and
-observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v10
-migrates v8 worker definitions and mailboxes in place, adopts legacy primary-session state into the
-new primary agent when available, enforces primary/non-primary alias reservations atomically, and
-keeps failed primary replacements out of future recovery selection. It does not duplicate
+observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v11 adds
+explicit startup durability to v10 state. Migrations take the SQLite write lock before reading the
+schema version, migrate v8 worker definitions and mailboxes in place, adopt legacy primary-session
+state into the new primary agent idempotently, enforce primary/non-primary alias reservations
+atomically, and keep failed or taskless startups out of recovery selection. It does not duplicate
 conversation or SDK event history.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it

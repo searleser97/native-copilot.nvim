@@ -11,13 +11,14 @@ const AGENT_ALIAS_CONFLICT_MARKER = "agent alias reservation conflict";
 
 type LegacyRunMode = "standard" | "agent";
 export type RunStatus = "active" | "stopped" | "interrupted";
+export type RunStartupState = "reserved" | "session_created" | "ready" | "failed";
 export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
 
 /**
  * Current durable schema version. Every run is one UUID-backed agent session; a
  * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 export interface StoredMessage {
   id: string;
@@ -30,6 +31,10 @@ export interface StoredMessage {
   sequence: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ClaimedMessage extends StoredMessage {
+  deliveryAttempts: number;
 }
 
 export interface StateSnapshot {
@@ -50,6 +55,7 @@ export interface StoredAgentRun {
   alias: string;
   definition: string | null;
   isPrimary: boolean;
+  startupState: RunStartupState;
   status: RunStatus;
   startedAt: string;
   endedAt: string | null;
@@ -77,6 +83,12 @@ export interface AgentRunReservation {
   workspace: string;
   ownerPid: number;
   isPrimary?: boolean;
+}
+
+export interface AgentRunDefinitionUpdate {
+  id: string;
+  alias: string;
+  definition: string;
 }
 
 export class AgentAliasConflictError extends Error {
@@ -108,109 +120,115 @@ export class AgentDatabase {
 
   /**
    * Brings the database to {@link SCHEMA_VERSION}. Pre-v6 state is rebuilt as before;
-   * v6-v9 agent runs and mailboxes are migrated in place. A database written by a
+   * v6-v10 agent runs and mailboxes are migrated in place. A database written by a
    * newer host is never erased.
    */
   private migrate(): void {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
-
-      CREATE TABLE IF NOT EXISTS schema_meta (
-        version INTEGER NOT NULL
-      );
-      INSERT INTO schema_meta(version)
-      SELECT ${SCHEMA_VERSION}
-      WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+      PRAGMA foreign_keys = OFF;
     `);
-    const schema = this.db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as {
-      version: number;
-    };
-    if (schema.version > SCHEMA_VERSION) {
-      throw new Error(
-        `The Copilot state database is at schema version ${schema.version}, which is newer than ` +
-          `this host understands (${SCHEMA_VERSION}). Update native-copilot.nvim instead of ` +
-          "opening it with an older host; the newer state is left untouched.",
-      );
-    }
-    if (schema.version < 6) {
-      this.db.exec("PRAGMA foreign_keys = OFF");
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        DROP TABLE IF EXISTS activity_cursors;
-        DROP TABLE IF EXISTS checkpoints;
-        DROP TABLE IF EXISTS delivery_leases;
-        DROP TABLE IF EXISTS messages;
-        DROP TABLE IF EXISTS events;
-        DROP TABLE IF EXISTS member_sessions;
-        DROP TABLE IF EXISTS agent_sessions;
-        DROP TABLE IF EXISTS runs;
-        UPDATE schema_meta SET version = ${SCHEMA_VERSION};
-        COMMIT;
-      `);
-    }
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS runs (
-        id TEXT PRIMARY KEY,
-        mode TEXT NOT NULL CHECK(mode IN ('standard', 'agent')),
-        agent_id TEXT,
-        alias TEXT,
-        definition TEXT,
-        standard_can_talk INTEGER NOT NULL DEFAULT 0,
-        standard_can_observe INTEGER NOT NULL DEFAULT 0,
-        is_primary INTEGER NOT NULL DEFAULT 0,
-        recovery_eligible INTEGER NOT NULL DEFAULT 1,
-        workspace TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
-        started_at TEXT NOT NULL,
-        ended_at TEXT,
-        interruption_reason TEXT,
-        owner_pid INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS runs_agent_idx ON runs(agent_id);
-
-      CREATE TABLE IF NOT EXISTS agent_sessions (
-        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-        session_id TEXT NOT NULL,
-        state TEXT NOT NULL,
-        last_active_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        source TEXT NOT NULL,
-        target TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('user', 'agent', 'system')),
-        content TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed')),
-        sequence INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(run_id, target, sequence)
-      );
-
-      CREATE TABLE IF NOT EXISTS delivery_leases (
-        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-        target TEXT NOT NULL,
-        lease_until TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS activity_cursors (
-        observer_id TEXT NOT NULL,
-        target_agent_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        event_cursor TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY(observer_id, target_agent_id)
-      );
-    `);
-    if (schema.version >= 6 && schema.version < SCHEMA_VERSION) {
+    // SQLite ignores PRAGMA foreign_keys changes inside a transaction. Disable it
+    // before taking the migration write lock so the pre-v6 rebuild remains legal,
+    // then keep every schema read and mutation under that same lock.
+    let transactionStarted = false;
+    try {
       this.db.exec("BEGIN IMMEDIATE");
-      try {
+      transactionStarted = true;
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS schema_meta (
+          version INTEGER NOT NULL
+        );
+        INSERT INTO schema_meta(version)
+        SELECT ${SCHEMA_VERSION}
+        WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+      `);
+      // A concurrent migrator may have completed while this connection waited for
+      // BEGIN IMMEDIATE. Always read the authoritative version after acquiring it.
+      const schema = this.db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as {
+        version: number;
+      };
+      if (schema.version > SCHEMA_VERSION) {
+        throw new Error(
+          `The Copilot state database is at schema version ${schema.version}, which is newer than ` +
+            `this host understands (${SCHEMA_VERSION}). Update native-copilot.nvim instead of ` +
+            "opening it with an older host; the newer state is left untouched.",
+        );
+      }
+      if (schema.version < 6) {
+        this.db.exec(`
+          DROP TABLE IF EXISTS activity_cursors;
+          DROP TABLE IF EXISTS checkpoints;
+          DROP TABLE IF EXISTS delivery_leases;
+          DROP TABLE IF EXISTS messages;
+          DROP TABLE IF EXISTS events;
+          DROP TABLE IF EXISTS member_sessions;
+          DROP TABLE IF EXISTS agent_sessions;
+          DROP TABLE IF EXISTS runs;
+        `);
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS runs (
+          id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL CHECK(mode IN ('standard', 'agent')),
+          agent_id TEXT,
+          alias TEXT,
+          definition TEXT,
+          standard_can_talk INTEGER NOT NULL DEFAULT 0,
+          standard_can_observe INTEGER NOT NULL DEFAULT 0,
+          is_primary INTEGER NOT NULL DEFAULT 0,
+          startup_state TEXT NOT NULL DEFAULT 'ready'
+            CHECK(startup_state IN ('reserved', 'session_created', 'ready', 'failed')),
+          recovery_eligible INTEGER NOT NULL DEFAULT 1,
+          workspace TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          interruption_reason TEXT,
+          owner_pid INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS runs_agent_idx ON runs(agent_id);
+
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+          run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          last_active_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          source TEXT NOT NULL,
+          target TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('user', 'agent', 'system')),
+          content TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'delivering', 'delivered', 'failed')),
+          sequence INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(run_id, target, sequence)
+        );
+
+        CREATE TABLE IF NOT EXISTS delivery_leases (
+          message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+          target TEXT NOT NULL,
+          lease_until TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS activity_cursors (
+          observer_id TEXT NOT NULL,
+          target_agent_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          event_cursor TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(observer_id, target_agent_id)
+        );
+      `);
+      if (schema.version >= 6 && schema.version < SCHEMA_VERSION) {
         if (schema.version === 6 && !this.hasColumn("runs", "standard_can_observe")) {
           this.db.exec(
             "ALTER TABLE runs ADD COLUMN standard_can_observe INTEGER NOT NULL DEFAULT 0",
@@ -218,6 +236,12 @@ export class AgentDatabase {
         }
         if (!this.hasColumn("runs", "is_primary")) {
           this.db.exec("ALTER TABLE runs ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0");
+        }
+        if (!this.hasColumn("runs", "startup_state")) {
+          this.db.exec(
+            `ALTER TABLE runs ADD COLUMN startup_state TEXT NOT NULL DEFAULT 'ready'
+             CHECK(startup_state IN ('reserved', 'session_created', 'ready', 'failed'))`,
+          );
         }
         if (!this.hasColumn("runs", "recovery_eligible")) {
           this.db.exec(
@@ -240,16 +264,28 @@ export class AgentDatabase {
             );
           `);
         }
+        if (schema.version < 11) {
+          this.classifyIncompleteStartups();
+        }
         this.assertAgentAliasState();
         if (schema.version < 9) {
           this.migrateLegacyAgentState();
         }
-        this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
-        this.db.exec("COMMIT");
-      } catch (error) {
-        this.db.exec("ROLLBACK");
-        throw error;
+        if (schema.version < 11) {
+          // Legacy Standard conversion can create one more no-session agent row.
+          this.classifyIncompleteStartups();
+        }
       }
+      this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
+      this.db.exec("COMMIT");
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        this.db.exec("ROLLBACK");
+      }
+      throw error;
+    } finally {
+      this.db.exec("PRAGMA foreign_keys = ON");
     }
     this.ensureAgentAliasConstraints();
   }
@@ -259,6 +295,46 @@ export class AgentDatabase {
       name: string;
     }>;
     return rows.some((row) => row.name === column);
+  }
+
+  private classifyIncompleteStartups(): void {
+    // Schema-v10 could persist a definition before SDK session creation.
+    // Preserve a live owner's reservation, but classify it as unfinished so
+    // stale-owner cleanup releases it. Inactive no-session rows are already
+    // failed startups and must stop reserving aliases immediately.
+    this.db.exec(`
+      UPDATE runs
+      SET startup_state = 'reserved', recovery_eligible = 0
+      WHERE mode = 'agent' AND status = 'active'
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+        );
+
+      UPDATE runs
+      SET definition = NULL,
+          startup_state = 'failed',
+          recovery_eligible = 0
+      WHERE mode = 'agent' AND status != 'active'
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+        );
+
+      UPDATE messages
+      SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+      WHERE status IN ('pending', 'delivering')
+        AND run_id IN (
+          SELECT id FROM runs
+          WHERE mode = 'agent' AND startup_state = 'failed'
+        );
+
+      DELETE FROM delivery_leases
+      WHERE message_id IN (
+        SELECT messages.id
+        FROM messages
+        JOIN runs ON runs.id = messages.run_id
+        WHERE runs.mode = 'agent' AND runs.startup_state = 'failed'
+      );
+    `);
   }
 
   private assertAgentAliasState(): void {
@@ -510,12 +586,14 @@ export class AgentDatabase {
       definition: string | null;
       workspace: string;
       startedAt: string;
+      isPrimary: number;
       legacyPrimaryCanTalk: number;
       legacyPrimaryCanObserve: number;
     };
     const runs = this.db
       .prepare(
         `SELECT id, mode, agent_id AS agentId, alias, definition, workspace,
+                is_primary AS isPrimary,
                 started_at AS startedAt, standard_can_talk AS legacyPrimaryCanTalk,
                 standard_can_observe AS legacyPrimaryCanObserve
          FROM runs
@@ -526,6 +604,25 @@ export class AgentDatabase {
       string,
       { agentId: string; runId: string; alias: string }
     >();
+    const primaryRunsToConvert = new Set<string>();
+    // A partially completed or defensively repeated migration must adopt the
+    // primary that already exists instead of promoting another legacy Standard
+    // row in the same workspace.
+    for (const run of runs) {
+      if (
+        run.mode === "agent" &&
+        run.isPrimary === 1 &&
+        run.agentId &&
+        run.alias &&
+        !primaryByWorkspace.has(run.workspace)
+      ) {
+        primaryByWorkspace.set(run.workspace, {
+          agentId: run.agentId,
+          runId: run.id,
+          alias: run.alias,
+        });
+      }
+    }
     for (const run of runs) {
       if (run.mode !== "standard" || primaryByWorkspace.has(run.workspace)) {
         continue;
@@ -535,6 +632,7 @@ export class AgentDatabase {
         runId: run.id,
         alias: PRIMARY_ALIAS,
       });
+      primaryRunsToConvert.add(run.id);
     }
 
     const aliasesByWorkspace = new Map<string, Map<string, string>>();
@@ -554,6 +652,10 @@ export class AgentDatabase {
       aliasesByWorkspace.set(run.workspace, aliases);
     }
     for (const [workspace, primary] of primaryByWorkspace) {
+      if (!primaryRunsToConvert.has(primary.runId)) {
+        workspaceByAgentId.set(primary.agentId, workspace);
+        continue;
+      }
       const aliases = aliasesByWorkspace.get(workspace);
       let candidate = PRIMARY_ALIAS;
       let suffix = 2;
@@ -619,6 +721,8 @@ export class AgentDatabase {
           mcpServers?: unknown;
           standardCanTalk?: unknown;
           standardCanObserve?: unknown;
+          canTalkToAgentIds?: unknown;
+          canObserveAgentIds?: unknown;
         };
         if (!parsed.definition || typeof parsed.definition !== "object") {
           continue;
@@ -635,19 +739,33 @@ export class AgentDatabase {
           grants.add(agentId);
           legacyObserveByWorkspace.set(run.workspace, grants);
         }
-        const canTalkToAgentIds = resolveSelectors(canTalkTo, run.workspace);
-        const canObserveAgentIds = resolveSelectors(canObserve, run.workspace);
+        const canTalkToAgentIds = new Set(resolveSelectors(canTalkTo, run.workspace));
+        if (Array.isArray(parsed.canTalkToAgentIds)) {
+          for (const persistedAgentId of parsed.canTalkToAgentIds) {
+            if (typeof persistedAgentId === "string") {
+              canTalkToAgentIds.add(persistedAgentId);
+            }
+          }
+        }
+        const canObserveAgentIds = new Set(resolveSelectors(canObserve, run.workspace));
+        if (Array.isArray(parsed.canObserveAgentIds)) {
+          for (const persistedAgentId of parsed.canObserveAgentIds) {
+            if (typeof persistedAgentId === "string") {
+              canObserveAgentIds.add(persistedAgentId);
+            }
+          }
+        }
         const definition = {
           ...parsed.definition,
-          canTalkTo: canTalkToAgentIds.map((agentId) => `agent:${agentId}`),
-          canObserve: canObserveAgentIds.map((agentId) => `agent:${agentId}`),
+          canTalkTo: [...canTalkToAgentIds].map((agentId) => `agent:${agentId}`),
+          canObserve: [...canObserveAgentIds].map((agentId) => `agent:${agentId}`),
         };
         updateDefinition.run(
           JSON.stringify({
             definition,
             mcpServers: Array.isArray(parsed.mcpServers) ? parsed.mcpServers : [],
-            canTalkToAgentIds,
-            canObserveAgentIds,
+            canTalkToAgentIds: [...canTalkToAgentIds],
+            canObserveAgentIds: [...canObserveAgentIds],
           }),
           run.id,
         );
@@ -659,13 +777,16 @@ export class AgentDatabase {
     const convertPrimary = this.db.prepare(
       `UPDATE runs
        SET mode = 'agent', agent_id = ?, alias = ?, definition = ?, is_primary = 1
-       WHERE id = ?`,
+       WHERE id = ? AND mode = 'standard' AND is_primary = 0`,
     );
     const updatePrimaryMessages = this.db.prepare(
       `UPDATE messages SET target = ?, source = CASE WHEN source = ? THEN ? ELSE source END
        WHERE run_id = ?`,
     );
     for (const [workspace, primary] of primaryByWorkspace) {
+      if (!primaryRunsToConvert.has(primary.runId)) {
+        continue;
+      }
       const outgoingTalk = new Set(runs
         .filter(
           (run) =>
@@ -700,7 +821,7 @@ export class AgentDatabase {
         canTalkTo: [],
         canObserve: [],
       };
-      convertPrimary.run(
+      const converted = convertPrimary.run(
         primary.agentId,
         primary.alias,
         JSON.stringify({
@@ -711,6 +832,9 @@ export class AgentDatabase {
         }),
         primary.runId,
       );
+      if (converted.changes !== 1) {
+        continue;
+      }
       updatePrimaryMessages.run(
         `agent:${primary.agentId}`,
         LEGACY_PRIMARY_IDENTITY,
@@ -835,40 +959,84 @@ export class AgentDatabase {
   }
 
   markInterruptedWork(reason: string, ownerIsAlive: (pid: number) => boolean): number {
-    const timestamp = now();
-    const active = this.db
-      .prepare("SELECT id, owner_pid AS ownerPid FROM runs WHERE status = 'active'")
-      .all() as unknown as Array<{ id: string; ownerPid: number | null }>;
-    const staleIds = active
-      .filter((run) => run.ownerPid === null || !ownerIsAlive(run.ownerPid))
-      .map((run) => run.id);
-    const interrupt = this.db.prepare(
-      `UPDATE runs
-       SET status = 'interrupted', ended_at = ?, interruption_reason = ?
-       WHERE id = ? AND status = 'active'`,
-    );
-    for (const id of staleIds) {
-      interrupt.run(timestamp, reason, id);
-    }
-    if (staleIds.length === 0) {
-      return 0;
-    }
-    const placeholders = staleIds.map(() => "?").join(", ");
-    this.db
-      .prepare(
-        `UPDATE messages
-         SET status = 'pending', updated_at = ?
-         WHERE status = 'delivering'
-           AND run_id IN (${placeholders})`,
-      )
-      .run(timestamp, ...staleIds);
-    this.db
-      .prepare(
-      `DELETE FROM delivery_leases
-       WHERE message_id IN (SELECT id FROM messages WHERE run_id IN (${placeholders}))`,
-      )
-      .run(...staleIds);
-    return staleIds.length;
+    return this.transaction(() => {
+      const timestamp = now();
+      const active = this.db
+        .prepare(
+          `SELECT id, owner_pid AS ownerPid, startup_state AS startupState
+           FROM runs WHERE status = 'active'`,
+        )
+        .all() as unknown as Array<{
+          id: string;
+          ownerPid: number | null;
+          startupState: RunStartupState;
+        }>;
+      const stale = active.filter(
+        (run) => run.ownerPid === null || !ownerIsAlive(run.ownerPid),
+      );
+      if (stale.length === 0) {
+        return 0;
+      }
+      const readyIds = stale
+        .filter((run) => run.startupState === "ready")
+        .map((run) => run.id);
+      const startupIds = stale
+        .filter((run) => run.startupState !== "ready")
+        .map((run) => run.id);
+      const interrupt = this.db.prepare(
+        `UPDATE runs
+         SET status = 'interrupted', ended_at = ?, interruption_reason = ?, owner_pid = NULL
+         WHERE id = ? AND status = 'active'`,
+      );
+      for (const id of readyIds) {
+        interrupt.run(timestamp, reason, id);
+      }
+      const failStartup = this.db.prepare(
+        `UPDATE runs
+         SET definition = NULL,
+             startup_state = 'failed',
+             recovery_eligible = 0,
+             status = 'interrupted',
+             ended_at = ?,
+             interruption_reason = ?,
+             owner_pid = NULL
+         WHERE id = ? AND status = 'active' AND startup_state != 'ready'`,
+      );
+      for (const id of startupIds) {
+        failStartup.run(timestamp, `${reason} during agent startup`, id);
+      }
+      if (readyIds.length > 0) {
+        const placeholders = readyIds.map(() => "?").join(", ");
+        this.db
+          .prepare(
+            `UPDATE messages
+             SET status = 'pending', updated_at = ?
+             WHERE status = 'delivering'
+               AND run_id IN (${placeholders})`,
+          )
+          .run(timestamp, ...readyIds);
+      }
+      if (startupIds.length > 0) {
+        const placeholders = startupIds.map(() => "?").join(", ");
+        this.db
+          .prepare(
+            `UPDATE messages
+             SET status = 'failed', updated_at = ?
+             WHERE status IN ('pending', 'delivering')
+               AND run_id IN (${placeholders})`,
+          )
+          .run(timestamp, ...startupIds);
+      }
+      const staleIds = stale.map((run) => run.id);
+      const placeholders = staleIds.map(() => "?").join(", ");
+      this.db
+        .prepare(
+        `DELETE FROM delivery_leases
+         WHERE message_id IN (SELECT id FROM messages WHERE run_id IN (${placeholders}))`,
+        )
+        .run(...staleIds);
+      return staleIds.length;
+    });
   }
 
   /**
@@ -965,6 +1133,7 @@ export class AgentDatabase {
       .prepare(
         `UPDATE runs
          SET recovery_eligible = 0,
+             startup_state = 'failed',
              status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
              ended_at = COALESCE(ended_at, ?),
              interruption_reason = ?,
@@ -1000,6 +1169,7 @@ export class AgentDatabase {
         .prepare(
           `UPDATE runs
            SET recovery_eligible = 0,
+               startup_state = 'failed',
                status = 'interrupted',
                ended_at = COALESCE(ended_at, ?),
                interruption_reason = ?,
@@ -1023,12 +1193,14 @@ export class AgentDatabase {
         .prepare(
           `UPDATE runs
            SET recovery_eligible = 1,
+               startup_state = 'ready',
                status = 'active',
                ended_at = NULL,
                interruption_reason = NULL,
                owner_pid = ?
            WHERE id = ? AND workspace = ? AND mode = 'agent'
-             AND is_primary = 1 AND agent_id = ? AND status != 'active'`,
+             AND is_primary = 1 AND agent_id = ? AND status != 'active'
+             AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
         )
         .run(ownerPid, restoredRunId, workspace, agentId);
       if (restored.changes !== 1) {
@@ -1050,9 +1222,9 @@ export class AgentDatabase {
       this.transaction(() => {
         const insert = this.db.prepare(
           `INSERT INTO runs(
-             id, mode, agent_id, alias, definition, is_primary, workspace,
-             status, started_at, owner_pid
-           ) VALUES (?, 'agent', ?, ?, ?, ?, ?, 'active', ?, ?)`,
+             id, mode, agent_id, alias, definition, is_primary, startup_state,
+             recovery_eligible, workspace, status, started_at, owner_pid
+           ) VALUES (?, 'agent', ?, ?, ?, ?, 'reserved', 0, ?, 'active', ?, ?)`,
         );
         for (const run of runs) {
           current = run;
@@ -1121,6 +1293,7 @@ export class AgentDatabase {
         .prepare(
           `UPDATE runs
            SET definition = NULL,
+               startup_state = 'failed',
                recovery_eligible = 0,
                status = 'interrupted',
                ended_at = COALESCE(ended_at, ?),
@@ -1141,11 +1314,82 @@ export class AgentDatabase {
     });
   }
 
+  /**
+   * Atomically releases a run whose SDK startup never completed and removes that
+   * failed UUID from every related caller/peer ACL persisted by the same batch.
+   */
+  failAgentStartup(
+    id: string,
+    workspace: string,
+    agentId: string,
+    reason: string,
+    relatedRuns: readonly AgentRunDefinitionUpdate[],
+  ): void {
+    this.transaction(() => {
+      const timestamp = now();
+      const failed = this.db
+        .prepare(
+          `UPDATE runs
+           SET definition = NULL,
+               startup_state = 'failed',
+               recovery_eligible = 0,
+               status = 'interrupted',
+               ended_at = COALESCE(ended_at, ?),
+               interruption_reason = ?,
+               owner_pid = NULL
+           WHERE id = ? AND workspace = ? AND mode = 'agent' AND agent_id = ?
+             AND startup_state != 'ready'`,
+        )
+        .run(timestamp, reason, id, workspace, agentId);
+      if (failed.changes !== 1) {
+        throw new Error(
+          `Agent run "${id}" could not be released after its startup failed.`,
+        );
+      }
+      this.db
+        .prepare(
+          `UPDATE messages
+           SET status = 'failed', updated_at = ?
+           WHERE run_id = ? AND status IN ('pending', 'delivering')`,
+        )
+        .run(timestamp, id);
+      this.db
+        .prepare(
+          `DELETE FROM delivery_leases
+           WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
+        )
+        .run(id);
+
+      const updateDefinition = this.db.prepare(
+        `UPDATE runs
+         SET alias = ?, definition = ?
+         WHERE id = ? AND workspace = ? AND mode = 'agent' AND definition IS NOT NULL`,
+      );
+      for (const related of relatedRuns) {
+        if (related.id === id) {
+          throw new Error("A failed startup run cannot update its own released definition.");
+        }
+        const updated = updateDefinition.run(
+          related.alias,
+          related.definition,
+          related.id,
+          workspace,
+        );
+        if (updated.changes !== 1) {
+          throw new Error(
+            `Related agent run "${related.id}" could not remove failed startup ACL "${agentId}".`,
+          );
+        }
+      }
+    });
+  }
+
   private agentRunRows(where: string, ...parameters: Array<string | number>): StoredAgentRun[] {
     const rows = this.db
       .prepare(
         `SELECT id, agent_id AS agentId, alias, definition, is_primary AS isPrimary,
-                status, started_at AS startedAt, ended_at AS endedAt
+                startup_state AS startupState, status,
+                started_at AS startedAt, ended_at AS endedAt
          FROM runs
          WHERE mode = 'agent' AND agent_id IS NOT NULL AND alias IS NOT NULL AND ${where}`,
       )
@@ -1171,6 +1415,7 @@ export class AgentDatabase {
       `workspace = ?
          AND is_primary = 0
          AND recovery_eligible = 1
+         AND startup_state = 'ready'
          AND status != 'active'
          AND definition IS NOT NULL
          AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
@@ -1194,11 +1439,18 @@ export class AgentDatabase {
            SELECT id FROM runs AS latest
            WHERE latest.workspace = ? AND latest.mode = 'agent' AND latest.is_primary = 1
              AND latest.recovery_eligible = 1
+             AND latest.startup_state = 'ready'
+             AND EXISTS (
+               SELECT 1 FROM agent_sessions
+               WHERE agent_sessions.run_id = latest.id
+             )
            ORDER BY latest.started_at DESC
            LIMIT 1
          )
          AND status != 'active'
+         AND startup_state = 'ready'
          AND definition IS NOT NULL
+         AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
        LIMIT 1`,
       workspace,
       workspace,
@@ -1249,7 +1501,9 @@ export class AgentDatabase {
       .prepare(
         `UPDATE runs
          SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
-         WHERE id = ? AND mode = 'agent' AND status != 'active'`,
+         WHERE id = ? AND mode = 'agent' AND status != 'active'
+           AND recovery_eligible = 1 AND startup_state = 'ready'
+           AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
       )
       .run(ownerPid, id);
     if (result.changes !== 1) {
@@ -1279,27 +1533,114 @@ export class AgentDatabase {
   }
 
   finishRun(id: string, status: Exclude<RunStatus, "active">, reason?: string): void {
-    this.db
-      .prepare(
-        `UPDATE runs
-         SET status = ?, ended_at = ?, interruption_reason = ?
-         WHERE id = ? AND status = 'active'`,
-      )
-      .run(status, now(), reason ?? null, id);
+    this.transaction(() => {
+      const timestamp = now();
+      const row = this.db
+        .prepare(
+          "SELECT startup_state AS startupState FROM runs WHERE id = ? AND status = 'active'",
+        )
+        .get(id) as { startupState: RunStartupState } | undefined;
+      if (!row) {
+        return;
+      }
+      const startupFailed = row.startupState !== "ready";
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET status = ?,
+               ended_at = ?,
+               interruption_reason = ?,
+               definition = CASE WHEN ? = 1 THEN NULL ELSE definition END,
+               startup_state = CASE WHEN ? = 1 THEN 'failed' ELSE startup_state END,
+               recovery_eligible = CASE WHEN ? = 1 THEN 0 ELSE recovery_eligible END,
+               owner_pid = NULL
+           WHERE id = ? AND status = 'active'`,
+        )
+        .run(
+          status,
+          timestamp,
+          reason ?? null,
+          startupFailed ? 1 : 0,
+          startupFailed ? 1 : 0,
+          startupFailed ? 1 : 0,
+          id,
+        );
+      if (!startupFailed) {
+        return;
+      }
+      this.db
+        .prepare(
+          `UPDATE messages
+           SET status = 'failed', updated_at = ?
+           WHERE run_id = ? AND status IN ('pending', 'delivering')`,
+        )
+        .run(timestamp, id);
+      this.db
+        .prepare(
+          `DELETE FROM delivery_leases
+           WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
+        )
+        .run(id);
+    });
   }
 
   /** Persists the single SDK session owned by a run. */
   upsertSession(runId: string, sessionId: string, state: string): void {
-    this.db
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO agent_sessions(run_id, session_id, state, last_active_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(run_id) DO UPDATE SET
+             session_id = excluded.session_id,
+             state = excluded.state,
+             last_active_at = excluded.last_active_at`,
+        )
+        .run(runId, sessionId, state, now());
+      this.db
+        .prepare(
+          `UPDATE runs SET startup_state = 'session_created'
+           WHERE id = ? AND mode = 'agent' AND startup_state = 'reserved'`,
+        )
+        .run(runId);
+    });
+  }
+
+  /** Makes a run recoverable only after its SDK session and initial task are accepted. */
+  completeRunStartup(runId: string): void {
+    const result = this.db
       .prepare(
-        `INSERT INTO agent_sessions(run_id, session_id, state, last_active_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(run_id) DO UPDATE SET
-           session_id = excluded.session_id,
-           state = excluded.state,
-           last_active_at = excluded.last_active_at`,
+        `UPDATE runs
+         SET startup_state = 'ready', recovery_eligible = 1
+         WHERE id = ? AND mode = 'agent' AND status = 'active'
+           AND startup_state IN ('reserved', 'session_created')
+           AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+           AND (
+             is_primary = 1
+             OR EXISTS (
+               SELECT 1 FROM messages
+               WHERE messages.run_id = runs.id
+                 AND messages.kind = 'user'
+                 AND messages.status = 'delivered'
+             )
+           )`,
       )
-      .run(runId, sessionId, state, now());
+      .run(runId);
+    if (result.changes !== 1) {
+      const current = this.db
+        .prepare(
+          `SELECT startup_state AS startupState, recovery_eligible AS recoveryEligible
+           FROM runs WHERE id = ? AND mode = 'agent'`,
+        )
+        .get(runId) as { startupState: RunStartupState; recoveryEligible: number } | undefined;
+      if (current?.startupState === "ready" && current.recoveryEligible === 1) {
+        return;
+      }
+      throw new Error(
+        `Agent run "${runId}" cannot become recoverable before its SDK session and initial ` +
+          "task are accepted.",
+      );
+    }
   }
 
   session(runId: string): StoredAgentSession | undefined {
@@ -1358,7 +1699,7 @@ export class AgentDatabase {
     });
   }
 
-  claimMessages(runId: string, target: string, limit = 20, leaseMs = 60_000): StoredMessage[] {
+  claimMessages(runId: string, target: string, limit = 1, leaseMs = 60_000): ClaimedMessage[] {
     return this.transaction(() => {
       const timestamp = now();
       const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
@@ -1400,7 +1741,14 @@ export class AgentDatabase {
         row.status = "delivering";
         row.updatedAt = timestamp;
       }
-      return rows;
+      const attempts = this.db.prepare(
+        "SELECT attempts FROM delivery_leases WHERE message_id = ?",
+      );
+      return rows.map((row) => ({
+        ...row,
+        deliveryAttempts:
+          (attempts.get(row.id) as { attempts: number } | undefined)?.attempts ?? 1,
+      }));
     });
   }
 

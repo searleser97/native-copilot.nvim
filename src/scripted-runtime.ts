@@ -22,6 +22,11 @@ interface PendingPermission {
   target: string;
 }
 
+interface ScriptedTransition {
+  generation: number;
+  reason: string;
+}
+
 /** One scripted standalone agent, mirroring the runtime's durable agent identity. */
 interface ScriptedAgent {
   agentId: string;
@@ -57,6 +62,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
   private sessionListCount = 0;
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly agents = new Map<string, ScriptedAgent>();
+  private readonly generations = new Map<string, number>();
+  private readonly transitions = new Map<string, ScriptedTransition>();
   private recoveredAgentRun = false;
   private stopped = false;
 
@@ -90,6 +97,40 @@ export class ScriptedRuntime implements RuntimeAdapter {
       throw new Error("The scripted primary agent is not running.");
     }
     return primary;
+  }
+
+  private beginTransition(agent: ScriptedAgent, reason: string): ScriptedTransition {
+    const existing = this.transitions.get(agent.agentId);
+    if (existing) {
+      throw new Error(
+        `Agent "${agent.alias}" is temporarily unavailable while ${existing.reason}.`,
+      );
+    }
+    const transition = {
+      generation: (this.generations.get(agent.agentId) ?? 0) + 1,
+      reason,
+    };
+    this.generations.set(agent.agentId, transition.generation);
+    this.transitions.set(agent.agentId, transition);
+    return transition;
+  }
+
+  private endTransition(agent: ScriptedAgent, transition: ScriptedTransition): void {
+    if (this.transitions.get(agent.agentId) === transition) {
+      this.transitions.delete(agent.agentId);
+    }
+  }
+
+  private requireAvailableAgent(agentRef: string): ScriptedAgent {
+    const agent = this.requireAgent(agentRef);
+    const transition = this.transitions.get(agent.agentId);
+    if (transition) {
+      throw new Error(
+        `Agent "${agent.alias}" is temporarily unavailable while ${transition.reason}. ` +
+          "Retry after the transition completes.",
+      );
+    }
+    return agent;
   }
 
   private fields(target: string, done = false) {
@@ -454,7 +495,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   async openPrimary(): Promise<void> {
-    if (this.primaryRunId) return;
+    if (this.primaryRunId) {
+      this.requireAvailableAgent(PRIMARY_AGENT_ID);
+      return;
+    }
     const runId = randomUUID();
     this.primaryRunId = runId;
     const primary: ScriptedAgent = {
@@ -471,57 +515,70 @@ export class ScriptedRuntime implements RuntimeAdapter {
       primary: true,
     };
     this.agents.set(primary.agentId, primary);
-    this.db.createAgentRun(
-      primary.runId,
-      primary.agentId,
-      primary.alias,
-      this.storedAgentJson(primary),
-      this.workspace,
-      process.pid,
-      true,
-    );
-    this.db.adoptPrimaryMessages(
-      primary.runId,
-      this.workspace,
-      primary.agentId,
-      primary.target,
-    );
-    const target = primary.target;
-    this.emit("agent.loading", { ...this.agentPayload(primary), recovered: false }, {
-      runId: primary.runId,
-      memberId: target,
-      target: "status",
-      done: false,
-    });
-    this.emit("session.identity", {
-      sessionId: primary.sessionId,
-    }, { runId: primary.runId, memberId: target, target: "activity", done: true });
-    await this.loadEnvironment(target);
-    this.emit("member.state", { state: "idle" }, {
-      memberId: target,
-      target: "status",
-      done: true,
-    });
-    this.emit("agent.ready", {
-      ...this.agentPayload(primary),
-      recovered: false,
-      sessionId: primary.sessionId,
-    }, {
-      runId: primary.runId,
-      memberId: target,
-      target: "status",
-      done: true,
-    });
-    this.emit("primary.ready", {
-      ...this.agentPayload(primary),
-      mode: "primary",
-      recovered: false,
-      sessionId: primary.sessionId,
-      runId: primary.runId,
-    }, { runId: primary.runId, memberId: target, target: "status", done: true });
+    const transition = this.beginTransition(primary, "starting its scripted session");
+    try {
+      this.db.createAgentRun(
+        primary.runId,
+        primary.agentId,
+        primary.alias,
+        this.storedAgentJson(primary),
+        this.workspace,
+        process.pid,
+        true,
+      );
+      this.db.upsertSession(primary.runId, primary.sessionId, "connected");
+      this.db.adoptPrimaryMessages(
+        primary.runId,
+        this.workspace,
+        primary.agentId,
+        primary.target,
+      );
+      const target = primary.target;
+      this.emit("agent.loading", { ...this.agentPayload(primary), recovered: false }, {
+        runId: primary.runId,
+        memberId: target,
+        target: "status",
+        done: false,
+      });
+      this.emit("session.identity", {
+        sessionId: primary.sessionId,
+      }, { runId: primary.runId, memberId: target, target: "activity", done: true });
+      await this.loadEnvironment(target);
+      this.emit("member.state", { state: "idle" }, {
+        memberId: target,
+        target: "status",
+        done: true,
+      });
+      this.db.completeRunStartup(primary.runId);
+      this.emit("agent.ready", {
+        ...this.agentPayload(primary),
+        recovered: false,
+        sessionId: primary.sessionId,
+      }, {
+        runId: primary.runId,
+        memberId: target,
+        target: "status",
+        done: true,
+      });
+      this.emit("primary.ready", {
+        ...this.agentPayload(primary),
+        mode: "primary",
+        recovered: false,
+        sessionId: primary.sessionId,
+        runId: primary.runId,
+      }, { runId: primary.runId, memberId: target, target: "status", done: true });
+    } catch (error) {
+      this.agents.delete(primary.agentId);
+      this.primaryRunId = undefined;
+      this.db.finishRun(primary.runId, "interrupted", "Scripted primary startup failed");
+      throw error;
+    } finally {
+      this.endTransition(primary, transition);
+    }
   }
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
+    this.requireAvailableAgent(target);
     const id = randomUUID();
     if (content.includes("Start a foreground turn that waits for steering")) {
       this.emitBusy(target, `turn-${id}`);
@@ -576,20 +633,24 @@ export class ScriptedRuntime implements RuntimeAdapter {
       primaryAgentId: primary?.agentId,
       primaryTarget: primary?.target,
       primary: primary
-        ? { ...this.agentPayload(primary), sessionId: primary.sessionId, state: "idle" }
+        ? {
+            ...this.agentPayload(primary),
+            sessionId: primary.sessionId,
+            state: this.transitions.has(primary.agentId) ? "loading" : "idle",
+          }
         : undefined,
       agents: [...this.agents.values()].map((agent) => ({
         ...this.agentPayload(agent),
         sessionId: agent.sessionId,
-        state: "idle",
+        state: this.transitions.has(agent.agentId) ? "loading" : "idle",
       })),
       sessions: [...this.agents.values()].map((agent) => ({
         target: agent.target,
         agentId: agent.agentId,
         alias: agent.alias,
         sessionId: agent.sessionId,
-        state: "idle",
-      })),
+        state: this.transitions.has(agent.agentId) ? "loading" : "idle",
+      })).filter((session) => session.state !== "loading"),
     };
   }
 
@@ -664,35 +725,44 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }
     await this.openPrimary();
     const primary = this.primaryAgent();
-    this.db.finishRun(primary.runId, "stopped", `Resuming session ${sessionId}`);
-    const runId = randomUUID();
-    this.primaryRunId = runId;
-    primary.runId = runId;
-    primary.sessionId = sessionId;
-    this.db.createAgentRun(
-      primary.runId,
-      primary.agentId,
-      primary.alias,
-      this.storedAgentJson(primary),
-      this.workspace,
-      process.pid,
-      true,
-    );
-    this.db.adoptAgentMessages(
-      primary.runId,
-      this.workspace,
-      primary.agentId,
-      primary.target,
-    );
-    this.resumedCliSession = true;
-    const target = primary.target;
-    this.emit("session.loading", {
+    const transition = this.beginTransition(primary, `replacing its session with "${sessionId}"`);
+    const oldRunId = primary.runId;
+    const oldSessionId = primary.sessionId;
+    let oldRunStopped = false;
+    let newRunCreated = false;
+    try {
+      this.db.finishRun(primary.runId, "stopped", `Resuming session ${sessionId}`);
+      oldRunStopped = true;
+      const runId = randomUUID();
+      this.primaryRunId = runId;
+      primary.runId = runId;
+      primary.sessionId = sessionId;
+      this.db.createAgentRun(
+        primary.runId,
+        primary.agentId,
+        primary.alias,
+        this.storedAgentJson(primary),
+        this.workspace,
+        process.pid,
+        true,
+      );
+      newRunCreated = true;
+      this.db.upsertSession(primary.runId, primary.sessionId, "connected");
+      this.db.adoptAgentMessages(
+        primary.runId,
+        this.workspace,
+        primary.agentId,
+        primary.target,
+      );
+      this.resumedCliSession = true;
+      const target = primary.target;
+      this.emit("session.loading", {
       mode: "primary-loading",
       sessionId,
       target,
       agentId: primary.agentId,
-    }, { runId: primary.runId, memberId: target, target: "status", done: false });
-    this.emit("session.history", {
+      }, { runId: primary.runId, memberId: target, target: "status", done: false });
+      this.emit("session.history", {
       events: [
         {
           id: "cli-user-1",
@@ -1066,6 +1136,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       state: "idle",
       sessionId,
     }, { runId: primary.runId, memberId: target, target: "status", done: true });
+    this.db.completeRunStartup(primary.runId);
     this.emit("primary.ready", {
       ...this.agentPayload(primary),
       mode: "primary",
@@ -1073,17 +1144,42 @@ export class ScriptedRuntime implements RuntimeAdapter {
       sessionId,
       runId: primary.runId,
     }, { runId: primary.runId, memberId: target, target: "status", done: true });
+    } catch (error) {
+      const failedRunId = primary.runId;
+      primary.runId = oldRunId;
+      primary.sessionId = oldSessionId;
+      this.primaryRunId = oldRunId;
+      if (newRunCreated) {
+        this.db.rollbackPrimaryReplacement(
+          failedRunId,
+          oldRunId,
+          this.workspace,
+          primary.agentId,
+          primary.target,
+          process.pid,
+          `Scripted primary replacement with "${sessionId}" failed`,
+        );
+      } else if (oldRunStopped) {
+        this.db.resumeRun(oldRunId, process.pid);
+      }
+      throw error;
+    } finally {
+      this.endTransition(primary, transition);
+    }
   }
 
-  async listCommands(_target: string): Promise<unknown[]> {
+  async listCommands(target: string): Promise<unknown[]> {
+    this.requireAvailableAgent(target);
     return [{ name: "context", description: "Scripted context command" }];
   }
 
-  async invokeCommand(_target: string, name: string, input?: string): Promise<unknown> {
+  async invokeCommand(target: string, name: string, input?: string): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return { kind: "text", text: `${name}${input ? ` ${input}` : ""}` };
   }
 
-  async modelState(_target: string): Promise<unknown> {
+  async modelState(target: string): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return {
       current: {
         modelId: "scripted-model",
@@ -1116,11 +1212,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
     };
   }
 
-  async switchModel(_target: string, modelId: string): Promise<unknown> {
+  async switchModel(target: string, modelId: string): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return { modelId, name: "Scripted Model" };
   }
 
-  async reasoningState(_target: string): Promise<unknown> {
+  async reasoningState(target: string): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return {
       modelId: "scripted-model",
       current: "medium",
@@ -1128,11 +1226,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
     };
   }
 
-  async setReasoningEffort(_target: string, reasoningEffort: string): Promise<unknown> {
+  async setReasoningEffort(target: string, reasoningEffort: string): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return { reasoningEffort };
   }
 
-  async listMcp(_target: string): Promise<unknown[]> {
+  async listMcp(target: string): Promise<unknown[]> {
+    this.requireAvailableAgent(target);
     if (this.profile === "allow-all") return [];
     return this.profile === "allow-all-mcp" || this.profile === "telescope"
       ? [
@@ -1142,11 +1242,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
       : [{ name: "mock-permissions", status: "connected" }];
   }
 
-  async setMcpEnabled(_target: string, serverName: string, enabled: boolean): Promise<unknown> {
+  async setMcpEnabled(target: string, serverName: string, enabled: boolean): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return { name: serverName, enabled };
   }
 
-  async listMcpTools(_target: string, serverName: string): Promise<unknown[]> {
+  async listMcpTools(target: string, serverName: string): Promise<unknown[]> {
+    this.requireAvailableAgent(target);
     return [{ name: `${serverName}.mock_tool`, description: "Scripted MCP tool" }];
   }
 
@@ -1155,7 +1257,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
     return servers.length;
   }
 
-  async listTasks(_target: string): Promise<unknown[]> {
+  async listTasks(target: string): Promise<unknown[]> {
+    this.requireAvailableAgent(target);
     return this.profile === "telescope"
       ? [
           {
@@ -1176,19 +1279,23 @@ export class ScriptedRuntime implements RuntimeAdapter {
       : [];
   }
 
-  async taskProgress(_target: string, _taskId: string): Promise<unknown> {
+  async taskProgress(target: string, _taskId: string): Promise<unknown> {
+    this.requireAvailableAgent(target);
     return null;
   }
 
-  async cancelTask(_target: string, _taskId: string): Promise<boolean> {
+  async cancelTask(target: string, _taskId: string): Promise<boolean> {
+    this.requireAvailableAgent(target);
     return true;
   }
 
-  async cancelAllBackgroundAgents(_target: string): Promise<number> {
+  async cancelAllBackgroundAgents(target: string): Promise<number> {
+    this.requireAvailableAgent(target);
     return 0;
   }
 
   async abort(target: string): Promise<void> {
+    this.requireAvailableAgent(target);
     this.emitIdle(target);
   }
 
@@ -1229,21 +1336,36 @@ export class ScriptedRuntime implements RuntimeAdapter {
     for (const definition of request.agents) {
       batchAliases.set(definition.id, randomUUID());
     }
-    const resolveSelectors = (selectors: string[], sourceAgentId: string): string[] =>
-      selectors.map((selector) => {
-        if (selector === "caller") return caller.agentId;
+    const failedAgentIds = new Set<string>();
+    const resolveSelectors = (selectors: string[], sourceAgentId: string): string[] => {
+      const resolved: string[] = [];
+      for (const selector of selectors) {
+        if (selector === "caller") {
+          resolved.push(caller.agentId);
+          continue;
+        }
         const batch = batchAliases.get(selector);
-        if (batch) return batch;
+        if (batch) {
+          if (!failedAgentIds.has(batch)) {
+            resolved.push(batch);
+          }
+          continue;
+        }
         if (selector.startsWith("agent:")) {
           const agentId = selector.slice("agent:".length);
-          if (agentId !== sourceAgentId && this.agents.has(agentId)) return agentId;
+          if (agentId !== sourceAgentId && this.agents.has(agentId)) {
+            resolved.push(agentId);
+            continue;
+          }
         }
         const existing = [...this.agents.values()].find((agent) => agent.alias === selector);
         if (!existing || existing.agentId === sourceAgentId) {
           throw new Error(`Scripted agent selector "${selector}" does not resolve.`);
         }
-        return existing.agentId;
-      });
+        resolved.push(existing.agentId);
+      }
+      return resolved;
+    };
     const results: Array<Record<string, unknown>> = [];
     for (const definition of request.agents) {
       const agentId = batchAliases.get(definition.id)!;
@@ -1260,39 +1382,92 @@ export class ScriptedRuntime implements RuntimeAdapter {
         sessionId: `e2e-agent-session-${definition.id}`,
       };
       this.agents.set(agentId, agent);
-      this.db.createAgentRun(
-        agent.runId,
-        agent.agentId,
-        agent.alias,
-        this.storedAgentJson(agent),
-        this.workspace,
-        process.pid,
-      );
-      this.emit("agent.loading", { ...this.agentPayload(agent), recovered: false }, {
-        runId: agent.runId,
-        memberId: agent.target,
-        target: "status",
-        done: false,
-      });
-      this.emit(
-        "agent.ready",
-        { ...this.agentPayload(agent), recovered: false, sessionId: agent.sessionId },
-        { runId: agent.runId, memberId: agent.target, target: "status", done: true },
-      );
-      this.emitBusy(agent.target, `turn-${agent.agentId}`);
-      this.emitMessage(
-        agent.target,
-        `message-${agent.agentId}`,
-        `SCRIPTED-AGENT-TASK: ${agent.task}`,
-      );
-      this.emitIdle(agent.target);
-      results.push({ ...this.agentPayload(agent), sessionId: agent.sessionId, started: true });
+      const transition = this.beginTransition(agent, "starting its scripted task");
+      try {
+        this.db.createAgentRun(
+          agent.runId,
+          agent.agentId,
+          agent.alias,
+          this.storedAgentJson(agent),
+          this.workspace,
+          process.pid,
+        );
+        this.db.upsertSession(agent.runId, agent.sessionId, "connected");
+        this.emit("agent.loading", { ...this.agentPayload(agent), recovered: false }, {
+          runId: agent.runId,
+          memberId: agent.target,
+          target: "status",
+          done: false,
+        });
+        const taskMessageId = randomUUID();
+        this.db.enqueueMessage(
+          taskMessageId,
+          agent.runId,
+          "user",
+          agent.target,
+          "user",
+          agent.task,
+        );
+        this.emitBusy(agent.target, `turn-${agent.agentId}`);
+        this.emitMessage(
+          agent.target,
+          `message-${agent.agentId}`,
+          `SCRIPTED-AGENT-TASK: ${agent.task}`,
+        );
+        this.emitIdle(agent.target);
+        this.db.completeMessage(taskMessageId);
+        this.db.completeRunStartup(agent.runId);
+        this.emit(
+          "agent.ready",
+          { ...this.agentPayload(agent), recovered: false, sessionId: agent.sessionId },
+          { runId: agent.runId, memberId: agent.target, target: "status", done: true },
+        );
+        results.push({ ...this.agentPayload(agent), sessionId: agent.sessionId, started: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failedAgentIds.add(agent.agentId);
+        this.agents.delete(agent.agentId);
+        this.db.finishRun(agent.runId, "interrupted", message);
+        for (const related of this.agents.values()) {
+          const recipients = related.recipients.filter(
+            (agentId) => agentId !== agent.agentId,
+          );
+          const observes = related.observes.filter(
+            (agentId) => agentId !== agent.agentId,
+          );
+          if (
+            recipients.length !== related.recipients.length ||
+            observes.length !== related.observes.length
+          ) {
+            related.recipients = recipients;
+            related.observes = observes;
+            this.db.updateAgentRun(
+              related.runId,
+              related.alias,
+              this.storedAgentJson(related),
+            );
+          }
+        }
+        results.push({
+          ...this.agentPayload(agent),
+          started: false,
+          error: message,
+        });
+      } finally {
+        this.endTransition(agent, transition);
+      }
     }
     for (const alias of request.callerCanTalkTo) {
-      caller.recipients.push(batchAliases.get(alias)!);
+      const agentId = batchAliases.get(alias)!;
+      if (!failedAgentIds.has(agentId)) {
+        caller.recipients.push(agentId);
+      }
     }
     for (const alias of request.callerCanObserve) {
-      caller.observes.push(batchAliases.get(alias)!);
+      const agentId = batchAliases.get(alias)!;
+      if (!failedAgentIds.has(agentId)) {
+        caller.observes.push(agentId);
+      }
     }
     caller.recipients = [...new Set(caller.recipients)];
     caller.observes = [...new Set(caller.observes)];
@@ -1319,32 +1494,37 @@ export class ScriptedRuntime implements RuntimeAdapter {
       sessionId: "e2e-recovered-agent-session",
     };
     this.agents.set(agent.agentId, agent);
-    caller.recipients = [...new Set([...caller.recipients, agent.agentId])];
-    caller.observes = [...new Set([...caller.observes, agent.agentId])];
-    this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
-    this.recoveredAgentRun = true;
-    this.emit(
-      "agent.loading",
-      { ...this.agentPayload(agent), recovered: true, sessionId: agent.sessionId },
-      { runId: agent.runId, memberId: agent.target, target: "status", done: false },
-    );
-    this.emit("session.identity", { sessionId: agent.sessionId }, {
-      runId: agent.runId,
-      memberId: agent.target,
-      target: "activity",
-      done: true,
-    });
-    this.emit(
-      "agent.ready",
-      { ...this.agentPayload(agent), recovered: true, sessionId: agent.sessionId },
-      { runId: agent.runId, memberId: agent.target, target: "status", done: true },
-    );
-    this.emit("member.state", { state: "idle" }, {
-      runId: agent.runId,
-      memberId: agent.target,
-      target: "status",
-      done: true,
-    });
+    const transition = this.beginTransition(agent, "recovering its scripted session");
+    try {
+      caller.recipients = [...new Set([...caller.recipients, agent.agentId])];
+      caller.observes = [...new Set([...caller.observes, agent.agentId])];
+      this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
+      this.recoveredAgentRun = true;
+      this.emit(
+        "agent.loading",
+        { ...this.agentPayload(agent), recovered: true, sessionId: agent.sessionId },
+        { runId: agent.runId, memberId: agent.target, target: "status", done: false },
+      );
+      this.emit("session.identity", { sessionId: agent.sessionId }, {
+        runId: agent.runId,
+        memberId: agent.target,
+        target: "activity",
+        done: true,
+      });
+      this.emit(
+        "agent.ready",
+        { ...this.agentPayload(agent), recovered: true, sessionId: agent.sessionId },
+        { runId: agent.runId, memberId: agent.target, target: "status", done: true },
+      );
+      this.emit("member.state", { state: "idle" }, {
+        runId: agent.runId,
+        memberId: agent.target,
+        target: "status",
+        done: true,
+      });
+    } finally {
+      this.endTransition(agent, transition);
+    }
   }
 
   async stopAgent(agentRef: string, reason = "Agent stopped by scripted runtime"): Promise<void> {
@@ -1352,14 +1532,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
     if (agent.primary) {
       throw new Error("The scripted primary agent cannot be stopped independently.");
     }
-    this.agents.delete(agent.agentId);
-    this.db.finishRun(agent.runId, "stopped", reason);
-    this.emit("agent.stopped", { ...this.agentPayload(agent), reason }, {
-      runId: agent.runId,
-      memberId: agent.target,
-      target: "status",
-      done: true,
-    });
+    const transition = this.beginTransition(agent, "stopping");
+    try {
+      this.agents.delete(agent.agentId);
+      this.db.finishRun(agent.runId, "stopped", reason);
+      this.emit("agent.stopped", { ...this.agentPayload(agent), reason }, {
+        runId: agent.runId,
+        memberId: agent.target,
+        target: "status",
+        done: true,
+      });
+    } finally {
+      this.endTransition(agent, transition);
+    }
   }
 
   async updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>> {
@@ -1369,6 +1554,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
     if (agent.primary) {
       throw new Error("The scripted primary definition is managed by the host.");
     }
+    const transition = this.beginTransition(agent, "updating its definition");
+    try {
     const resolveSelectors = (selectors: string[]): string[] =>
       selectors.map((selector) => {
         if (selector === "caller") return caller.agentId;
@@ -1409,6 +1596,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       done: true,
     });
     return { action: "updated", ...this.agentPayload(agent), reconnected: false };
+    } finally {
+      this.endTransition(agent, transition);
+    }
   }
 
   async shutdown(reason: string): Promise<void> {
@@ -1418,6 +1608,8 @@ export class ScriptedRuntime implements RuntimeAdapter {
       this.db.finishRun(agent.runId, "stopped", reason);
     }
     this.agents.clear();
+    this.transitions.clear();
+    this.generations.clear();
     this.primaryRunId = undefined;
   }
 }
