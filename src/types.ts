@@ -43,9 +43,12 @@ export interface DynamicAgentDefinition {
   reasoningSummary?: ReasoningSummary;
   permissions?: DynamicPermission;
   mcpServers?: string[];
-  /** Directional outgoing recipients: peer aliases in the same request, or "standard". */
+  /**
+   * Directional outgoing recipient selectors. `caller` resolves to the spawning
+   * or updating caller; peer aliases and `agent:<uuid>` targets resolve to UUIDs.
+   */
   canTalkTo: string[];
-  /** Agents whose SDK activity this agent may inspect passively. */
+  /** Caller/agent selectors whose SDK activity this agent may inspect passively. */
   canObserve: string[];
   ui?: {
     icon?: string;
@@ -59,10 +62,10 @@ export interface DynamicAgentDefinition {
  */
 export interface SpawnAgentsRequest {
   agents: DynamicAgentDefinition[];
-  /** Aliases in this request the Standard session is explicitly allowed to message. */
-  standardCanTalkTo: string[];
-  /** Aliases in this request whose SDK activity Standard may inspect passively. */
-  standardCanObserve: string[];
+  /** New-agent aliases the calling agent should be allowed to message. */
+  callerCanTalkTo: string[];
+  /** New-agent aliases the calling agent should be allowed to observe. */
+  callerCanObserve: string[];
 }
 
 export interface ResolvedAgent {
@@ -76,14 +79,10 @@ export interface ResolvedAgent {
   reasoningSummary: ReasoningSummary;
   permission?: DynamicPermission;
   mcpServers?: Set<string>;
-  /** Outgoing recipient aliases, possibly including the reserved alias "standard". */
-  recipients: Set<string>;
-  /** Agent aliases whose SDK activity this agent may inspect passively. */
-  observes: Set<string>;
-  /** Whether the Standard session was explicitly granted permission to message this agent. */
-  standardCanTalk: boolean;
-  /** Whether the Standard session may inspect this agent's SDK activity. */
-  standardCanObserve: boolean;
+  /** Request-local selectors resolved to UUID grants by the runtime. */
+  recipientSelectors: Set<string>;
+  /** Request-local observation selectors resolved to UUID grants by the runtime. */
+  observeSelectors: Set<string>;
   ui?: DynamicAgentDefinition["ui"];
 }
 

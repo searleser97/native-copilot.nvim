@@ -1785,7 +1785,7 @@ function M.reset()
   registry = {}
 end
 
--- Removes one agent's buffers without disturbing Standard or other agents.
+-- Removes one agent's buffers without disturbing the primary or other agents.
 function M.remove_member(member_id)
   local entry = registry[member_id]
   if not entry then return end

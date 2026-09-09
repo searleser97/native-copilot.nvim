@@ -8,8 +8,10 @@ import type {
   ValidationIssue,
 } from "./types.js";
 
-/** Reserved alias of the Standard supervisor session; never a spawned agent alias. */
-export const STANDARD_ALIAS = "standard";
+/** Request-local selector for the agent invoking a management tool. */
+export const CALLER_SELECTOR = "caller";
+/** Default alias of the agent attached to the primary user-facing buffer. */
+export const PRIMARY_ALIAS = "copilot";
 
 const aliasPattern = /^[a-z][a-z0-9_]*$/;
 const alias = z.string().min(1).regex(
@@ -17,8 +19,8 @@ const alias = z.string().min(1).regex(
   "must start with a lowercase letter and contain only lowercase letters, numbers, and underscores",
 ).describe(
   "Tool-safe alias used in agent messaging and every user-facing reference to this agent. It must " +
-    "be unique among active and recoverable agents, and must not be the reserved alias " +
-    '"standard". Several agents may share a role or display name as long as their aliases differ.',
+    `be unique among active and recoverable agents, and must not be the request-local selector ` +
+    `"${CALLER_SELECTOR}". Several agents may share a display name as long as their aliases differ.`,
 );
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
@@ -57,7 +59,7 @@ export const dynamicAgentSchema = z.object({
   task: z.string().min(1).describe(
     "Complete initial objective delivered to this agent immediately after it starts.",
   ),
-  prompt: z.string().min(1).describe("Complete role and operating instructions for this agent."),
+  prompt: z.string().min(1).describe("Complete operating instructions for this agent."),
   model: z.string().min(1).optional().describe("Model ID; omit to inherit the runtime default."),
   reasoningEffort: reasoningEffort.optional().describe("Optional reasoning effort override."),
   reasoningSummary: reasoningSummary.optional().describe("Optional reasoning display level."),
@@ -68,14 +70,14 @@ export const dynamicAgentSchema = z.object({
     "Subset of MCP server names loaded by the main session; omit to inherit all.",
   ),
   canTalkTo: z.array(z.string().min(1)).describe(
-    'Directional outgoing recipients: peer aliases, or the reserved alias "standard". Each ' +
-      "entry authorizes native_copilot_send_message to resolve that recipient by alias, durable " +
-      "agent id, or current SDK session id. It must not contain this agent's own alias, and it " +
-      "grants no incoming permission.",
+    `Directional outgoing recipients: peer aliases, durable agent:<uuid> targets, or the request-local selector ` +
+      `"${CALLER_SELECTOR}". Each selector is resolved to a durable agent UUID before it is ` +
+      "persisted. It must not identify this agent itself, and it grants no incoming permission.",
   ),
   canObserve: z.array(z.string().min(1)).describe(
-    'Directional passive-observation grants. Each peer alias, or the reserved alias "standard", ' +
-      "allows this agent to read that session's SDK event history through " +
+    `Directional passive-observation grants. Each peer alias, durable agent:<uuid> target, or ` +
+      `"${CALLER_SELECTOR}" allows this ` +
+      "agent to read that session's SDK event history through " +
       "native_copilot_read_agent_activity without prompting or interrupting it. This is " +
       "independent from canTalkTo.",
   ),
@@ -90,15 +92,14 @@ export const spawnAgentsSchema = z.object({
     "Complete runtime definitions for every agent to spawn. Each one becomes an independent, " +
       "durable agent with its own session, run, and mailbox; the request itself is not a group.",
   ),
-  standardCanTalkTo: z.array(z.string().min(1)).describe(
-    "Aliases in this request that the Standard session is explicitly allowed to message with " +
-      "native_copilot_send_to_agent. Communication is denied in both directions unless explicitly " +
-      "granted: this list grants Standard→agent only, and an agent's canTalkTo entry of " +
-      '"standard" grants agent→Standard only.',
+  callerCanTalkTo: z.array(z.string().min(1)).describe(
+    "Aliases in this request that the calling agent is explicitly allowed to message. This grants " +
+      "caller-to-child access only; child-to-caller access requires the child's canTalkTo to " +
+      `contain "${CALLER_SELECTOR}".`,
   ),
-  standardCanObserve: z.array(z.string().min(1)).describe(
-    "Aliases in this request whose SDK event history the Standard session may inspect passively " +
-      "through native_copilot_read_agent_activity. This grants no messaging permission.",
+  callerCanObserve: z.array(z.string().min(1)).describe(
+    "Aliases in this request whose SDK event history the calling agent may inspect passively. " +
+      "This grants no messaging permission.",
   ),
 }).strict();
 
@@ -106,11 +107,7 @@ function addIssue(issues: ValidationIssue[], path: string, message: string): voi
   issues.push({ path, message });
 }
 
-function resolveAgent(
-  definition: DynamicAgentDefinition,
-  standardCanTalk: boolean,
-  standardCanObserve: boolean,
-): ResolvedAgent {
+function resolveAgent(definition: DynamicAgentDefinition): ResolvedAgent {
   const agent: ResolvedAgent = {
     alias: definition.id,
     displayName: definition.displayName,
@@ -118,10 +115,8 @@ function resolveAgent(
     task: definition.task,
     initialPrompt: definition.prompt,
     reasoningSummary: definition.reasoningSummary ?? "detailed",
-    recipients: new Set(definition.canTalkTo),
-    observes: new Set(definition.canObserve),
-    standardCanTalk,
-    standardCanObserve,
+    recipientSelectors: new Set(definition.canTalkTo),
+    observeSelectors: new Set(definition.canObserve),
   };
   if (definition.model !== undefined) agent.model = definition.model;
   if (definition.reasoningEffort !== undefined) agent.reasoningEffort = definition.reasoningEffort;
@@ -133,21 +128,19 @@ function resolveAgent(
 
 export interface AgentValidationOptions {
   /**
-   * Aliases this agent's canTalkTo may reference, excluding its own alias. The
-   * reserved alias "standard" is always referenceable.
+   * Aliases this agent's canTalkTo/canObserve may reference, excluding its own
+   * alias. The request-local `caller` selector is always referenceable.
    */
   availableAliases: ReadonlySet<string>;
-  /** Whether the Standard session is granted permission to message this agent. */
-  standardCanTalk: boolean;
-  /** Whether the Standard session may inspect this agent's SDK activity. */
-  standardCanObserve: boolean;
+  /** Used only to recover a legacy v8 agent whose alias was `caller`. */
+  allowCallerAlias?: boolean;
   path?: string;
 }
 
 /**
  * Validates a single complete agent definition and resolves it. Directional
  * communication is validated strictly: an alias may not reference itself, and every
- * recipient must be a known alias or the reserved alias "standard".
+ * recipient must be a known alias or the request-local `caller` selector.
  */
 export function validateAgentDefinition(
   definition: DynamicAgentDefinition,
@@ -166,8 +159,8 @@ export function validateAgentDefinition(
   }
   const normalized = parsed.data as DynamicAgentDefinition;
   const issues: ValidationIssue[] = [];
-  if (normalized.id === STANDARD_ALIAS) {
-    addIssue(issues, `${path}.id`, `"${STANDARD_ALIAS}" is reserved for the Standard session`);
+  if (normalized.id === CALLER_SELECTOR && options.allowCallerAlias !== true) {
+    addIssue(issues, `${path}.id`, `"${CALLER_SELECTOR}" is a request-local selector`);
   }
   for (const field of ["canTalkTo", "canObserve"] as const) {
     const aliases = new Set(normalized[field]);
@@ -178,7 +171,10 @@ export function validateAgentDefinition(
       if (referenced === normalized.id) {
         continue;
       }
-      if (referenced === STANDARD_ALIAS) {
+      if (referenced === CALLER_SELECTOR) {
+        continue;
+      }
+      if (referenced.startsWith("agent:") && referenced.length > "agent:".length) {
         continue;
       }
       if (!aliasPattern.test(referenced)) {
@@ -200,18 +196,19 @@ export function validateAgentDefinition(
   return {
     valid: true,
     issues,
-    agent: resolveAgent(normalized, options.standardCanTalk, options.standardCanObserve),
+    agent: resolveAgent(normalized),
   };
 }
 
 /**
  * Validates an ephemeral spawn request and resolves every agent in it. The request
- * carries no group identity: it only names the agents to start and the aliases the
- * Standard session may message.
+ * carries no group identity: it only names the agents to start and caller-relative
+ * outgoing grants.
  */
 export function validateSpawnRequest(
   request: SpawnAgentsRequest,
   path = "spawn",
+  existingAliases: ReadonlySet<string> = new Set<string>(),
 ): SpawnValidationResult {
   const parsed = spawnAgentsSchema.safeParse(request);
   if (!parsed.success) {
@@ -235,22 +232,22 @@ export function validateSpawnRequest(
     aliases.add(definition.id);
   }
 
-  const standardCanTalkTo = new Set(normalized.standardCanTalkTo);
-  for (const [index, granted] of [...standardCanTalkTo].entries()) {
+  const callerCanTalkTo = new Set(normalized.callerCanTalkTo);
+  for (const [index, granted] of [...callerCanTalkTo].entries()) {
     if (!aliases.has(granted)) {
       addIssue(
         issues,
-        `${path}.standardCanTalkTo.${index}`,
+        `${path}.callerCanTalkTo.${index}`,
         `references unknown agent "${granted}"`,
       );
     }
   }
-  const standardCanObserve = new Set(normalized.standardCanObserve);
-  for (const [index, granted] of [...standardCanObserve].entries()) {
+  const callerCanObserve = new Set(normalized.callerCanObserve);
+  for (const [index, granted] of [...callerCanObserve].entries()) {
     if (!aliases.has(granted)) {
       addIssue(
         issues,
-        `${path}.standardCanObserve.${index}`,
+        `${path}.callerCanObserve.${index}`,
         `references unknown agent "${granted}"`,
       );
     }
@@ -258,12 +255,10 @@ export function validateSpawnRequest(
 
   const agents: ResolvedAgent[] = [];
   for (const [index, definition] of normalized.agents.entries()) {
-    const availableAliases = new Set(aliases);
+    const availableAliases = new Set([...existingAliases, ...aliases]);
     availableAliases.delete(definition.id);
     const result = validateAgentDefinition(definition, {
       availableAliases,
-      standardCanTalk: standardCanTalkTo.has(definition.id),
-      standardCanObserve: standardCanObserve.has(definition.id),
       path: `${path}.agents.${index}`,
     });
     issues.push(...result.issues);

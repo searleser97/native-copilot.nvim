@@ -89,6 +89,7 @@ local completed = false
 local phase = 'early-completion'
 local last_trace = 0
 local resume_picker_ready_at
+local primary_target
 local tick
 
 vim.notify = function(message)
@@ -99,6 +100,10 @@ local native = require('native_copilot')
 local on_event = native._on_event
 native._on_event = function(message)
   vim.fn.writefile({ 'event=' .. tostring(message.type) }, trace_path, 'a')
+  local payload = message.payload or {}
+  if payload.primary or message.type == 'primary.ready' then
+    primary_target = payload.target or message.memberId or primary_target
+  end
   return on_event(message)
 end
 native.setup({
@@ -152,7 +157,9 @@ end
 
 local function conversation()
   return find_buffer(function(buf)
-    return vim.api.nvim_buf_get_name(buf):find('native%-copilot://standard/conversation') ~= nil
+    return primary_target
+      and vim.b[buf].native_copilot_member == primary_target
+      and vim.api.nvim_buf_get_name(buf):find('/conversation$', 1) ~= nil
   end)
 end
 
@@ -362,14 +369,14 @@ tick = function()
       schedule_tick()
       return
     end
-    local session_id = content:find('[SessionId][e2e-standard-session]', 1, true)
+    local session_id = content:find('[SessionId][e2e-primary-session]', 1, true)
     local first_environment = content:find('[environment]', 1, true)
     if not check(
       session_id
         and first_environment
         and session_id < first_environment
-        and content:find('\n\n[SessionId][e2e-standard-session]', 1, true),
-      'standard session identity preceded environment discovery'
+        and content:find('\n\n[SessionId][e2e-primary-session]', 1, true),
+      'primary session identity preceded environment discovery'
     ) then
       finish()
       return
@@ -556,7 +563,7 @@ tick = function()
       schedule_tick()
       return
     end
-    pass('/fleet <objective> routed the standalone agent request to Standard')
+    pass('/fleet <objective> routed the standalone agent request to the primary agent')
     submit('/fleet')
     phase = 'agent-picker'
   elseif phase == 'agent-picker' then
@@ -834,7 +841,7 @@ tick = function()
       return
     end
     if not check(
-      not content:find('SUBAGENT INTERNAL RESPONSE MUST NOT RENDER AS STANDARD COPILOT', 1, true),
+      not content:find('SUBAGENT INTERNAL RESPONSE MUST NOT RENDER AS PRIMARY COPILOT', 1, true),
       '/resume kept sub-agent internal responses out of the root Copilot transcript'
     ) then
       finish()
@@ -911,7 +918,7 @@ tick = function()
     if #windows > 0 then vim.api.nvim_win_close(windows[1], true) end
     native._on_event({
       type = 'member.state',
-      memberId = 'standard',
+      memberId = primary_target,
       payload = { state = 'busy' },
     })
     local prompt_buf = assert(prompt(), 'prompt buffer was not found')

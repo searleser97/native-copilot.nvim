@@ -1,16 +1,21 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export type RunMode = "standard" | "agent";
+/** `standard` is accepted only while migrating schema-v8 state. */
+const LEGACY_PRIMARY_IDENTITY = "standard";
+const PRIMARY_ALIAS = "copilot";
+
+type LegacyRunMode = "standard" | "agent";
 export type RunStatus = "active" | "stopped" | "interrupted";
 export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
 
 /**
- * Current durable schema version. Every run is a single session — the Standard
- * supervisor or one standalone agent — so the schema carries no group state.
+ * Current durable schema version. Every run is one UUID-backed agent session; a
+ * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 export interface StoredMessage {
   id: string;
@@ -42,8 +47,7 @@ export interface StoredAgentRun {
   agentId: string;
   alias: string;
   definition: string | null;
-  standardCanTalk: boolean;
-  standardCanObserve: boolean;
+  isPrimary: boolean;
   status: RunStatus;
   startedAt: string;
   endedAt: string | null;
@@ -77,11 +81,9 @@ export class AgentDatabase {
   }
 
   /**
-   * Brings the database to {@link SCHEMA_VERSION}. Backward compatibility with an
-   * older, pre-agent schema is deliberately not preserved: that state is dropped and
-   * the durable schema is rebuilt coherently, so an existing database always opens
-   * successfully instead of failing at startup. A database written by a *newer* host
-   * is never erased — it is rejected with an explicit error.
+   * Brings the database to {@link SCHEMA_VERSION}. Pre-v6 state is rebuilt as before;
+   * v6-v8 agent runs and mailboxes are migrated in place. A database written by a
+   * newer host is never erased.
    */
   private migrate(): void {
     this.db.exec(`
@@ -106,8 +108,6 @@ export class AgentDatabase {
       );
     }
     if (schema.version < 6) {
-      // Foreign keys cannot be toggled inside a transaction, so disable them around
-      // the rebuild of the obsolete tables.
       this.db.exec("PRAGMA foreign_keys = OFF");
       this.db.exec(`
         BEGIN IMMEDIATE;
@@ -122,22 +122,6 @@ export class AgentDatabase {
         UPDATE schema_meta SET version = ${SCHEMA_VERSION};
         COMMIT;
       `);
-    } else if (schema.version === 6) {
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        ALTER TABLE runs ADD COLUMN standard_can_observe INTEGER NOT NULL DEFAULT 0;
-        DROP TABLE IF EXISTS checkpoints;
-        DROP TABLE IF EXISTS events;
-        UPDATE schema_meta SET version = ${SCHEMA_VERSION};
-        COMMIT;
-      `);
-    } else if (schema.version === 7) {
-      this.db.exec(`
-        BEGIN IMMEDIATE;
-        DROP TABLE IF EXISTS activity_cursors;
-        UPDATE schema_meta SET version = ${SCHEMA_VERSION};
-        COMMIT;
-      `);
     }
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(`
@@ -149,6 +133,7 @@ export class AgentDatabase {
         definition TEXT,
         standard_can_talk INTEGER NOT NULL DEFAULT 0,
         standard_can_observe INTEGER NOT NULL DEFAULT 0,
+        is_primary INTEGER NOT NULL DEFAULT 0,
         workspace TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('active', 'stopped', 'interrupted')),
         started_at TEXT NOT NULL,
@@ -196,6 +181,370 @@ export class AgentDatabase {
         PRIMARY KEY(observer_id, target_agent_id)
       );
     `);
+    if (schema.version >= 6 && schema.version < SCHEMA_VERSION) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        if (schema.version === 6 && !this.hasColumn("runs", "standard_can_observe")) {
+          this.db.exec(
+            "ALTER TABLE runs ADD COLUMN standard_can_observe INTEGER NOT NULL DEFAULT 0",
+          );
+        }
+        if (!this.hasColumn("runs", "is_primary")) {
+          this.db.exec("ALTER TABLE runs ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0");
+        }
+        if (schema.version <= 6) {
+          this.db.exec("DROP TABLE IF EXISTS checkpoints; DROP TABLE IF EXISTS events;");
+        }
+        if (schema.version <= 7) {
+          this.db.exec(`
+            DROP TABLE IF EXISTS activity_cursors;
+            CREATE TABLE activity_cursors (
+              observer_id TEXT NOT NULL,
+              target_agent_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              event_cursor TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(observer_id, target_agent_id)
+            );
+          `);
+        }
+        this.migrateLegacyAgentState();
+        this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{
+      name: string;
+    }>;
+    return rows.some((row) => row.name === column);
+  }
+
+  /**
+   * Adopts schema-v8 primary-session state into the same UUID-backed run/ACL model as
+   * every other agent. Existing worker definitions and pending mail are retained.
+   */
+  private migrateLegacyAgentState(): void {
+    type LegacyRun = {
+      id: string;
+      mode: LegacyRunMode;
+      agentId: string | null;
+      alias: string | null;
+      definition: string | null;
+      workspace: string;
+      startedAt: string;
+      legacyPrimaryCanTalk: number;
+      legacyPrimaryCanObserve: number;
+    };
+    const runs = this.db
+      .prepare(
+        `SELECT id, mode, agent_id AS agentId, alias, definition, workspace,
+                started_at AS startedAt, standard_can_talk AS legacyPrimaryCanTalk,
+                standard_can_observe AS legacyPrimaryCanObserve
+         FROM runs
+         ORDER BY workspace, started_at DESC`,
+      )
+      .all() as unknown as LegacyRun[];
+    const primaryByWorkspace = new Map<
+      string,
+      { agentId: string; runId: string; alias: string }
+    >();
+    for (const run of runs) {
+      if (run.mode !== "standard" || primaryByWorkspace.has(run.workspace)) {
+        continue;
+      }
+      primaryByWorkspace.set(run.workspace, {
+        agentId: randomUUID(),
+        runId: run.id,
+        alias: PRIMARY_ALIAS,
+      });
+    }
+
+    const aliasesByWorkspace = new Map<string, Map<string, string>>();
+    const workspaceByAgentId = new Map<string, string>();
+    for (const run of runs) {
+      if (run.mode !== "agent" || !run.agentId || !run.alias) {
+        continue;
+      }
+      workspaceByAgentId.set(run.agentId, run.workspace);
+      const aliases = aliasesByWorkspace.get(run.workspace) ?? new Map<string, string>();
+      if (!aliases.has(run.alias)) {
+        aliases.set(run.alias, run.agentId);
+      }
+      aliasesByWorkspace.set(run.workspace, aliases);
+    }
+    for (const [workspace, primary] of primaryByWorkspace) {
+      const aliases = aliasesByWorkspace.get(workspace);
+      let candidate = PRIMARY_ALIAS;
+      let suffix = 2;
+      if (aliases?.has(candidate)) {
+        candidate = "primary";
+      }
+      while (aliases?.has(candidate)) {
+        candidate = `primary_${suffix}`;
+        suffix += 1;
+      }
+      primary.alias = candidate;
+      workspaceByAgentId.set(primary.agentId, workspace);
+    }
+
+    const resolveSelectors = (
+      selectors: unknown,
+      workspace: string,
+    ): string[] => {
+      if (!Array.isArray(selectors)) {
+        return [];
+      }
+      const primary = primaryByWorkspace.get(workspace);
+      const aliases = aliasesByWorkspace.get(workspace);
+      const resolved = new Set<string>();
+      for (const selector of selectors) {
+        if (typeof selector !== "string") {
+          continue;
+        }
+        if (selector === LEGACY_PRIMARY_IDENTITY) {
+          if (primary) resolved.add(primary.agentId);
+          continue;
+        }
+        if (selector.startsWith("agent:") && selector.length > "agent:".length) {
+          resolved.add(selector.slice("agent:".length));
+          continue;
+        }
+        const byAlias = aliases?.get(selector);
+        if (byAlias) {
+          resolved.add(byAlias);
+          continue;
+        }
+        if (workspaceByAgentId.get(selector) === workspace) {
+          resolved.add(selector);
+        }
+      }
+      return [...resolved];
+    };
+
+    const updateDefinition = this.db.prepare(
+      "UPDATE runs SET definition = ? WHERE id = ?",
+    );
+    const legacyTalkByWorkspace = new Map<string, Set<string>>();
+    const legacyObserveByWorkspace = new Map<string, Set<string>>();
+    for (const run of runs) {
+      const agentId = run.agentId;
+      const storedDefinition = run.definition;
+      if (run.mode !== "agent" || !agentId || !storedDefinition) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(storedDefinition) as {
+          definition?: Record<string, unknown>;
+          mcpServers?: unknown;
+          standardCanTalk?: unknown;
+          standardCanObserve?: unknown;
+        };
+        if (!parsed.definition || typeof parsed.definition !== "object") {
+          continue;
+        }
+        const canTalkTo = parsed.definition.canTalkTo;
+        const canObserve = parsed.definition.canObserve;
+        if (parsed.standardCanTalk === true) {
+          const grants = legacyTalkByWorkspace.get(run.workspace) ?? new Set<string>();
+          grants.add(agentId);
+          legacyTalkByWorkspace.set(run.workspace, grants);
+        }
+        if (parsed.standardCanObserve === true) {
+          const grants = legacyObserveByWorkspace.get(run.workspace) ?? new Set<string>();
+          grants.add(agentId);
+          legacyObserveByWorkspace.set(run.workspace, grants);
+        }
+        const canTalkToAgentIds = resolveSelectors(canTalkTo, run.workspace);
+        const canObserveAgentIds = resolveSelectors(canObserve, run.workspace);
+        const definition = {
+          ...parsed.definition,
+          canTalkTo: canTalkToAgentIds.map((agentId) => `agent:${agentId}`),
+          canObserve: canObserveAgentIds.map((agentId) => `agent:${agentId}`),
+        };
+        updateDefinition.run(
+          JSON.stringify({
+            definition,
+            mcpServers: Array.isArray(parsed.mcpServers) ? parsed.mcpServers : [],
+            canTalkToAgentIds,
+            canObserveAgentIds,
+          }),
+          run.id,
+        );
+      } catch {
+        // Preserve an unreadable record verbatim so migration never destroys state.
+      }
+    }
+
+    const convertPrimary = this.db.prepare(
+      `UPDATE runs
+       SET mode = 'agent', agent_id = ?, alias = ?, definition = ?, is_primary = 1
+       WHERE id = ?`,
+    );
+    const updatePrimaryMessages = this.db.prepare(
+      `UPDATE messages SET target = ?, source = CASE WHEN source = ? THEN ? ELSE source END
+       WHERE run_id = ?`,
+    );
+    for (const [workspace, primary] of primaryByWorkspace) {
+      const outgoingTalk = new Set(runs
+        .filter(
+          (run) =>
+            run.workspace === workspace &&
+            run.mode === "agent" &&
+            run.agentId !== null &&
+            run.legacyPrimaryCanTalk === 1,
+        )
+        .map((run) => run.agentId!));
+      for (const agentId of legacyTalkByWorkspace.get(workspace) ?? []) {
+        outgoingTalk.add(agentId);
+      }
+      const outgoingObserve = new Set(runs
+        .filter(
+          (run) =>
+            run.workspace === workspace &&
+            run.mode === "agent" &&
+            run.agentId !== null &&
+            run.legacyPrimaryCanObserve === 1,
+        )
+        .map((run) => run.agentId!));
+      for (const agentId of legacyObserveByWorkspace.get(workspace) ?? []) {
+        outgoingObserve.add(agentId);
+      }
+      const definition = {
+        id: primary.alias,
+        displayName: "Copilot",
+        description: "Primary user-facing Copilot agent",
+        task: "Assist the user in the primary Neovim conversation.",
+        prompt:
+          "You are the Copilot agent attached to the primary user-facing Neovim buffer.",
+        canTalkTo: [],
+        canObserve: [],
+      };
+      convertPrimary.run(
+        primary.agentId,
+        primary.alias,
+        JSON.stringify({
+          definition,
+          mcpServers: [],
+          canTalkToAgentIds: [...outgoingTalk],
+          canObserveAgentIds: [...outgoingObserve],
+        }),
+        primary.runId,
+      );
+      updatePrimaryMessages.run(
+        `agent:${primary.agentId}`,
+        LEGACY_PRIMARY_IDENTITY,
+        `agent:${primary.agentId}`,
+        primary.runId,
+      );
+      this.db
+        .prepare(
+          `UPDATE messages SET source = ?
+           WHERE source = ?
+             AND kind = 'agent'
+             AND run_id IN (SELECT id FROM runs WHERE workspace = ?)`,
+        )
+        .run(`agent:${primary.agentId}`, LEGACY_PRIMARY_IDENTITY, workspace);
+    }
+    const updateLegacySourceAlias = this.db.prepare(
+      `UPDATE messages SET source = ?
+       WHERE source = ?
+         AND kind = 'agent'
+         AND run_id IN (SELECT id FROM runs WHERE workspace = ?)`,
+    );
+    for (const [workspace, aliases] of aliasesByWorkspace) {
+      for (const [alias, agentId] of aliases) {
+        updateLegacySourceAlias.run(`agent:${agentId}`, alias, workspace);
+      }
+    }
+
+    const sessions = this.db
+      .prepare(
+        `SELECT agent_sessions.session_id AS sessionId, runs.agent_id AS agentId,
+                runs.workspace AS workspace
+         FROM agent_sessions
+         JOIN runs ON runs.id = agent_sessions.run_id
+         WHERE runs.agent_id IS NOT NULL`,
+      )
+      .all() as unknown as Array<{ sessionId: string; agentId: string; workspace: string }>;
+    const sessionTargets = new Map<
+      string,
+      { sessionId: string; agentId: string; workspace: string }
+    >();
+    for (const row of sessions) {
+      sessionTargets.set(row.sessionId, row);
+    }
+    for (const run of runs) {
+      if (run.mode !== "standard") continue;
+      const primary = primaryByWorkspace.get(run.workspace);
+      const session = this.db
+        .prepare("SELECT session_id AS sessionId FROM agent_sessions WHERE run_id = ?")
+        .get(run.id) as { sessionId: string } | undefined;
+      if (primary && session) {
+        sessionTargets.set(session.sessionId, {
+          sessionId: session.sessionId,
+          agentId: primary.agentId,
+          workspace: run.workspace,
+        });
+      }
+    }
+    const cursors = this.db
+      .prepare(
+        `SELECT observer_id AS observerId, target_agent_id AS targetAgentId,
+                session_id AS sessionId, event_cursor AS cursor, updated_at AS updatedAt
+         FROM activity_cursors`,
+      )
+      .all() as unknown as Array<{
+        observerId: string;
+        targetAgentId: string;
+        sessionId: string;
+        cursor: string;
+        updatedAt: string;
+      }>;
+    const upsertCursor = this.db.prepare(
+      `INSERT OR REPLACE INTO activity_cursors(
+         observer_id, target_agent_id, session_id, event_cursor, updated_at
+       ) VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const cursor of cursors) {
+      let targetAgentId = cursor.targetAgentId;
+      if (targetAgentId === LEGACY_PRIMARY_IDENTITY) {
+        targetAgentId = sessionTargets.get(cursor.sessionId)?.agentId ?? targetAgentId;
+      } else if (targetAgentId.startsWith("agent:")) {
+        targetAgentId = targetAgentId.slice("agent:".length);
+      }
+      let observerId = cursor.observerId;
+      if (observerId === LEGACY_PRIMARY_IDENTITY) {
+        const workspace = workspaceByAgentId.get(targetAgentId);
+        observerId = workspace
+          ? primaryByWorkspace.get(workspace)?.agentId ?? observerId
+          : observerId;
+      } else if (observerId.startsWith("agent:")) {
+        observerId = observerId.slice("agent:".length);
+      }
+      if (
+        observerId !== LEGACY_PRIMARY_IDENTITY &&
+        targetAgentId !== LEGACY_PRIMARY_IDENTITY
+      ) {
+        upsertCursor.run(
+          observerId,
+          targetAgentId,
+          cursor.sessionId,
+          cursor.cursor,
+          cursor.updatedAt,
+        );
+      }
+    }
+    this.db
+      .prepare(
+        "DELETE FROM activity_cursors WHERE observer_id = ? OR target_agent_id = ?",
+      )
+      .run(LEGACY_PRIMARY_IDENTITY, LEGACY_PRIMARY_IDENTITY);
   }
 
   private transaction<T>(operation: () => T): T {
@@ -247,41 +596,36 @@ export class AgentDatabase {
     return staleIds.length;
   }
 
-  createStandardRun(id: string, workspace: string, ownerPid: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO runs(id, mode, workspace, status, started_at, owner_pid)
-         VALUES (?, 'standard', ?, 'active', ?, ?)`,
-      )
-      .run(id, workspace, now(), ownerPid);
-  }
-
   /**
-   * Moves every still-undelivered message addressed to the Standard session from
-   * earlier, no-longer-active Standard runs in this workspace into the run that now
-   * owns that mailbox. Messages an agent sent to Standard must survive a Standard
-   * session replacement or a host restart rather than being stranded on a dead run,
-   * so they are transferred instead of dropped: stale delivery leases are released,
-   * the messages are reset to 'pending', and each one is given the next free
-   * sequence in the new run so the UNIQUE(run_id, target, sequence) key cannot
-   * collide. Returns how many messages were adopted.
+   * Moves still-undelivered mail from earlier runs of one durable agent into its
+   * current run. The optional legacy target adopts pre-v9 primary mail as well.
    */
-  adoptStandardMessages(runId: string, workspace: string, target = "standard"): number {
+  adoptAgentMessages(
+    runId: string,
+    workspace: string,
+    agentId: string,
+    target: string,
+    legacyTarget?: string,
+  ): number {
     return this.transaction(() => {
       const rows = this.db
         .prepare(
           `SELECT messages.id AS id
            FROM messages
            JOIN runs ON runs.id = messages.run_id
-           WHERE messages.target = ?
-             AND messages.status IN ('pending', 'delivering')
-             AND runs.mode = 'standard'
+           WHERE messages.status IN ('pending', 'delivering')
              AND runs.workspace = ?
              AND runs.id != ?
              AND runs.status != 'active'
+             AND (
+               (runs.mode = 'agent' AND runs.agent_id = ?)
+               OR (? IS NOT NULL AND runs.mode = 'standard' AND messages.target = ?)
+             )
            ORDER BY messages.created_at, messages.sequence`,
         )
-        .all(target, workspace, runId) as unknown as Array<{ id: string }>;
+        .all(workspace, runId, agentId, legacyTarget ?? null, legacyTarget ?? null) as unknown as Array<{
+          id: string;
+        }>;
       if (rows.length === 0) {
         return 0;
       }
@@ -289,12 +633,12 @@ export class AgentDatabase {
       let sequence = this.nextSequence(runId, target);
       const adopt = this.db.prepare(
         `UPDATE messages
-         SET run_id = ?, sequence = ?, status = 'pending', updated_at = ?
+         SET run_id = ?, target = ?, sequence = ?, status = 'pending', updated_at = ?
          WHERE id = ?`,
       );
       const releaseLease = this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?");
       for (const row of rows) {
-        adopt.run(runId, sequence, timestamp, row.id);
+        adopt.run(runId, target, sequence, timestamp, row.id);
         releaseLease.run(row.id);
         sequence += 1;
       }
@@ -302,31 +646,44 @@ export class AgentDatabase {
     });
   }
 
-  /** Creates the single durable run that owns one standalone agent. */
+  adoptPrimaryMessages(
+    runId: string,
+    workspace: string,
+    agentId: string,
+    target: string,
+  ): number {
+    return this.adoptAgentMessages(
+      runId,
+      workspace,
+      agentId,
+      target,
+      LEGACY_PRIMARY_IDENTITY,
+    );
+  }
+
+  /** Creates one durable run owned by one UUID-backed agent. */
   createAgentRun(
     id: string,
     agentId: string,
     alias: string,
     definition: string,
-    standardCanTalk: boolean,
-    standardCanObserve: boolean,
     workspace: string,
     ownerPid: number,
+    isPrimary = false,
   ): void {
     this.db
       .prepare(
         `INSERT INTO runs(
-           id, mode, agent_id, alias, definition, standard_can_talk, standard_can_observe,
-           workspace, status, started_at, owner_pid
-         ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+           id, mode, agent_id, alias, definition, is_primary, workspace,
+           status, started_at, owner_pid
+         ) VALUES (?, 'agent', ?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
       .run(
         id,
         agentId,
         alias,
         definition,
-        standardCanTalk ? 1 : 0,
-        standardCanObserve ? 1 : 0,
+        isPrimary ? 1 : 0,
         workspace,
         now(),
         ownerPid,
@@ -336,17 +693,14 @@ export class AgentDatabase {
   private agentRunRows(where: string, ...parameters: Array<string | number>): StoredAgentRun[] {
     const rows = this.db
       .prepare(
-        `SELECT id, agent_id AS agentId, alias, definition,
-                standard_can_talk AS standardCanTalk,
-                standard_can_observe AS standardCanObserve,
+        `SELECT id, agent_id AS agentId, alias, definition, is_primary AS isPrimary,
                 status, started_at AS startedAt, ended_at AS endedAt
          FROM runs
          WHERE mode = 'agent' AND agent_id IS NOT NULL AND alias IS NOT NULL AND ${where}`,
       )
       .all(...parameters) as unknown as Array<
-        Omit<StoredAgentRun, "standardCanTalk" | "standardCanObserve" | "session"> & {
-          standardCanTalk: number;
-          standardCanObserve: number;
+        Omit<StoredAgentRun, "isPrimary" | "session"> & {
+          isPrimary: number;
         }
       >;
     const session = this.db.prepare(
@@ -355,16 +709,16 @@ export class AgentDatabase {
     );
     return rows.map((row) => ({
       ...row,
-      standardCanTalk: row.standardCanTalk === 1,
-      standardCanObserve: row.standardCanObserve === 1,
+      isPrimary: row.isPrimary === 1,
       session: session.get(row.id) as unknown as StoredAgentSession | undefined,
     }));
   }
 
-  /** Agent runs in this workspace that are not owned by a live host and can resume. */
+  /** Additional-agent runs not owned by a live host that can resume explicitly. */
   resumableAgentRuns(workspace: string, limit = 50): StoredAgentRun[] {
     return this.agentRunRows(
       `workspace = ?
+         AND is_primary = 0
          AND status != 'active'
          AND definition IS NOT NULL
          AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
@@ -379,6 +733,46 @@ export class AgentDatabase {
     return this.agentRunRows("id = ? AND workspace = ?", id, workspace)[0];
   }
 
+  /** Latest inactive primary run available for this host to reclaim. */
+  resumablePrimaryRun(workspace: string): StoredAgentRun | undefined {
+    return this.agentRunRows(
+      `workspace = ?
+         AND is_primary = 1
+         AND id = (
+           SELECT id FROM runs AS latest
+           WHERE latest.workspace = ? AND latest.mode = 'agent' AND latest.is_primary = 1
+           ORDER BY latest.started_at DESC
+           LIMIT 1
+         )
+         AND status != 'active'
+         AND definition IS NOT NULL
+       LIMIT 1`,
+      workspace,
+      workspace,
+    )[0];
+  }
+
+  /** Latest persisted run for a durable agent, active or inactive. */
+  latestAgentRun(agentId: string, workspace: string): StoredAgentRun | undefined {
+    return this.agentRunRows(
+      `agent_id = ? AND workspace = ? AND definition IS NOT NULL
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      agentId,
+      workspace,
+    )[0];
+  }
+
+  latestAgentRunByAlias(alias: string, workspace: string): StoredAgentRun | undefined {
+    return this.agentRunRows(
+      `alias = ? AND workspace = ? AND definition IS NOT NULL
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      alias,
+      workspace,
+    )[0];
+  }
+
   /**
    * Every agent alias reserved in a workspace: one row per agent run that still has
    * a stored definition, regardless of status or whether it ever produced a session.
@@ -390,7 +784,7 @@ export class AgentDatabase {
       .prepare(
         `SELECT alias, agent_id AS agentId, id AS runId, status
          FROM runs
-         WHERE mode = 'agent' AND workspace = ?
+         WHERE mode = 'agent' AND is_primary = 0 AND workspace = ?
            AND alias IS NOT NULL AND agent_id IS NOT NULL AND definition IS NOT NULL
          ORDER BY started_at DESC`,
       )
@@ -414,16 +808,14 @@ export class AgentDatabase {
     id: string,
     alias: string,
     definition: string,
-    standardCanTalk: boolean,
-    standardCanObserve: boolean,
   ): void {
     const result = this.db
       .prepare(
         `UPDATE runs
-         SET alias = ?, definition = ?, standard_can_talk = ?, standard_can_observe = ?
+         SET alias = ?, definition = ?
          WHERE id = ? AND mode = 'agent'`,
       )
-      .run(alias, definition, standardCanTalk ? 1 : 0, standardCanObserve ? 1 : 0, id);
+      .run(alias, definition, id);
     if (result.changes !== 1) {
       throw new Error(`Agent run "${id}" could not be updated with a new definition.`);
     }
@@ -460,17 +852,6 @@ export class AgentDatabase {
          FROM agent_sessions WHERE run_id = ?`,
       )
       .get(runId) as unknown as StoredAgentSession | undefined;
-  }
-
-  hasConversationActivity(runId: string): boolean {
-    const row = this.db
-      .prepare(
-        `SELECT EXISTS(
-           SELECT 1 FROM messages WHERE run_id = ?
-         ) AS present`,
-      )
-      .get(runId) as { present: number };
-    return row.present === 1;
   }
 
   nextSequence(runId: string, target: string): number {

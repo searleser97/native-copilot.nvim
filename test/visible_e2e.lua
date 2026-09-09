@@ -27,6 +27,7 @@ local followed_cursor
 local processing_result_winbar_seen = false
 local timeline_recovery_checked = false
 local completed = false
+local primary_target
 local tick
 
 vim.opt.runtimepath:prepend(root)
@@ -46,14 +47,17 @@ local buffers = require('native_copilot.buffers')
 local on_event = native._on_event
 native._on_event = function(message)
   append_trace({ 'event=' .. tostring(message.type) })
+  local payload = message.payload or {}
+  if payload.primary or message.type == 'primary.ready' then
+    primary_target = payload.target or message.memberId or primary_target
+  end
   local ok, failure = xpcall(on_event, debug.traceback, message)
   if not ok then
     append_trace({ 'event_error=' .. tostring(failure):gsub('\n', '\\n') })
     error(failure)
   end
-  local payload = message.payload or {}
   if message.type == 'activity.event' and payload.eventType == 'tool.execution_complete' then
-    local entry = buffers.get_member(message.memberId or 'standard')
+    local entry = buffers.get_member(message.memberId or primary_target)
     local windows = entry and vim.fn.win_findbuf(entry.views.conversation.buf) or {}
     local winbar = #windows > 0 and vim.wo[windows[1]].winbar or ''
     processing_result_winbar_seen =
@@ -78,7 +82,9 @@ end
 
 local function conversation()
   return find_buffer(function(buf)
-    return vim.api.nvim_buf_get_name(buf):find('native%-copilot://standard/conversation') ~= nil
+    return primary_target
+      and vim.b[buf].native_copilot_member == primary_target
+      and vim.api.nvim_buf_get_name(buf):find('/conversation$', 1) ~= nil
   end)
 end
 
@@ -168,7 +174,7 @@ end
 
 local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
-  buffers.upsert_timeline('standard', 'e2e-timeline-recovery', {
+  buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
     kind = 'tool',
     label = 'grep',
     status = 'running',
@@ -193,7 +199,7 @@ local function timeline_recovers_without_anchor_extmark(buf)
       break
     end
   end
-  buffers.upsert_timeline('standard', 'e2e-timeline-recovery', {
+  buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
     kind = 'tool',
     label = 'grep',
     status = 'completed',
@@ -229,7 +235,7 @@ local function timeline_recovers_without_anchor_extmark(buf)
         )
     end
   end
-  buffers.remove_timeline('standard', 'e2e-timeline-recovery')
+  buffers.remove_timeline(primary_target, 'e2e-timeline-recovery')
   local anchor_removed = deleted_anchor
     and #vim.api.nvim_buf_get_extmark_by_id(buf, namespace, deleted_anchor, {}) == 0
   return count == 1
@@ -246,7 +252,7 @@ local function adjacent_tool_signs_survive_completion(buf)
     { id = 'e2e-adjacent-tool-second', detail = 'adjacent-tool-second' },
   }
   for _, tool in ipairs(tools) do
-    buffers.upsert_timeline('standard', tool.id, {
+    buffers.upsert_timeline(primary_target, tool.id, {
       kind = 'tool',
       label = 'probe',
       status = 'running',
@@ -256,7 +262,7 @@ local function adjacent_tool_signs_survive_completion(buf)
   end
   for index = #tools, 1, -1 do
     local tool = tools[index]
-    buffers.upsert_timeline('standard', tool.id, {
+    buffers.upsert_timeline(primary_target, tool.id, {
       kind = 'tool',
       label = 'probe',
       status = 'completed',
@@ -289,7 +295,7 @@ local function adjacent_tool_signs_survive_completion(buf)
     valid = valid and completed_anchors == 1
   end
   for _, tool in ipairs(tools) do
-    buffers.remove_timeline('standard', tool.id)
+    buffers.remove_timeline(primary_target, tool.id)
   end
   return valid and vim.tbl_count(anchor_ids) == #tools
 end
@@ -302,7 +308,7 @@ local function identical_tools_recover_by_render_order(buf)
     'e2e-identical-tool-second',
   }
   for _, id in ipairs(ids) do
-    buffers.upsert_timeline('standard', id, {
+    buffers.upsert_timeline(primary_target, id, {
       kind = 'tool',
       label = 'probe',
       status = 'running',
@@ -310,7 +316,7 @@ local function identical_tools_recover_by_render_order(buf)
       started_at = started_at,
     })
   end
-  buffers.upsert_timeline('standard', 'e2e-identical-tool-environment', {
+  buffers.upsert_timeline(primary_target, 'e2e-identical-tool-environment', {
     kind = 'environment',
     label = 'Identical Tool recovery insertion',
     status = 'completed',
@@ -337,7 +343,7 @@ local function identical_tools_recover_by_render_order(buf)
       break
     end
   end
-  buffers.upsert_timeline('standard', ids[2], {
+  buffers.upsert_timeline(primary_target, ids[2], {
     kind = 'tool',
     label = 'probe',
     status = 'completed',
@@ -358,13 +364,13 @@ local function identical_tools_recover_by_render_order(buf)
     and second_item
     and second_item.id == ids[2]
 
-  buffers.remove_timeline('standard', ids[2])
+  buffers.remove_timeline(primary_target, ids[2])
   local remaining = 0
   for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
     if line:find('identical-parallel-tool', 1, true) then remaining = remaining + 1 end
   end
-  buffers.remove_timeline('standard', ids[1])
-  buffers.remove_timeline('standard', 'e2e-identical-tool-environment')
+  buffers.remove_timeline(primary_target, ids[1])
+  buffers.remove_timeline(primary_target, 'e2e-identical-tool-environment')
   return valid and remaining == 1
 end
 
@@ -402,9 +408,9 @@ local function timeline_anchors_follow_inserted_rows(buf)
     },
   }
   for _, entry in ipairs(items) do
-    buffers.upsert_timeline('standard', entry.id, entry.item)
+    buffers.upsert_timeline(primary_target, entry.id, entry.item)
   end
-  buffers.upsert_timeline('standard', 'e2e-late-environment', {
+  buffers.upsert_timeline(primary_target, 'e2e-late-environment', {
     kind = 'environment',
     label = 'Late environment insertion',
     status = 'completed',
@@ -435,9 +441,9 @@ local function timeline_anchors_follow_inserted_rows(buf)
     valid = valid and matches == 1
   end
 
-  buffers.remove_timeline('standard', 'e2e-late-environment')
+  buffers.remove_timeline(primary_target, 'e2e-late-environment')
   for _, entry in ipairs(items) do
-    buffers.remove_timeline('standard', entry.id)
+    buffers.remove_timeline(primary_target, entry.id)
   end
   return valid
 end
@@ -545,13 +551,13 @@ tick = function()
       schedule_tick()
       return
     end
-    local session_id = content:find('[SessionId][e2e-standard-session]', 1, true)
+    local session_id = content:find('[SessionId][e2e-primary-session]', 1, true)
     local first_environment = content:find('[environment]', 1, true)
     if not check(
       session_id
         and first_environment
         and session_id < first_environment
-        and content:find('\n\n[SessionId][e2e-standard-session]', 1, true),
+        and content:find('\n\n[SessionId][e2e-primary-session]', 1, true),
       'new sessions rendered a separated identity marker before environment rows'
     ) then
       return
@@ -1342,7 +1348,7 @@ tick = function()
     end
     if not check(
       not content:find('Run a background workspace validation', 1, true),
-      'resuming a CLI session replaced the previous Standard buffer'
+      'resuming a CLI session replaced the previous primary buffer'
     ) then
       return
     end

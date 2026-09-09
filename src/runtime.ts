@@ -19,7 +19,8 @@ import {
 import { z } from "zod";
 import { AgentDatabase } from "./database.js";
 import {
-  STANDARD_ALIAS,
+  CALLER_SELECTOR,
+  PRIMARY_ALIAS,
   dynamicAgentSchema,
   spawnAgentsSchema,
   validateAgentDefinition,
@@ -147,46 +148,38 @@ export function resolveRuntimeCommand(
   });
 }
 
-export const STANDARD_TARGET = "standard";
 export const AGENT_TARGET_PREFIX = "agent:";
 
-/** Builds the runtime/UI target id of a spawned agent from its durable UUID. */
+/** Builds any participant's runtime/UI target id from its durable UUID. */
 export function agentTarget(agentId: string): string {
   return `${AGENT_TARGET_PREFIX}${agentId}`;
 }
 
-export type TargetRoute =
-  | { kind: "standard" }
-  | { kind: "agent"; agentId: string };
+export type TargetRoute = { kind: "agent"; agentId: string };
 
 /**
- * Decides how a UI/runtime target id routes. Only the exact id "standard" reaches
- * the Standard supervisor; every spawned agent is addressed as "agent:<uuid>" with
- * its durable runtime UUID. Anything else is malformed and rejected rather than
- * silently falling back to Standard.
+ * Decides how a UI/runtime target id routes. Every participant is addressed as
+ * `agent:<uuid>`; aliases are never protocol routing identities.
  */
 export function routeTarget(target: string): TargetRoute {
-  if (target === STANDARD_TARGET) {
-    return { kind: "standard" };
-  }
   if (target.startsWith(AGENT_TARGET_PREFIX)) {
     const agentId = target.slice(AGENT_TARGET_PREFIX.length);
     if (agentId.length > 0) {
       return { kind: "agent", agentId };
     }
   }
-  throw new Error(`Target "${target}" is neither "standard" nor an "agent:<uuid>" target.`);
+  throw new Error(`Target "${target}" is not an "agent:<uuid>" target.`);
 }
 
-/** One live SDK session: the Standard supervisor or exactly one standalone agent. */
+/** One live SDK session owned by exactly one durable agent. */
 interface LiveSession {
   session: CopilotSession;
   runId: string;
-  // Runtime/UI identity: "standard" or "agent:<uuid>".
+  // Runtime/UI identity: always "agent:<uuid>".
   target: string;
-  // Durable agent UUID, or undefined for the Standard supervisor session.
-  agentId: string | undefined;
-  // Tool-safe alias; "standard" for the supervisor session.
+  // Durable agent UUID.
+  agentId: string;
+  // Tool-safe alias used only as a current human/tool selector.
   alias: string;
   // Deterministic signature of everything this session's SessionConfig was built
   // from. Any difference means the live session must be reconnected with a rebuilt
@@ -219,8 +212,8 @@ interface EnvironmentProbe {
 type McpAuthHandler = NonNullable<SessionConfig["onMcpAuthRequest"]>;
 
 /**
- * One standalone durable agent. Every agent owns its own DB run, SDK session, and
- * mailbox; agents are never grouped, so this is the complete runtime identity.
+ * One durable agent. Every participant, including the primary user-facing one,
+ * owns the same UUID, run, SDK session, mailbox, ACL, and activity-cursor model.
  */
 interface AgentContext {
   /** Durable internal UUID assigned by the runtime. */
@@ -232,7 +225,11 @@ interface AgentContext {
   runId: string;
   definition: DynamicAgentDefinition;
   agent: ResolvedAgent;
-  /** MCP server ceiling captured from the Standard session when the agent started. */
+  /** UUID-backed outgoing messaging grants. */
+  canTalkTo: Set<string>;
+  /** UUID-backed outgoing passive-observation grants. */
+  canObserve: Set<string>;
+  /** MCP server ceiling captured from the primary session when the agent started. */
   mcpServers: Set<string>;
 }
 
@@ -277,7 +274,7 @@ export interface RuntimeSessionOptions {
 /**
  * The canonical, typed native configuration parsed once from the resolved main
  * Copilot command. This is the single source of truth every session inherits:
- * the Standard supervisor and every agent build from it through
+ * the primary user-facing agent and every spawned agent build from it through
  * {@link applyNativePolicy}. Agent-specific settings are only ever overlays or
  * restrictions on this object — nothing re-parses the command or re-declares
  * these defaults elsewhere. `mcpServers` is the merged native MCP-server record
@@ -298,8 +295,8 @@ export interface NativePolicy {
 interface StoredAgentRecord {
   definition: DynamicAgentDefinition;
   mcpServers: string[];
-  standardCanTalk: boolean;
-  standardCanObserve: boolean;
+  canTalkToAgentIds: string[];
+  canObserveAgentIds: string[];
 }
 
 function storedAgentRecord(value: string): StoredAgentRecord {
@@ -318,8 +315,26 @@ function storedAgentRecord(value: string): StoredAgentRecord {
       canObserve: Array.isArray(definition.canObserve) ? definition.canObserve : [],
     },
     mcpServers: parsed.mcpServers.filter((server): server is string => typeof server === "string"),
-    standardCanTalk: parsed.standardCanTalk === true,
-    standardCanObserve: parsed.standardCanObserve === true,
+    canTalkToAgentIds: Array.isArray(parsed.canTalkToAgentIds)
+      ? parsed.canTalkToAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
+      : [],
+    canObserveAgentIds: Array.isArray(parsed.canObserveAgentIds)
+      ? parsed.canObserveAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
+      : [],
+  };
+}
+
+function primaryAgentDefinition(): DynamicAgentDefinition {
+  return {
+    id: PRIMARY_ALIAS,
+    displayName: "Copilot",
+    description: "Primary user-facing Copilot agent",
+    task: "Assist the user in the primary Neovim conversation.",
+    prompt:
+      "You are the Copilot agent attached to the primary user-facing Neovim buffer. " +
+      "Use the agent-management tools only when additional independent agents materially help.",
+    canTalkTo: [],
+    canObserve: [],
   };
 }
 
@@ -453,7 +468,7 @@ export function runtimeSessionOptions(command: string | undefined): RuntimeSessi
 /**
  * Reads the MCP server definitions named by every `--additional-mcp-config` value
  * (inline JSON or a `.mcp.json`-style file path) into one merged record. This is
- * the single native MCP-server source that both the Standard session and every
+ * the single native MCP-server source that both the primary session and every
  * agent inherit. Because these values come directly from the user's main Copilot
  * command, a broken source is surfaced as an error rather than silently dropped:
  * a missing/unreadable file, invalid JSON, a non-object root, a missing
@@ -527,7 +542,7 @@ export function additionalMcpServers(
  * command and workspace. It composes the two native parsers —
  * {@link runtimeSessionOptions} (CLI session flags) and
  * {@link additionalMcpServers} (`--additional-mcp-config` sources) — into the
- * single typed object that drives both the Standard session and every agent.
+ * single typed object that drives both the primary session and every agent.
  * This is the only place these defaults are assembled.
  */
 export function nativePolicy(
@@ -558,7 +573,7 @@ export function nativePolicy(
 
 /**
  * Layers the single canonical {@link NativePolicy} onto a session config. Every
- * session — Standard and every agent alike — passes through here so children
+ * session — primary and spawned agents alike — passes through here so children
  * inherit the same native working directory policy by default. A config that has
  * already narrowed a dimension (e.g. an agent's own `availableTools` allowlist,
  * an explicit `mcpServers` entry, or its own `model`) is treated as a deliberate
@@ -594,8 +609,8 @@ export function applyNativePolicy(config: SessionConfig, policy: NativePolicy): 
  * The single shared base every session is built from. It combines the invariant
  * session scaffold (client name, streaming, session store, schedule support, and
  * config/instruction discovery rooted at the native working directory) with the
- * canonical native policy layered by {@link applyNativePolicy}. Both the Standard
- * supervisor and every agent start from this exact object; the instance only
+ * canonical native policy layered by {@link applyNativePolicy}. Both the primary
+ * primary agent and every additional agent start from this exact object; the instance only
  * attaches per-session permission/MCP-auth handlers and then narrows or overrides
  * individual fields. Handlers are intentionally omitted here so this remains a
  * pure, testable definition of the inherited base.
@@ -800,21 +815,21 @@ export class CopilotRuntime implements RuntimeAdapter {
   // guard so one durable agent can never end up with two concurrent SDK sessions.
   private readonly connecting = new Map<string, Promise<LiveSession>>();
   // The single canonical native policy parsed once from the resolved main Copilot
-  // command. Both the Standard supervisor and every agent inherit it; agent
+  // command. The primary agent and every spawned agent inherit it; agent
   // settings only overlay or restrict it, so there is one source of truth.
   private readonly policy: NativePolicy;
-  // The Standard supervisor session's run. It stays connected for the lifetime of
-  // the host and supervises agents without any implied permission to message them.
-  private standard: { runId: string } | undefined;
-  // Every active standalone agent, keyed by its durable runtime UUID.
+  // UUID of the generic agent attached to the primary user-facing buffer.
+  private primaryAgentId: string | undefined;
+  // Every active participant, including the primary agent, keyed by durable UUID.
   private readonly agents = new Map<string, AgentContext>();
-  // Alias index over `agents`; aliases are unique among active agents and
-  // recoverable agent runs, so an alias always resolves to at most one UUID.
+  // Alias index over active agents. Durable ACLs never depend on this index.
   private readonly aliasIndex = new Map<string, string>();
   private shuttingDown = false;
-  // Spawn requests accepted while Standard is busy. Each queued request starts its
-  // agents independently once Standard becomes idle.
-  private readonly pendingSpawns: SpawnAgentsRequest[] = [];
+  // Spawn requests accepted while their primary caller is busy.
+  private readonly pendingSpawns: Array<{
+    callerAgentId: string;
+    request: SpawnAgentsRequest;
+  }> = [];
   private readonly pendingPermissions = new Map<
     string,
     { target: string; respond: (result: PermissionRequestResult) => void }
@@ -893,16 +908,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       return existing;
     }
     const route = routeTarget(target);
-    if (route.kind === "standard") {
-      if (!this.standard) {
-        await this.openStandard();
-      }
-      const live = this.live.get(STANDARD_TARGET);
-      if (!live) {
-        throw new Error(`Target "${target}" is not active.`);
-      }
-      return live;
-    }
     return this.ensureAgentSession(route.agentId);
   }
 
@@ -1242,10 +1247,9 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   // Attaches per-session permission and MCP-auth handlers to the shared native base
-  // (nativeSessionScaffold). Standard and every agent build from that identical base
+  // (nativeSessionScaffold). Every agent builds from that identical base
   // and then only narrow or deliberately override individual fields, so there is one
-  // source of truth for inherited defaults. The uiTarget is the runtime routing id
-  // ("standard" or "agent:<uuid>").
+  // source of truth for inherited defaults. The uiTarget is `agent:<uuid>`.
   private baseSessionConfig(
     uiTarget: string,
     permission: DynamicPermission | undefined,
@@ -1325,7 +1329,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private agentConfig(context: AgentContext): SessionConfig {
-    // Start from the identical native base the Standard session uses. The base has
+    // Start from the identical native base the primary session uses. The base has
     // already layered the canonical native policy, so everything below only narrows
     // or deliberately overrides individual inherited fields.
     const agent = context.agent;
@@ -1333,10 +1337,20 @@ export class CopilotRuntime implements RuntimeAdapter {
     config.includeSubAgentStreamingEvents = false;
     config.reasoningSummary = agent.reasoningSummary;
     config.systemMessage = { mode: "append", content: agent.initialPrompt };
-    config.tools = [
+    const tools = [
       ...this.createAgentMessagingTools(context),
       this.readAgentActivityTool(context),
     ];
+    if (context.agentId === this.primaryAgentId) {
+      tools.push(
+        this.spawnAgentsTool(context),
+        this.updateAgentTool(context),
+        this.removeAgentTool(context),
+        this.sendToAgentTool(context),
+        this.listAgentsTool(context),
+      );
+    }
+    config.tools = tools;
     if (agent.permission && !("mode" in agent.permission)) {
       // Narrow: the agent allowlist replaces the inherited native allowlist.
       config.availableTools = sdkToolPatterns(agent.permission.tools.allow);
@@ -1363,24 +1377,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     return config;
   }
 
-  private standardSessionConfig(): SessionConfig {
-    // The Standard supervisor uses the native base unchanged — native tool/MCP and
-    // model/reasoning policy are already layered by baseSessionConfig — adding only
-    // its agent-management tools.
-    const config = this.baseSessionConfig(STANDARD_TARGET, undefined);
-    config.reasoningSummary = "detailed";
-    config.tools = [
-      this.spawnAgentsTool(),
-      this.updateAgentTool(),
-      this.removeAgentTool(),
-      this.sendToAgentTool(),
-      this.listAgentsTool(),
-      this.readAgentActivityTool(),
-    ];
-    return config;
-  }
-
-  private spawnAgentsTool(): Tool<any> {
+  private spawnAgentsTool(caller: AgentContext): Tool<any> {
     return defineTool(nativeCopilotTool("spawn_agents"), {
       description:
         "Spawn one or more standalone durable Copilot agents when the user asks for additional " +
@@ -1390,19 +1387,20 @@ export class CopilotRuntime implements RuntimeAdapter {
         "canTalkTo recipients. Every agent receives stable native_copilot_list_recipients and " +
         "native_copilot_send_message tools; the host resolves their authorized aliases, agent " +
         "ids, and SDK session ids. canObserve independently grants passive access through " +
-        "native_copilot_read_agent_activity. The " +
-        'reserved alias "standard" lets an agent message this session. Communication is denied by ' +
-        "default in both directions: list an alias in standardCanTalkTo to allow this session to " +
-        "message that agent. This request is not a group — every agent gets its own durable " +
+        `native_copilot_read_agent_activity. The request-local selector "${CALLER_SELECTOR}" lets ` +
+        "a child address this calling agent without relying on its alias. Communication is denied " +
+        "by default in both directions: callerCanTalkTo/callerCanObserve grant this caller outgoing " +
+        "access to selected children. This request is not a group — every agent gets its own durable " +
         "session, run, and mailbox, and each starts and can be recovered independently once this " +
-        "Standard turn becomes idle.",
+        "primary turn becomes idle.",
       parameters: spawnAgentsSchema,
       skipPermission: true,
       defer: "never",
       handler: (request) => {
+        const source = this.requireCallingPrimary(caller.agentId);
         const spawn = request as SpawnAgentsRequest;
-        const resolved = this.resolveSpawnRequest(spawn);
-        this.pendingSpawns.push(spawn);
+        const resolved = this.resolveSpawnRequest(source, spawn);
+        this.pendingSpawns.push({ callerAgentId: source.agentId, request: spawn });
         this.emit(
           "agents.requested",
           {
@@ -1412,76 +1410,75 @@ export class CopilotRuntime implements RuntimeAdapter {
               displayName: agent.displayName,
               description: agent.description,
               task: agent.task,
-              recipients: [...agent.recipients],
-              observes: [...agent.observes],
-              standardCanTalk: agent.standardCanTalk,
-              standardCanObserve: agent.standardCanObserve,
+              canTalkTo: [...agent.recipientSelectors],
+              canObserve: [...agent.observeSelectors],
             })),
-            standardCanTalkTo: [...spawn.standardCanTalkTo],
-            standardCanObserve: [...spawn.standardCanObserve],
+            callerCanTalkTo: [...spawn.callerCanTalkTo],
+            callerCanObserve: [...spawn.callerCanObserve],
             startsWhen: "session.idle",
           },
-          { memberId: STANDARD_TARGET, target: "activity", done: true },
+          { memberId: source.target, target: "activity", done: true },
         );
         return {
           accepted: true,
           agents: resolved.map((agent) => agent.alias),
           message:
-            "Each agent starts independently after this Standard Copilot turn becomes idle.",
+            "Each agent starts independently after this primary Copilot turn becomes idle.",
         };
       },
     });
   }
 
-  private updateAgentTool(): Tool<any> {
+  private updateAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(nativeCopilotTool("update_agent"), {
       description:
         "Replace the complete definition of one active agent in place, without disturbing this " +
         "session or any other agent. Identify the agent by alias or by its agent id; the alias is " +
-        "durable and cannot be changed. Provide a complete definition — prompt, task, permissions, " +
-        "MCP servers, and canTalkTo — which must respect the permission and MCP ceilings. Set " +
-        "standardCanTalk to grant or revoke this session's permission to message the agent. If the " +
+        "a mutable selector, while durable ACLs use UUIDs. Provide a complete definition — prompt, " +
+        "task, permissions, MCP servers, canTalkTo, and canObserve — which must respect the " +
+        "permission and MCP ceilings. Set callerCanTalk/callerCanObserve to change this calling " +
+        "agent's outgoing grants to the target. If the " +
         "agent's configuration changes, its live session is reconnected while preserving its " +
         "session id and history.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the active agent to update."),
         definition: dynamicAgentSchema.describe(
-          "Complete replacement definition; its id must equal the agent's current alias.",
+          `Complete replacement definition. "${CALLER_SELECTOR}" resolves to this calling agent.`,
         ),
-        standardCanTalk: z
+        callerCanTalk: z
           .boolean()
           .optional()
           .describe(
-            "Whether this Standard session may message the agent; omit to keep the current grant.",
+            "Whether this calling agent may message the target; omit to keep the current grant.",
           ),
-        standardCanObserve: z
+        callerCanObserve: z
           .boolean()
           .optional()
           .describe(
-            "Whether this Standard session may inspect the agent's SDK event history; omit to " +
+            "Whether this calling agent may inspect the target's SDK event history; omit to " +
               "keep the current grant.",
           ),
       }),
       skipPermission: true,
       defer: "never",
-      handler: async ({ agent, definition, standardCanTalk, standardCanObserve }) => {
-        const summary = await this.updateAgent(agent, {
+      handler: async ({ agent, definition, callerCanTalk, callerCanObserve }) => {
+        const source = this.requireCallingPrimary(caller.agentId);
+        const summary = await this.updateAgentForCaller(source, agent, {
           definition: definition as DynamicAgentDefinition,
-          ...(standardCanTalk === undefined ? {} : { standardCanTalk }),
-          ...(standardCanObserve === undefined ? {} : { standardCanObserve }),
+          ...(callerCanTalk === undefined ? {} : { callerCanTalk }),
+          ...(callerCanObserve === undefined ? {} : { callerCanObserve }),
         });
         return { accepted: true, ...summary };
       },
     });
   }
 
-  private removeAgentTool(): Tool<any> {
+  private removeAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(nativeCopilotTool("remove_agent"), {
       description:
         "Stop and remove one active agent, identified by alias or agent id, without disturbing " +
-        "this session or any other agent. The agent is disconnected, its run is closed, and every " +
-        "remaining agent that could message it has that recipient pruned and is reconnected with " +
-        "updated tools while preserving its history.",
+        "this session or any other agent. The agent is disconnected and its run is closed. " +
+        "UUID-backed ACL links remain durable so they become usable again if that run is recovered.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the active agent to remove."),
         reason: z.string().min(1).optional().describe("Optional reason recorded on the run."),
@@ -1489,8 +1486,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       skipPermission: true,
       defer: "never",
       handler: async ({ agent, reason }) => {
+        this.requireCallingPrimary(caller.agentId);
         const context = this.requireAgent(agent);
-        await this.stopAgent(context.agentId, reason ?? "Agent removed by Standard Copilot");
+        await this.stopAgent(context.agentId, reason ?? "Agent removed by primary Copilot");
         return {
           accepted: true,
           action: "removed",
@@ -1502,13 +1500,11 @@ export class CopilotRuntime implements RuntimeAdapter {
     });
   }
 
-  private sendToAgentTool(): Tool<any> {
+  private sendToAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(nativeCopilotTool("send_to_agent"), {
       description:
-        "Send a durable asynchronous message to one active agent, identified by alias or agent id. " +
-        "This is only permitted for agents explicitly granted to this session through " +
-        "standardCanTalkTo (or a later native_copilot_update_agent); messaging any other agent " +
-        "is rejected.",
+        "Deprecated compatibility wrapper over native_copilot_send_message. It uses the calling " +
+        "agent's ordinary canTalkTo ACL and grants no privileged routing.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the recipient agent."),
         subject: z.string().min(1).optional(),
@@ -1517,53 +1513,57 @@ export class CopilotRuntime implements RuntimeAdapter {
       skipPermission: true,
       defer: "never",
       handler: ({ agent, subject, message }) => {
-        const context = this.requireAgent(agent);
-        if (!context.agent.standardCanTalk) {
-          throw new Error(
-            `Standard Copilot is not permitted to message agent "${context.alias}". Grant it with ` +
-              "standardCanTalkTo when spawning the agent, or with " +
-              "native_copilot_update_agent.",
-          );
-        }
+        const source = this.requireCallingPrimary(caller.agentId);
+        const resolved = this.allowedRecipient(source, agent);
         const id = this.enqueueDurableMessage(
-          STANDARD_ALIAS,
-          { runId: context.runId, target: context.target, alias: context.alias },
+          source.alias,
+          resolved.recipient,
           subject,
           message,
-          STANDARD_TARGET,
+          source.target,
         );
-        return { deliveredToMailbox: context.alias, messageId: id };
+        return {
+          deprecated: true,
+          deliveredToMailbox: resolved.recipient.alias,
+          ...(resolved.sessionId === undefined ? {} : { sessionId: resolved.sessionId }),
+          messageId: id,
+        };
       },
     });
   }
 
-  private listAgentsTool(): Tool<any> {
+  private listAgentsTool(caller: AgentContext): Tool<any> {
     return defineTool(nativeCopilotTool("list_agents"), {
       description:
-        "List every currently active standalone agent with its alias, agent id, task, outgoing " +
-        "recipients, and whether this session is permitted to message it.",
+        "List every currently active UUID-backed agent, including the primary caller, with its " +
+        "alias, agent id, task, outgoing grants, and runtime state.",
       parameters: z.object({}),
       skipPermission: true,
       defer: "never",
-      handler: () => ({
-        agents: [...this.agents.values()].map((context) => {
-          const sessionId = this.agentSessionId(context);
-          return {
-            ...this.agentPayload(context),
-            ...(sessionId === undefined ? {} : { sessionId }),
-            state: this.agentState(context),
-          };
-        }),
-      }),
+      handler: () => {
+        this.requireCallingPrimary(caller.agentId);
+        return {
+          agents: [...this.agents.values()].map((context) => {
+            const sessionId = this.agentSessionId(context);
+            return {
+              ...this.agentPayload(context),
+              ...(sessionId === undefined ? {} : { sessionId }),
+              state: this.agentState(context),
+            };
+          }),
+        };
+      },
     });
   }
 
-  private readAgentActivityTool(observer?: AgentContext): Tool<any> {
-    const observerAgentId = observer?.agentId;
+  private readAgentActivityTool(observer: AgentContext): Tool<any> {
+    const observerAgentId = observer.agentId;
     return defineTool(nativeCopilotTool("read_agent_activity"), {
       description:
         "Read the target agent's raw SDK events since this caller last checked, without sending " +
-        "the target a prompt. The caller must have an explicit canObserve grant. Results preserve " +
+        "the target a prompt. The caller may inspect itself or a target in its explicit canObserve " +
+        "ACL. Use native_copilot_list_recipients to discover observable UUID-backed targets. " +
+        "Results preserve " +
         "unknown future event types and omit streaming message/reasoning deltas. Pass the previous " +
         "result's nextCursor as acknowledgeCursor on the next call; only that acknowledgement " +
         "durably advances the per-caller position, so a result lost in transit is replayed.",
@@ -1581,41 +1581,24 @@ export class CopilotRuntime implements RuntimeAdapter {
       skipPermission: true,
       defer: "never",
       handler: async ({ agent, acknowledgeCursor }) => {
-        const source =
-          observerAgentId === undefined ? undefined : this.agents.get(observerAgentId);
-        if (observerAgentId !== undefined && !source) {
-          throw new Error(`Agent "${observer?.alias ?? observerAgentId}" is no longer active.`);
+        const source = this.agents.get(observerAgentId);
+        if (!source) {
+          throw new Error(`Agent "${observer.alias}" is no longer active.`);
         }
-        const standardLive = this.live.get(STANDARD_TARGET);
-        const targetsStandard =
-          agent === STANDARD_ALIAS ||
-          agent === STANDARD_TARGET ||
-          agent === standardLive?.session.sessionId;
-        const targetAgent = targetsStandard ? undefined : this.requireAgent(agent);
-        const targetId = targetAgent?.agentId ?? STANDARD_TARGET;
-        const targetAlias = targetAgent?.alias ?? STANDARD_ALIAS;
-        const targetRuntimeId = targetAgent?.target ?? STANDARD_TARGET;
-        if (!targetsStandard && source?.agentId !== targetAgent!.agentId) {
-          const allowed =
-            source === undefined
-              ? targetAgent!.agent.standardCanObserve
-              : source.agent.observes.has(targetAlias);
-          if (!allowed) {
-            const caller = source?.alias ?? STANDARD_ALIAS;
-            throw new Error(
-              `Agent "${caller}" is not allowed to inspect "${targetAlias}" under the current ` +
-                "observation rules.",
-            );
-          }
-        } else if (targetsStandard && source !== undefined && !source.agent.observes.has(STANDARD_ALIAS)) {
+        const targetAgent = this.requireAgent(agent);
+        if (
+          source.agentId !== targetAgent.agentId &&
+          !source.canObserve.has(targetAgent.agentId)
+        ) {
           throw new Error(
-            `Agent "${source.alias}" is not allowed to inspect "standard" under the current ` +
+            `Agent "${source.alias}" is not allowed to inspect "${targetAgent.alias}" under the current ` +
               "observation rules.",
           );
         }
 
-        const live = await this.activeSession(targetRuntimeId);
-        const observerId = source?.agentId ?? STANDARD_TARGET;
+        const live = await this.activeSession(targetAgent.target);
+        const observerId = source.agentId;
+        const targetId = targetAgent.agentId;
         const storedCursor = this.db.activityCursor(observerId, targetId);
         let readCursor =
           acknowledgeCursor ??
@@ -1732,14 +1715,13 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
         return {
           agent: {
-            alias: targetAlias,
-            ...(targetAgent === undefined ? {} : { agentId: targetAgent.agentId }),
+            alias: targetAgent.alias,
+            agentId: targetAgent.agentId,
+            target: targetAgent.target,
             sessionId: live.session.sessionId,
           },
-          currentState:
-            targetAgent === undefined
-              ? (live.foregroundBusy ? "busy" : "idle")
-              : this.agentState(targetAgent),
+          targetAgentId: targetAgent.agentId,
+          currentState: this.agentState(targetAgent),
           events,
           eventCount: events.length,
           serializedBytes,
@@ -1759,8 +1741,16 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   /** Validates a spawn request and every uniqueness/ceiling rule it must satisfy. */
-  private resolveSpawnRequest(request: SpawnAgentsRequest): ResolvedAgent[] {
-    const validated = validateSpawnRequest(request);
+  private resolveSpawnRequest(
+    caller: AgentContext,
+    request: SpawnAgentsRequest,
+  ): ResolvedAgent[] {
+    const existingAliases = new Set(this.aliasIndex.keys());
+    existingAliases.delete(caller.alias);
+    for (const reserved of this.db.reservedAgentAliases(this.workspace)) {
+      existingAliases.add(reserved.alias);
+    }
+    const validated = validateSpawnRequest(request, "spawn", existingAliases);
     if (!validated.valid || !validated.agents) {
       throw new Error(
         `The agent spawn request is invalid:\n${validated.issues
@@ -1830,7 +1820,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
       if (
         this.pendingSpawns.some((pending) =>
-          pending.agents.some((definition) => definition.id === alias))
+          pending.request.agents.some((definition) => definition.id === alias))
       ) {
         throw new Error(`Alias "${alias}" is already queued to start.`);
       }
@@ -1874,6 +1864,23 @@ export class CopilotRuntime implements RuntimeAdapter {
     return context;
   }
 
+  private requirePrimary(): AgentContext {
+    const context =
+      this.primaryAgentId === undefined ? undefined : this.agents.get(this.primaryAgentId);
+    if (!context) {
+      throw new Error("The primary Copilot agent is not running.");
+    }
+    return context;
+  }
+
+  private requireCallingPrimary(agentId: string): AgentContext {
+    const context = this.agents.get(agentId);
+    if (!context || context.agentId !== this.primaryAgentId) {
+      throw new Error("Agent-management tools are only available to the active primary agent.");
+    }
+    return context;
+  }
+
   private agentState(context: AgentContext): string {
     const live = this.live.get(context.target);
     if (!live) {
@@ -1886,18 +1893,20 @@ export class CopilotRuntime implements RuntimeAdapter {
     const record: StoredAgentRecord = {
       definition: context.definition,
       mcpServers: [...context.mcpServers],
-      standardCanTalk: context.agent.standardCanTalk,
-      standardCanObserve: context.agent.standardCanObserve,
+      canTalkToAgentIds: [...context.canTalkTo],
+      canObserveAgentIds: [...context.canObserve],
     };
     return JSON.stringify(record);
   }
 
   private async availableMcpServers(): Promise<Set<string>> {
-    const standard = this.live.get(STANDARD_TARGET);
-    if (!standard) {
+    const primary = this.primaryAgentId === undefined
+      ? undefined
+      : this.live.get(agentTarget(this.primaryAgentId));
+    if (!primary) {
       return new Set();
     }
-    return new Set((await standard.session.rpc.mcp.list()).servers.map((server) => server.name));
+    return new Set((await primary.session.rpc.mcp.list()).servers.map((server) => server.name));
   }
 
   /**
@@ -1911,18 +1920,10 @@ export class CopilotRuntime implements RuntimeAdapter {
     });
   }
 
-  private standardRecipient(): MailboxRecipient {
-    if (!this.standard || !this.live.has(STANDARD_TARGET)) {
-      throw new Error("The Standard Copilot session is not running.");
-    }
-    return { runId: this.standard.runId, target: STANDARD_TARGET, alias: STANDARD_ALIAS };
-  }
-
-  private agentRecipient(alias: string, resolvedAgentId: string | undefined): MailboxRecipient {
-    const agentId = resolvedAgentId ?? this.aliasIndex.get(alias);
-    const context = agentId === undefined ? undefined : this.agents.get(agentId);
-    if (!context || context.alias !== alias) {
-      throw new Error(`Agent "${alias}" is not active; the message was not delivered.`);
+  private agentRecipient(agentId: string): MailboxRecipient {
+    const context = this.agents.get(agentId);
+    if (!context) {
+      throw new Error(`Agent "${agentId}" is not active; the message was not delivered.`);
     }
     return { runId: context.runId, target: context.target, alias: context.alias };
   }
@@ -1934,6 +1935,61 @@ export class CopilotRuntime implements RuntimeAdapter {
     );
   }
 
+  private registerAgent(context: AgentContext): void {
+    this.agents.set(context.agentId, context);
+    this.aliasIndex.set(context.alias, context.agentId);
+  }
+
+  private unregisterAgent(context: AgentContext): void {
+    this.agents.delete(context.agentId);
+    if (this.aliasIndex.get(context.alias) === context.agentId) {
+      this.aliasIndex.delete(context.alias);
+    }
+  }
+
+  private resolveGrantSelectors(
+    selectors: ReadonlySet<string>,
+    caller: AgentContext,
+    batchAliases: ReadonlyMap<string, string>,
+    sourceAgentId: string,
+  ): Set<string> {
+    const resolved = new Set<string>();
+    for (const selector of selectors) {
+      let agentId: string | undefined;
+      if (selector === CALLER_SELECTOR) {
+        agentId = caller.agentId;
+      } else {
+        agentId = batchAliases.get(selector) ?? this.aliasIndex.get(selector);
+        if (agentId === undefined && selector.startsWith(AGENT_TARGET_PREFIX)) {
+          agentId = selector.slice(AGENT_TARGET_PREFIX.length);
+        } else if (agentId === undefined && this.agents.has(selector)) {
+          agentId = selector;
+        } else if (agentId === undefined) {
+          agentId = this.db.latestAgentRunByAlias(selector, this.workspace)?.agentId;
+        }
+      }
+      if (agentId === undefined) {
+        throw new Error(`Agent selector "${selector}" no longer resolves.`);
+      }
+      if (
+        !batchAliases.has(selector) &&
+        !this.agents.has(agentId) &&
+        !this.db.latestAgentRun(agentId, this.workspace)
+      ) {
+        throw new Error(`Agent selector "${selector}" does not identify a managed agent.`);
+      }
+      if (agentId === sourceAgentId) {
+        throw new Error(`Agent "${sourceAgentId}" cannot grant access to itself.`);
+      }
+      resolved.add(agentId);
+    }
+    return resolved;
+  }
+
+  private grantDetails(agentIds: ReadonlySet<string>): string[] {
+    return [...agentIds].map((agentId) => agentTarget(agentId)).sort();
+  }
+
   private allowedRecipient(
     source: AgentContext,
     selector: string,
@@ -1943,22 +1999,11 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Agent "${source.alias}" is no longer active.`);
     }
 
-    const standardSessionId = this.live.get(STANDARD_TARGET)?.session.sessionId;
-    if (
-      selector === STANDARD_ALIAS ||
-      selector === STANDARD_TARGET ||
-      selector === standardSessionId
-    ) {
-      if (!current.agent.recipients.has(STANDARD_ALIAS)) {
-        throw new Error(`Agent "${current.alias}" is not permitted to message "standard".`);
-      }
-      return { recipient: this.standardRecipient(), sessionId: standardSessionId };
-    }
-
     const matched = [...this.agents.values()].find(
       (candidate) =>
         selector === candidate.alias ||
         selector === candidate.agentId ||
+        selector === candidate.target ||
         selector === this.agentSessionId(candidate),
     );
     if (!matched) {
@@ -1967,15 +2012,15 @@ export class CopilotRuntime implements RuntimeAdapter {
           "native_copilot_list_recipients to refresh the authorized mapping.",
       );
     }
-    if (!current.agent.recipients.has(matched.alias)) {
+    if (!current.canTalkTo.has(matched.agentId)) {
       throw new Error(
         `Agent "${current.alias}" is not allowed to send messages to "${matched.alias}" under ` +
-          `the current communication rules. "${matched.alias}" is not in this agent's canTalkTo ` +
+          `the current communication rules. "${matched.agentId}" is not in this agent's canTalkTo ` +
           "ACL.",
       );
     }
     return {
-      recipient: this.agentRecipient(matched.alias, matched.agentId),
+      recipient: this.agentRecipient(matched.agentId),
       sessionId: this.agentSessionId(matched),
     };
   }
@@ -1996,7 +2041,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     this.db.enqueueMessage(
       id,
       recipient.runId,
-      sourceAlias,
+      sourceTarget,
       recipient.target,
       "agent",
       content,
@@ -2016,8 +2061,9 @@ export class CopilotRuntime implements RuntimeAdapter {
     return [
       defineTool(nativeCopilotTool("list_recipients"), {
         description:
-          "List only the recipients this agent is currently authorized to message, including " +
-          "their stable alias, durable agent id, current SDK session id, and runtime state.",
+          "List the agents this caller is currently authorized to message or observe, including " +
+          "their current alias, durable agent id, current SDK session id, runtime state, and " +
+          "directional canTalk/canObserve flags.",
         parameters: z.object({}),
         skipPermission: true,
         defer: "never",
@@ -2026,29 +2072,29 @@ export class CopilotRuntime implements RuntimeAdapter {
           if (!source) {
             throw new Error(`Agent "${context.alias}" is no longer active.`);
           }
-          const recipients = [...source.agent.recipients].sort().map((alias) => {
-            if (alias === STANDARD_ALIAS) {
-              const sessionId = this.live.get(STANDARD_TARGET)?.session.sessionId;
-              return {
-                alias,
-                target: STANDARD_TARGET,
-                ...(sessionId === undefined ? {} : { sessionId }),
-                state: this.standard && this.live.has(STANDARD_TARGET) ? "active" : "inactive",
-              };
-            }
-            const recipientId = this.aliasIndex.get(alias);
-            const recipient =
-              recipientId === undefined ? undefined : this.agents.get(recipientId);
+          const grantedAgentIds = new Set([...source.canTalkTo, ...source.canObserve]);
+          const recipients = [...grantedAgentIds].map((recipientId) => {
+            const recipient = this.agents.get(recipientId);
+            const stored =
+              recipient === undefined
+                ? this.db.latestAgentRun(recipientId, this.workspace)
+                : undefined;
             const sessionId = recipient === undefined ? undefined : this.agentSessionId(recipient);
             return {
-              alias,
-              ...(recipient === undefined
-                ? {}
-                : { agentId: recipient.agentId, target: recipient.target }),
-              ...(sessionId === undefined ? {} : { sessionId }),
+              alias: recipient?.alias ?? stored?.alias ?? recipientId,
+              agentId: recipientId,
+              target: agentTarget(recipientId),
+              ...(sessionId === undefined
+                ? stored?.session
+                  ? { sessionId: stored.session.sessionId }
+                  : {}
+                : { sessionId }),
+              canTalk: source.canTalkTo.has(recipientId),
+              canObserve: source.canObserve.has(recipientId),
               state: recipient === undefined ? "inactive" : this.agentState(recipient),
             };
           });
+          recipients.sort((left, right) => left.alias.localeCompare(right.alias));
           return { recipients };
         },
       }),
@@ -2094,7 +2140,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   private async connectSession(options: {
     runId: string;
     target: string;
-    agentId: string | undefined;
+    agentId: string;
     alias: string;
     sessionId: string | undefined;
     config: SessionConfig;
@@ -2140,7 +2186,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   private async establishSession(options: {
     runId: string;
     target: string;
-    agentId: string | undefined;
+    agentId: string;
     alias: string;
     sessionId: string | undefined;
     config: SessionConfig;
@@ -2153,29 +2199,9 @@ export class CopilotRuntime implements RuntimeAdapter {
     const client = await this.ensureClient();
     let session: CopilotSession;
     if (sessionId && (resumeExisting || this.knownSessionIds.has(sessionId))) {
-      try {
-        session = await client.resumeSession(sessionId, { ...config, suppressResumeEvent: true });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const missing = message.includes("Session not found:");
-        // A managed agent has already received a durable definition and initial task.
-        // Replacing a missing SDK session with an empty one would silently discard
-        // that task and any schedules or state created while executing it.
-        if (
-          !resumeExisting ||
-          !missing ||
-          agentId !== undefined ||
-          this.db.hasConversationActivity(runId)
-        ) {
-          throw error;
-        }
-        session = await client.createSession(config);
-        this.emit(
-          "session.recreated",
-          { message: "The previous session had no conversation and was recreated." },
-          { runId, memberId: target, target: "activity", done: true },
-        );
-      }
+      // Managed sessions are never silently recreated: a missing SDK conversation
+      // would discard schedules and state that SQLite intentionally does not copy.
+      session = await client.resumeSession(sessionId, { ...config, suppressResumeEvent: true });
     } else {
       session = await client.createSession(config);
     }
@@ -2487,8 +2513,8 @@ export class CopilotRuntime implements RuntimeAdapter {
         live.foregroundTurnHasToolRequests = false;
         live.foregroundAbortSequence = undefined;
         this.emit("member.state", { state: "idle", ...event.data }, { ...fields, target: "status" });
-        if (live.target === STANDARD_TARGET) {
-          queueMicrotask(() => void this.drainPendingSpawns());
+        if (live.agentId === this.primaryAgentId) {
+          queueMicrotask(() => void this.drainPendingSpawns(live.agentId));
         }
         const target = live.target;
         queueMicrotask(() => void this.drainMailbox(target));
@@ -2582,52 +2608,135 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
   }
 
-  async openStandard(): Promise<void> {
-    if (this.standard && this.live.has(STANDARD_TARGET)) {
-      return;
+  private resolveStoredDefinition(
+    definition: DynamicAgentDefinition,
+  ): ResolvedAgent {
+    const validated = validateAgentDefinition(definition, {
+      availableAliases: new Set([...definition.canTalkTo, ...definition.canObserve]),
+      allowCallerAlias: true,
+    });
+    if (!validated.valid || !validated.agent) {
+      throw new Error(
+        `Stored agent definition is invalid: ${validated.issues
+          .map((issue) => `${issue.path}: ${issue.message}`)
+          .join("; ")}`,
+      );
     }
-    const runId = randomUUID();
-    this.db.createStandardRun(runId, this.workspace, process.pid);
-    // Messages agents addressed to Standard outlive the session they were sent to,
-    // so any still-undelivered ones are transferred into this new run.
-    const adoptedMessages = this.db.adoptStandardMessages(runId, this.workspace, STANDARD_TARGET);
-    this.standard = { runId };
+    return validated.agent;
+  }
+
+  async openPrimary(): Promise<void> {
+    if (this.primaryAgentId !== undefined) {
+      const existing = this.agents.get(this.primaryAgentId);
+      if (existing) {
+        await this.ensureAgentSession(existing.agentId);
+        return;
+      }
+    }
+
+    const stored = this.db.resumablePrimaryRun(this.workspace);
+    let context: AgentContext;
+    let recovered = false;
+    if (stored) {
+      if (!stored.definition) {
+        throw new Error(`Primary agent run "${stored.id}" has no stored definition.`);
+      }
+      const record = storedAgentRecord(stored.definition);
+      context = {
+        agentId: stored.agentId,
+        target: agentTarget(stored.agentId),
+        alias: stored.alias,
+        runId: stored.id,
+        definition: record.definition,
+        agent: this.resolveStoredDefinition(record.definition),
+        canTalkTo: new Set(record.canTalkToAgentIds),
+        canObserve: new Set(record.canObserveAgentIds),
+        mcpServers: new Set(record.mcpServers),
+      };
+      this.db.resumeRun(stored.id, process.pid);
+      recovered = true;
+    } else {
+      const definition = primaryAgentDefinition();
+      const agentId = randomUUID();
+      context = {
+        agentId,
+        target: agentTarget(agentId),
+        alias: definition.id,
+        runId: randomUUID(),
+        definition,
+        agent: this.resolveStoredDefinition(definition),
+        canTalkTo: new Set(),
+        canObserve: new Set(),
+        mcpServers: new Set(),
+      };
+      this.db.createAgentRun(
+        context.runId,
+        context.agentId,
+        context.alias,
+        this.storedAgentJson(context),
+        this.workspace,
+        process.pid,
+        true,
+      );
+    }
+
+    this.primaryAgentId = context.agentId;
+    this.registerAgent(context);
+    const adoptedMessages = this.db.adoptPrimaryMessages(
+      context.runId,
+      this.workspace,
+      context.agentId,
+      context.target,
+    );
+    this.emitAgentLifecycle("agent.loading", context, { recovered });
     try {
-      await this.connectSession({
-        runId,
-        target: STANDARD_TARGET,
-        agentId: undefined,
-        alias: STANDARD_ALIAS,
-        sessionId: undefined,
-        config: this.standardSessionConfig(),
-        configSignature: "standard",
+      const live = await this.connectSession({
+        runId: context.runId,
+        target: context.target,
+        agentId: context.agentId,
+        alias: context.alias,
+        sessionId: stored?.session?.sessionId,
+        config: this.agentConfig(context),
+        configSignature: this.sessionSignature(context),
+        resumeExisting: stored?.session !== undefined,
       });
-      this.emit("standard.ready", { mode: "standard", adoptedMessages }, { runId });
-      queueMicrotask(() => void this.drainMailbox(STANDARD_TARGET));
+      this.emitAgentLifecycle("agent.ready", context, {
+        recovered,
+        sessionId: live.session.sessionId,
+      });
+      this.emit(
+        "primary.ready",
+        {
+          ...this.agentPayload(context),
+          mode: "primary",
+          recovered,
+          adoptedMessages,
+          sessionId: live.session.sessionId,
+          runId: context.runId,
+        },
+        { runId: context.runId, memberId: context.target, target: "status", done: true },
+      );
+      queueMicrotask(() => void this.drainMailbox(context.target));
     } catch (error) {
-      this.db.finishRun(runId, "interrupted", "Standard Copilot failed to start");
-      this.standard = undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit(
+        "agent.error",
+        {
+          ...this.agentPayload(context),
+          primary: true,
+          runId: context.runId,
+          message,
+        },
+        { runId: context.runId, memberId: context.target, target: "activity", done: true },
+      );
+      this.unregisterAgent(context);
+      this.primaryAgentId = undefined;
+      this.db.finishRun(context.runId, "interrupted", "Primary Copilot agent failed to start");
       throw error;
     }
   }
 
-  private async stopStandard(reason: string): Promise<void> {
-    if (!this.standard) {
-      return;
-    }
-    const runId = this.standard.runId;
-    const live = this.live.get(STANDARD_TARGET);
-    this.live.delete(STANDARD_TARGET);
-    if (live) {
-      live.unsubscribe();
-      await live.session.disconnect().catch(() => undefined);
-      this.db.upsertSession(runId, live.session.sessionId, "disconnected");
-    }
-    this.db.finishRun(runId, "stopped", reason);
-    this.standard = undefined;
-  }
-
-  async resumeStandardSession(sessionId: string): Promise<void> {
+  async resumePrimarySession(sessionId: string): Promise<void> {
     const client = await this.ensureClient();
     const active = [...this.live.entries()].find(([, live]) => live.session.sessionId === sessionId);
     if (active) {
@@ -2642,40 +2751,108 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Session "${sessionId}" is active in another process.`);
     }
 
-    await this.stopStandard(`Resuming session ${sessionId}`);
-    const runId = randomUUID();
-    this.db.createStandardRun(runId, this.workspace, process.pid);
-    // Carry any mailbox still addressed to Standard across the session replacement.
-    const adoptedMessages = this.db.adoptStandardMessages(runId, this.workspace, STANDARD_TARGET);
-    this.standard = { runId };
-    this.emit(
-      "session.loading",
-      { mode: "standard-loading", sessionId },
-      { runId, memberId: STANDARD_TARGET, target: "status", done: false },
-    );
-    try {
-      await this.connectSession({
-        runId,
-        target: STANDARD_TARGET,
-        agentId: undefined,
-        alias: STANDARD_ALIAS,
-        sessionId,
-        config: this.standardSessionConfig(),
-        configSignature: "standard",
-        resumeExisting: true,
-      });
+    await this.openPrimary();
+    const context = this.requirePrimary();
+    await this.withAgentLock(context.agentId, async () => {
+      const oldLive = await this.activeSession(context.target);
+      const oldRunId = context.runId;
+      const oldSessionId = oldLive.session.sessionId;
+      const runId = randomUUID();
       this.emit(
-        "standard.ready",
-        { mode: "standard", recovered: true, sessionId, adoptedMessages },
-        { runId },
+        "session.loading",
+        {
+          mode: "primary-loading",
+          sessionId,
+          target: context.target,
+          agentId: context.agentId,
+        },
+        { runId, memberId: context.target, target: "status", done: false },
       );
-      queueMicrotask(() => void this.drainMailbox(STANDARD_TARGET));
-    } catch (error) {
-      this.db.finishRun(runId, "interrupted", "Standard Copilot recovery failed");
-      this.standard = undefined;
-      await this.openStandard();
-      throw error;
-    }
+      oldLive.unsubscribe();
+      this.live.delete(context.target);
+      await oldLive.session.disconnect().catch(() => undefined);
+      this.db.upsertSession(oldRunId, oldSessionId, "disconnected");
+      this.db.finishRun(oldRunId, "stopped", `Resuming session ${sessionId}`);
+      context.runId = runId;
+      this.db.createAgentRun(
+        runId,
+        context.agentId,
+        context.alias,
+        this.storedAgentJson(context),
+        this.workspace,
+        process.pid,
+        true,
+      );
+      const adoptedMessages = this.db.adoptAgentMessages(
+        runId,
+        this.workspace,
+        context.agentId,
+        context.target,
+      );
+      try {
+        const live = await this.connectSession({
+          runId,
+          target: context.target,
+          agentId: context.agentId,
+          alias: context.alias,
+          sessionId,
+          config: this.agentConfig(context),
+          configSignature: this.sessionSignature(context),
+          resumeExisting: true,
+        });
+        this.emit(
+          "primary.ready",
+          {
+            ...this.agentPayload(context),
+            mode: "primary",
+            recovered: true,
+            sessionId,
+            adoptedMessages,
+            runId,
+          },
+          { runId, memberId: context.target, target: "status", done: true },
+        );
+        queueMicrotask(() => void this.drainMailbox(context.target));
+      } catch (error) {
+        this.db.finishRun(runId, "interrupted", "Primary session replacement failed");
+        context.runId = oldRunId;
+        try {
+          this.db.resumeRun(oldRunId, process.pid);
+          this.db.adoptAgentMessages(
+            oldRunId,
+            this.workspace,
+            context.agentId,
+            context.target,
+          );
+          const restored = await this.connectSession({
+            runId: oldRunId,
+            target: context.target,
+            agentId: context.agentId,
+            alias: context.alias,
+            sessionId: oldSessionId,
+            config: this.agentConfig(context),
+            configSignature: this.sessionSignature(context),
+            resumeExisting: true,
+          });
+          this.emit(
+            "primary.ready",
+            {
+              ...this.agentPayload(context),
+              mode: "primary",
+              recovered: true,
+              sessionId: restored.session.sessionId,
+              runId: oldRunId,
+              replacementFailed: true,
+            },
+            { runId: oldRunId, memberId: context.target, target: "status", done: true },
+          );
+        } catch {
+          this.unregisterAgent(context);
+          this.primaryAgentId = undefined;
+        }
+        throw error;
+      }
+    });
   }
 
   private async withAgentLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
@@ -2697,23 +2874,28 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
   }
 
-  private async drainPendingSpawns(): Promise<void> {
+  private async drainPendingSpawns(callerAgentId: string): Promise<void> {
     while (this.pendingSpawns.length > 0) {
-      const standard = this.live.get(STANDARD_TARGET);
-      if (standard?.busy) {
+      const pending = this.pendingSpawns[0]!;
+      if (pending.callerAgentId !== callerAgentId) {
         return;
       }
-      const request = this.pendingSpawns.shift()!;
+      const caller = this.agents.get(callerAgentId);
+      const live = caller && this.live.get(caller.target);
+      if (!caller || live?.busy) {
+        return;
+      }
+      this.pendingSpawns.shift();
       try {
-        await this.spawnAgents(request);
+        await this.spawnAgentsForCaller(caller, pending.request);
       } catch (error) {
         this.emit(
           "agent.error",
           {
             message: error instanceof Error ? error.message : String(error),
-            aliases: request.agents.map((definition) => definition.id),
+            aliases: pending.request.agents.map((definition) => definition.id),
           },
-          { memberId: STANDARD_TARGET, target: "activity", done: true },
+          { memberId: caller.target, target: "activity", done: true },
         );
       }
     }
@@ -2725,41 +2907,99 @@ export class CopilotRuntime implements RuntimeAdapter {
    * failure never prevents the others from starting.
    */
   async spawnAgents(request: SpawnAgentsRequest): Promise<Array<Record<string, unknown>>> {
-    const resolved = this.resolveSpawnRequest(request);
-    if (!this.standard || !this.live.has(STANDARD_TARGET)) {
-      await this.openStandard();
-    }
+    await this.openPrimary();
+    return this.spawnAgentsForCaller(this.requirePrimary(), request);
+  }
+
+  private async spawnAgentsForCaller(
+    caller: AgentContext,
+    request: SpawnAgentsRequest,
+  ): Promise<Array<Record<string, unknown>>> {
+    this.requireCallingPrimary(caller.agentId);
+    const resolved = this.resolveSpawnRequest(caller, request);
     const mcpServers = await this.availableMcpServers();
     this.assertMcpCeiling(request.agents, mcpServers);
 
-    // Register every agent identity first so aliases in the batch resolve to their
-    // UUID targets while the sessions are being configured.
+    const batchAliases = new Map<string, string>();
+    for (const agent of resolved) {
+      batchAliases.set(agent.alias, randomUUID());
+    }
     const contexts: AgentContext[] = [];
     for (const [index, agent] of resolved.entries()) {
-      const agentId = randomUUID();
+      const agentId = batchAliases.get(agent.alias)!;
+      const canTalkTo = this.resolveGrantSelectors(
+        agent.recipientSelectors,
+        caller,
+        batchAliases,
+        agentId,
+      );
+      const canObserve = this.resolveGrantSelectors(
+        agent.observeSelectors,
+        caller,
+        batchAliases,
+        agentId,
+      );
       const context: AgentContext = {
         agentId,
         target: agentTarget(agentId),
         alias: agent.alias,
         runId: randomUUID(),
-        definition: request.agents[index]!,
+        definition: {
+          ...request.agents[index]!,
+          canTalkTo: this.grantDetails(canTalkTo),
+          canObserve: this.grantDetails(canObserve),
+        },
         agent,
+        canTalkTo,
+        canObserve,
         mcpServers: new Set(mcpServers),
       };
-      this.agents.set(agentId, context);
-      this.aliasIndex.set(context.alias, agentId);
-      this.db.createAgentRun(
-        context.runId,
-        agentId,
-        context.alias,
-        this.storedAgentJson(context),
-        agent.standardCanTalk,
-        agent.standardCanObserve,
-        this.workspace,
-        process.pid,
-      );
+      this.registerAgent(context);
+      try {
+        this.db.createAgentRun(
+          context.runId,
+          agentId,
+          context.alias,
+          this.storedAgentJson(context),
+          this.workspace,
+          process.pid,
+        );
+      } catch (error) {
+        this.unregisterAgent(context);
+        for (const created of contexts) {
+          this.unregisterAgent(created);
+          this.db.finishRun(created.runId, "interrupted", "Agent batch registration failed");
+        }
+        throw error;
+      }
       contexts.push(context);
       this.emitAgentLifecycle("agent.loading", context, { recovered: false });
+    }
+
+    const previousCallerTalk = caller.canTalkTo;
+    const previousCallerObserve = caller.canObserve;
+    caller.canTalkTo = new Set(caller.canTalkTo);
+    caller.canObserve = new Set(caller.canObserve);
+    for (const alias of request.callerCanTalkTo) {
+      caller.canTalkTo.add(batchAliases.get(alias)!);
+    }
+    for (const alias of request.callerCanObserve) {
+      caller.canObserve.add(batchAliases.get(alias)!);
+    }
+    try {
+      this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
+    } catch (error) {
+      caller.canTalkTo = previousCallerTalk;
+      caller.canObserve = previousCallerObserve;
+      for (const context of contexts) {
+        this.unregisterAgent(context);
+        this.db.finishRun(
+          context.runId,
+          "interrupted",
+          "Could not persist the spawning caller's ACL grants",
+        );
+      }
+      throw error;
     }
 
     const results: Array<Record<string, unknown>> = [];
@@ -2797,6 +3037,9 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (!stored) {
       throw new Error(`Agent run "${runId}" was not found for this workspace.`);
     }
+    if (stored.isPrimary) {
+      throw new Error("The primary agent is resumed through the main Copilot buffer.");
+    }
     return this.withAgentLock(stored.agentId, () => this.resumeAgentUnlocked(runId));
   }
 
@@ -2811,33 +3054,20 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (!stored.definition) {
       throw new Error(`Agent run "${runId}" has no stored definition and cannot resume.`);
     }
+    if (!stored.session) {
+      throw new Error(`Agent run "${runId}" has no managed SDK session and cannot resume safely.`);
+    }
     if (this.agents.has(stored.agentId)) {
       throw new Error(`Agent "${stored.alias}" is already active.`);
     }
     const record = storedAgentRecord(stored.definition);
     const definition = record.definition;
-    // A recovered agent keeps the exact ACLs it was persisted with, so referenced
-    // aliases are validated against the union of its persisted communication and
-    // observation grants.
-    const validated = validateAgentDefinition(definition, {
-      availableAliases: new Set([...definition.canTalkTo, ...definition.canObserve]),
-      standardCanTalk: stored.standardCanTalk || record.standardCanTalk,
-      standardCanObserve: stored.standardCanObserve,
-    });
-    if (!validated.valid || !validated.agent) {
-      throw new Error(
-        `Agent "${stored.alias}" can no longer be resumed with this configuration: ${validated.issues
-          .map((issue) => `${issue.path}: ${issue.message}`)
-          .join("; ")}`,
-      );
-    }
+    const resolved = this.resolveStoredDefinition(definition);
     this.assertPermissionCeiling([definition]);
     this.assertAliasesAvailable([definition.id], stored.agentId);
-    if (!this.standard || !this.live.has(STANDARD_TARGET)) {
-      await this.openStandard();
-    }
+    await this.openPrimary();
     // Recovery must not widen the agent's environment: its ceiling is the MCP server
-    // set captured when it was created, narrowed to what Standard currently exposes.
+    // set captured when it was created, narrowed to what the primary currently exposes.
     // Servers added to the workspace since then stay out of reach, and a server the
     // definition still requests but that is gone fails the recovery explicitly.
     const available = await this.availableMcpServers();
@@ -2851,18 +3081,13 @@ export class CopilotRuntime implements RuntimeAdapter {
       alias: definition.id,
       runId,
       definition,
-      agent: validated.agent,
+      agent: resolved,
+      canTalkTo: new Set(record.canTalkToAgentIds),
+      canObserve: new Set(record.canObserveAgentIds),
       mcpServers,
     };
-    this.agents.set(context.agentId, context);
-    this.aliasIndex.set(context.alias, context.agentId);
-    this.db.updateAgentRun(
-      runId,
-      context.alias,
-      this.storedAgentJson(context),
-      validated.agent.standardCanTalk,
-      validated.agent.standardCanObserve,
-    );
+    this.registerAgent(context);
+    this.db.updateAgentRun(runId, context.alias, this.storedAgentJson(context));
     this.emitAgentLifecycle("agent.loading", context, {
       recovered: true,
       ...(stored.session ? { sessionId: stored.session.sessionId } : {}),
@@ -2873,7 +3098,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         target: context.target,
         agentId: context.agentId,
         alias: context.alias,
-        sessionId: stored.session?.sessionId,
+        sessionId: stored.session.sessionId,
         config: this.agentConfig(context),
         configSignature: this.sessionSignature(context),
         resumeExisting: true,
@@ -2893,6 +3118,9 @@ export class CopilotRuntime implements RuntimeAdapter {
   /** Stops one agent; accepts an alias, agent UUID, "agent:<uuid>" target, or run id. */
   async stopAgent(agentRef: string, reason = "Agent stopped by user"): Promise<void> {
     const context = this.requireAgent(agentRef);
+    if (context.agentId === this.primaryAgentId) {
+      throw new Error("The primary agent cannot be stopped independently of the host.");
+    }
     return this.withAgentLock(context.agentId, () => this.stopAgentUnlocked(context, reason));
   }
 
@@ -2907,25 +3135,38 @@ export class CopilotRuntime implements RuntimeAdapter {
       await live.session.disconnect().catch(() => undefined);
       this.db.upsertSession(context.runId, live.session.sessionId, "disconnected");
     }
-    this.agents.delete(context.agentId);
-    if (this.aliasIndex.get(context.alias) === context.agentId) {
-      this.aliasIndex.delete(context.alias);
-    }
+    this.unregisterAgent(context);
     this.db.finishRun(context.runId, "stopped", reason);
     this.emit(
       "agent.stopped",
       { ...this.agentPayload(context), runId: context.runId, reason },
       { runId: context.runId, memberId: context.target, target: "status", done: true },
     );
-    await this.pruneRecipient(context.alias);
   }
 
   async updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>> {
+    await this.openPrimary();
+    return this.updateAgentForCaller(this.requirePrimary(), agentRef, update);
+  }
+
+  private async updateAgentForCaller(
+    caller: AgentContext,
+    agentRef: string,
+    update: AgentUpdate,
+  ): Promise<Record<string, unknown>> {
+    this.requireCallingPrimary(caller.agentId);
     const context = this.requireAgent(agentRef);
-    return this.withAgentLock(context.agentId, () => this.updateAgentUnlocked(context, update));
+    if (context.agentId === caller.agentId) {
+      throw new Error("The primary agent definition is managed by the host bootstrap.");
+    }
+    return this.withAgentLock(
+      context.agentId,
+      () => this.updateAgentUnlocked(caller, context, update),
+    );
   }
 
   private async updateAgentUnlocked(
+    caller: AgentContext,
     context: AgentContext,
     update: AgentUpdate,
   ): Promise<Record<string, unknown>> {
@@ -2934,22 +3175,21 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     const definition = update.definition;
     if (definition.id !== context.alias) {
-      throw new Error(
-        `Agent "${context.alias}" cannot be renamed to "${definition.id}"; aliases are durable.`,
-      );
+      this.assertAliasesAvailable([definition.id], context.agentId);
     }
     this.assertPermissionCeiling([definition]);
     this.assertMcpCeiling([definition], context.mcpServers);
     const availableAliases = new Set(
       [...this.aliasIndex.keys()].filter((alias) => alias !== context.alias),
     );
-    const standardCanTalk = update.standardCanTalk ?? context.agent.standardCanTalk;
-    const standardCanObserve =
-      update.standardCanObserve ?? context.agent.standardCanObserve;
+    availableAliases.delete(caller.alias);
+    for (const reserved of this.db.reservedAgentAliases(this.workspace)) {
+      if (reserved.agentId !== context.agentId) {
+        availableAliases.add(reserved.alias);
+      }
+    }
     const validated = validateAgentDefinition(definition, {
       availableAliases,
-      standardCanTalk,
-      standardCanObserve,
     });
     if (!validated.valid || !validated.agent) {
       throw new Error(
@@ -2959,21 +3199,71 @@ export class CopilotRuntime implements RuntimeAdapter {
       );
     }
 
+    const nextCanTalkTo = this.resolveGrantSelectors(
+      validated.agent.recipientSelectors,
+      caller,
+      new Map<string, string>(),
+      context.agentId,
+    );
+    const nextCanObserve = this.resolveGrantSelectors(
+      validated.agent.observeSelectors,
+      caller,
+      new Map<string, string>(),
+      context.agentId,
+    );
     const previousDefinition = context.definition;
     const previousAgent = context.agent;
-    context.definition = definition;
+    const previousAlias = context.alias;
+    const previousCanTalkTo = context.canTalkTo;
+    const previousCanObserve = context.canObserve;
+    const previousCallerCanTalkTo = caller.canTalkTo;
+    const previousCallerCanObserve = caller.canObserve;
+    caller.canTalkTo = new Set(caller.canTalkTo);
+    caller.canObserve = new Set(caller.canObserve);
+    if (update.callerCanTalk === true) {
+      caller.canTalkTo.add(context.agentId);
+    } else if (update.callerCanTalk === false) {
+      caller.canTalkTo.delete(context.agentId);
+    }
+    if (update.callerCanObserve === true) {
+      caller.canObserve.add(context.agentId);
+    } else if (update.callerCanObserve === false) {
+      caller.canObserve.delete(context.agentId);
+    }
+    if (this.aliasIndex.get(previousAlias) === context.agentId) {
+      this.aliasIndex.delete(previousAlias);
+    }
+    const normalizedDefinition = {
+      ...definition,
+      canTalkTo: this.grantDetails(nextCanTalkTo),
+      canObserve: this.grantDetails(nextCanObserve),
+    };
+    context.alias = definition.id;
+    this.aliasIndex.set(context.alias, context.agentId);
+    context.definition = normalizedDefinition;
     context.agent = validated.agent;
+    context.canTalkTo = nextCanTalkTo;
+    context.canObserve = nextCanObserve;
+    const live = this.live.get(context.target);
+    if (live) {
+      live.alias = context.alias;
+    }
     try {
-      this.db.updateAgentRun(
-        context.runId,
-        context.alias,
-        this.storedAgentJson(context),
-        standardCanTalk,
-        standardCanObserve,
-      );
+      this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
+      this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
     } catch (error) {
+      this.aliasIndex.delete(context.alias);
+      context.alias = previousAlias;
+      this.aliasIndex.set(previousAlias, context.agentId);
       context.definition = previousDefinition;
       context.agent = previousAgent;
+      context.canTalkTo = previousCanTalkTo;
+      context.canObserve = previousCanObserve;
+      caller.canTalkTo = previousCallerCanTalkTo;
+      caller.canObserve = previousCallerCanObserve;
+      if (live) live.alias = previousAlias;
+      this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
+      this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
       throw error;
     }
 
@@ -2984,15 +3274,18 @@ export class CopilotRuntime implements RuntimeAdapter {
       // The reconnect failed, so restore the previous definition durably and in
       // memory rather than leaving a committed update the live session never
       // received, then surface the failure.
+      this.aliasIndex.delete(context.alias);
+      context.alias = previousAlias;
+      this.aliasIndex.set(previousAlias, context.agentId);
       context.definition = previousDefinition;
       context.agent = previousAgent;
-      this.db.updateAgentRun(
-        context.runId,
-        context.alias,
-        this.storedAgentJson(context),
-        previousAgent.standardCanTalk,
-        previousAgent.standardCanObserve,
-      );
+      context.canTalkTo = previousCanTalkTo;
+      context.canObserve = previousCanObserve;
+      caller.canTalkTo = previousCallerCanTalkTo;
+      caller.canObserve = previousCallerCanObserve;
+      if (live) live.alias = previousAlias;
+      this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
+      this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
       throw error;
     }
     this.emitAgentLifecycle("agent.updated", context, { reconnected });
@@ -3002,50 +3295,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       runId: context.runId,
       reconnected,
     };
-  }
-
-  /** Removes a departed alias from every remaining communication and observation ACL. */
-  private async pruneRecipient(alias: string): Promise<string[]> {
-    const pruned: string[] = [];
-    for (const context of [...this.agents.values()]) {
-      if (!context.agent.recipients.has(alias) && !context.agent.observes.has(alias)) {
-        continue;
-      }
-      const recipients = new Set(context.agent.recipients);
-      const observes = new Set(context.agent.observes);
-      recipients.delete(alias);
-      observes.delete(alias);
-      context.definition = {
-        ...context.definition,
-        canTalkTo: context.definition.canTalkTo.filter((entry) => entry !== alias),
-        canObserve: context.definition.canObserve.filter((entry) => entry !== alias),
-      };
-      context.agent = { ...context.agent, recipients, observes };
-      this.db.updateAgentRun(
-        context.runId,
-        context.alias,
-        this.storedAgentJson(context),
-        context.agent.standardCanTalk,
-        context.agent.standardCanObserve,
-      );
-      pruned.push(context.alias);
-      try {
-        const reconnected = await this.reconnectIfConfigChanged(context);
-        this.emitAgentLifecycle("agent.updated", context, { reconnected });
-      } catch (error) {
-        this.emit(
-          "agent.error",
-          {
-            ...this.agentPayload(context),
-            message: `Reconnect after removing recipient "${alias}" failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          },
-          { runId: context.runId, memberId: STANDARD_TARGET, target: "activity", done: true },
-        );
-      }
-    }
-    return pruned;
   }
 
   /**
@@ -3128,22 +3377,22 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.live.delete(context.target);
       await live.session.disconnect().catch(() => undefined);
     }
-    this.agents.delete(context.agentId);
-    if (this.aliasIndex.get(context.alias) === context.agentId) {
-      this.aliasIndex.delete(context.alias);
-    }
+    this.unregisterAgent(context);
     this.db.finishRun(context.runId, "interrupted", message);
+    const primaryTarget =
+      this.primaryAgentId === undefined
+        ? context.target
+        : this.agents.get(this.primaryAgentId)?.target ?? context.target;
     this.emit(
       "agent.error",
       { ...this.agentPayload(context), runId: context.runId, message },
-      { runId: context.runId, memberId: STANDARD_TARGET, target: "activity", done: true },
+      { runId: context.runId, memberId: primaryTarget, target: "activity", done: true },
     );
     this.emit(
       "agent.stopped",
       { ...this.agentPayload(context), runId: context.runId, reason: message, failed: true },
       { runId: context.runId, memberId: context.target, target: "status", done: true },
     );
-    await this.pruneRecipient(context.alias);
   }
 
   private agentPayload(context: AgentContext): Record<string, unknown> {
@@ -3154,10 +3403,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       displayName: context.agent.displayName,
       description: context.agent.description,
       task: context.agent.task,
-      recipients: [...context.agent.recipients],
-      observes: [...context.agent.observes],
-      standardCanTalk: context.agent.standardCanTalk,
-      standardCanObserve: context.agent.standardCanObserve,
+      recipients: this.grantDetails(context.canTalkTo),
+      observes: this.grantDetails(context.canObserve),
+      ...(context.agentId === this.primaryAgentId ? { primary: true } : {}),
       ...(context.agent.ui === undefined ? {} : { ui: context.agent.ui }),
     };
   }
@@ -3201,10 +3449,8 @@ export class CopilotRuntime implements RuntimeAdapter {
         displayName: record.definition.displayName,
         description: record.definition.description,
         task: record.definition.task,
-        recipients: [...record.definition.canTalkTo],
-        observes: [...record.definition.canObserve],
-        standardCanTalk: run.standardCanTalk,
-        standardCanObserve: run.standardCanObserve,
+        recipients: record.canTalkToAgentIds.map(agentTarget),
+        observes: record.canObserveAgentIds.map(agentTarget),
         status: run.status,
         startedAt: run.startedAt,
         endedAt: run.endedAt,
@@ -3274,9 +3520,15 @@ export class CopilotRuntime implements RuntimeAdapter {
       try {
         await live.session.send({ prompt, mode: "immediate" });
         this.db.completeMessage(message.id);
+        const source = this.resolveAgentRef(message.source);
         this.emit(
           "mailbox.delivered",
-          { ...message, status: "delivered" },
+          {
+            ...message,
+            source: source?.alias ?? message.source,
+            ...(source ? { sourceAgentId: source.agentId } : {}),
+            status: "delivered",
+          },
           { runId: live.runId, memberId: live.target, target: "messages" },
         );
       } catch (error) {
@@ -3310,16 +3562,21 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   status(): unknown {
-    const standardLive = this.live.get(STANDARD_TARGET);
+    const primary =
+      this.primaryAgentId === undefined ? undefined : this.agents.get(this.primaryAgentId);
+    const primaryLive = primary === undefined ? undefined : this.live.get(primary.target);
     return {
-      standard: this.standard
-        ? {
-            runId: this.standard.runId,
-            target: STANDARD_TARGET,
-            ...(standardLive ? { sessionId: standardLive.session.sessionId } : {}),
-            state: standardLive?.foregroundBusy ? "busy" : "idle",
-          }
-        : undefined,
+      primaryAgentId: primary?.agentId,
+      primaryTarget: primary?.target,
+      primary:
+        primary === undefined
+          ? undefined
+          : {
+              ...this.agentPayload(primary),
+              runId: primary.runId,
+              ...(primaryLive ? { sessionId: primaryLive.session.sessionId } : {}),
+              state: this.agentState(primary),
+            },
       agents: [...this.agents.values()].map((context) => {
         const live = this.live.get(context.target);
         return {
@@ -3350,9 +3607,6 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     this.pendingPermissions.clear();
     const runIds = new Set<string>();
-    if (this.standard) {
-      runIds.add(this.standard.runId);
-    }
     // Every agent owns its own run, so each is interrupted independently.
     for (const context of this.agents.values()) {
       runIds.add(context.runId);
@@ -3365,7 +3619,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     this.agents.clear();
     this.aliasIndex.clear();
     this.pendingSpawns.length = 0;
-    this.standard = undefined;
+    this.primaryAgentId = undefined;
     for (const runId of runIds) {
       this.db.finishRun(runId, "interrupted", reason);
     }

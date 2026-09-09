@@ -10,7 +10,7 @@ local function client_commands()
   return {
     {
       name = 'fleet',
-      description = 'Ask Standard Copilot to design and spawn task-specific agents',
+      description = 'Ask the primary Copilot agent to design and spawn task-specific agents',
       kind = 'client',
       input = { hint = 'objective for the agents' },
     },
@@ -111,11 +111,14 @@ local state = {
   task_detail_member = nil,
   detail_item = nil,
   status_buf = nil,
-  selected = 'standard',
+  loading_buf = nil,
+  selected = nil,
+  primary_target = nil,
+  primary_agent_id = nil,
   mode = 'stopped',
   agents = {},
   member_meta = {},
-  member_order = { 'standard' },
+  member_order = {},
   tasks = {},
   environment = {},
   recoverable_agents = {},
@@ -245,13 +248,13 @@ end
 local function update_prompt_label()
   if not state.prompt_win or not vim.api.nvim_win_is_valid(state.prompt_win) then return end
   local entry = buffers.get_member(state.selected)
-  local target = entry and entry.display_name or state.selected
+  local target = entry and entry.display_name or state.selected or 'Copilot (starting…)'
   if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
     vim.b[state.prompt_buf].native_copilot_target = state.selected
   end
   vim.wo[state.prompt_win].winbar =
     (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
-  if options.frontend.completion == 'blink' and M.ensure_commands then
+  if options.frontend.completion == 'blink' and M.ensure_commands and state.selected then
     if not commands.catalog(state.selected) then
       commands.set_catalog(state.selected, client_commands())
     end
@@ -441,15 +444,20 @@ local function submit_prompt_content(queue_only)
       return true
     elseif command.name:lower() == 'fleet' then
       if command.input then
+        if not state.primary_target then
+          notify('The primary Copilot agent is still starting.', vim.log.levels.WARN)
+          return true
+        end
         send('prompt.send', {
-          target = 'standard',
+          target = state.primary_target,
           content = table.concat({
             'Design and spawn standalone Copilot agents for this objective: ',
             command.input,
             '. Give each agent a focused task and explicitly define every directional ',
-            'communication link, including links to or from standard, and every passive ',
-            'observation grant between agents or from standard. Do not assume any access ',
-            'is granted by default.',
+            'communication and passive-observation link. Use the request-local selector ',
+            '`caller` when a child should message or observe you, and callerCanTalkTo or ',
+            'callerCanObserve when you need outgoing access to a child. Do not assume any ',
+            'access is granted by default.',
           }),
         })
       else
@@ -1114,7 +1122,8 @@ local function remove_environment(member_id, component)
 end
 
 local function update_environment(member_id, component, status, detail)
-  member_id = member_id or 'standard'
+  member_id = member_id or state.primary_target
+  if not member_id then return end
   component = component or 'Environment'
   local environment = state.environment[member_id]
   if not environment then
@@ -1464,7 +1473,12 @@ local function order_contains(member_id)
 end
 
 local function add_to_order(member_id)
-  if not order_contains(member_id) then table.insert(state.member_order, member_id) end
+  if order_contains(member_id) then return end
+  if member_id == state.primary_target then
+    table.insert(state.member_order, 1, member_id)
+  else
+    table.insert(state.member_order, member_id)
+  end
 end
 
 local function remove_from_order(member_id)
@@ -1476,8 +1490,36 @@ local function remove_from_order(member_id)
   end
 end
 
+local function set_primary(payload)
+  local target = payload and (payload.target or (
+    payload.agentId and ('agent:' .. payload.agentId)
+  )) or nil
+  if not target then return nil end
+  local previous = state.primary_target
+  state.primary_target = target
+  state.primary_agent_id = payload.agentId
+  if previous and previous ~= target then
+    remove_from_order(previous)
+  end
+  remove_from_order(target)
+  table.insert(state.member_order, 1, target)
+  if not state.selected or state.selected == previous or not buffers.get_member(state.selected) then
+    state.selected = target
+  end
+  return target
+end
+
+local function fallback_member()
+  if state.primary_target and buffers.get_member(state.primary_target) then
+    return state.primary_target
+  end
+  for _, member_id in ipairs(state.member_order) do
+    if buffers.get_member(member_id) then return member_id end
+  end
+end
+
 -- Clears one member's transient UI state and buffers without touching any other
--- independently running agent or the Standard session.
+-- independently running agent or the primary session.
 local function reset_member(member_id, preserve_buffers)
   if not preserve_buffers then buffers.remove_member(member_id) end
   state.tasks[member_id] = nil
@@ -1593,6 +1635,22 @@ local function close_non_prompt_windows()
   return keep
 end
 
+local function ensure_loading_buffer()
+  if state.loading_buf and vim.api.nvim_buf_is_valid(state.loading_buf) then
+    return state.loading_buf
+  end
+  state.loading_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(state.loading_buf, 'native-copilot://loading')
+  vim.bo[state.loading_buf].buftype = 'nofile'
+  vim.bo[state.loading_buf].bufhidden = 'hide'
+  vim.bo[state.loading_buf].swapfile = false
+  vim.bo[state.loading_buf].filetype = 'native-copilot'
+  vim.api.nvim_buf_set_lines(state.loading_buf, 0, -1, false, {
+    'Starting the primary Copilot agent…',
+  })
+  return state.loading_buf
+end
+
 local function ensure_ui(reuse_current_tab)
   if is_ui_open() then
     vim.api.nvim_set_current_tabpage(state.tab)
@@ -1614,9 +1672,13 @@ local function ensure_ui(reuse_current_tab)
     vim.o.laststatus = 0
     vim.o.showtabline = 0
   end
-  local entry = ensure_member(state.selected, state.selected == 'standard' and 'Copilot' or nil)
-  vim.api.nvim_win_set_buf(state.main_win, entry.views.conversation.buf)
-  buffers.on_shown(entry.views.conversation.buf)
+  local entry = state.selected and ensure_member(
+    state.selected,
+    state.selected == state.primary_target and 'Copilot' or nil
+  ) or nil
+  local main_buf = entry and entry.views.conversation.buf or ensure_loading_buffer()
+  vim.api.nvim_win_set_buf(state.main_win, main_buf)
+  if entry then buffers.on_shown(main_buf) end
   local prompt_buf = ensure_prompt_buffer()
   local split = pcall(vim.cmd, 'botright split')
   if split then
@@ -1657,7 +1719,7 @@ function M.open(open_options)
   if not start_host() then return end
   ensure_ui(type(open_options) == 'table' and open_options.reuse_current_tab == true)
   send('hello')
-  if state.mode == 'stopped' then send('mode.standard') end
+  send('mode.primary')
 end
 
 function M.close()
@@ -1749,15 +1811,19 @@ local function update_status_buffer()
     vim.b[state.status_buf].native_copilot = true
   end
   local active_agents = {}
-  for target in pairs(state.agents) do table.insert(active_agents, target) end
+  for target in pairs(state.agents) do
+    if target ~= state.primary_target then table.insert(active_agents, target) end
+  end
   table.sort(active_agents)
   local lines = {
     '# Native Copilot Status',
     '',
     ('- **Mode:** %s'):format(state.mode),
-    ('- **Standard:** %s'):format(buffers.get_member('standard') and 'active' or 'stopped'),
-    ('- **Active agents:** %d'):format(#active_agents),
-    ('- **Selected recipient:** %s'):format(state.selected),
+    ('- **Primary:** %s'):format(
+      state.primary_target and buffers.get_member(state.primary_target) and 'active' or 'stopped'
+    ),
+    ('- **Additional agents:** %d'):format(#active_agents),
+    ('- **Selected recipient:** %s'):format(state.selected or 'starting…'),
     '',
   }
   table.insert(lines, '| Agent | Alias | Session | State | Unread |')
@@ -1767,7 +1833,7 @@ local function update_status_buffer()
     local meta = state.member_meta[member_id]
     table.insert(lines, ('| %s | %s | %s | %s | %d |'):format(
       entry.display_name,
-      meta and (meta.alias or '—') or (member_id == 'standard' and 'standard' or '—'),
+      meta and (meta.alias or '—') or '—',
       meta and (meta.sessionId or 'connecting…') or '—',
       entry.state,
       entry.unread
@@ -2107,7 +2173,7 @@ function M.select_agents()
   local entries = {}
   local active_targets = {}
   for target in pairs(state.agents) do
-    table.insert(active_targets, target)
+    if target ~= state.primary_target then table.insert(active_targets, target) end
   end
   table.sort(active_targets)
   for _, target in ipairs(active_targets) do
@@ -2153,7 +2219,8 @@ function M.select_agents()
 end
 
 local function event_member(message)
-  return message.memberId or 'standard'
+  local payload = type(message.payload) == 'table' and message.payload or {}
+  return message.memberId or payload.target or state.primary_target
 end
 
 local function history_task(member_id, task, status, event_time)
@@ -2414,19 +2481,33 @@ end
 
 function M._on_event(message)
   local payload = message.payload or {}
-  if message.type == 'hello' then
+  if
+    message.type == 'host.ready'
+    or message.type == 'host.shutdown'
+    or message.type == 'runtime.ready'
+    or message.type == 'request.complete'
+    or message.type == 'permission.resolved'
+    or message.type == 'agents.spawned'
+    or message.type == 'state.snapshot'
+    or message.type == 'runtime.status'
+  then
+    return
+  elseif message.type == 'hello' then
     state.recoverable_agents = payload.recoverableAgents or {}
     local status = payload.status or {}
-    -- Reconcile against a host that may already have Standard and agents running.
-    if status.standard then
-      add_to_order('standard')
-      ensure_member('standard', (payload.standard and payload.standard.displayName) or 'Copilot')
-      if state.mode == 'stopped' then state.mode = 'standard' end
+    -- Reconcile against a host that may already have the primary and other agents running.
+    if status.primary then set_primary(status.primary) end
+    if not state.primary_target and status.primaryTarget then
+      set_primary({
+        target = status.primaryTarget,
+        agentId = status.primaryAgentId,
+      })
     end
     local reported_agents = {}
     for _, agent in ipairs(status.agents or {}) do
       local target = agent.target or agent.id
       if target then
+        if agent.primary or agent.agentId == status.primaryAgentId then set_primary(agent) end
         reported_agents[target] = true
         state.agents[target] = vim.deepcopy(agent)
         state.member_meta[target] = vim.deepcopy(agent)
@@ -2439,7 +2520,7 @@ function M._on_event(message)
         reset_member(target)
         remove_from_order(target)
         state.agents[target] = nil
-        if state.selected == target then state.selected = 'standard' end
+        if state.selected == target then state.selected = fallback_member() end
       end
     end
     for _, agent in ipairs(status.agents or {}) do
@@ -2448,7 +2529,12 @@ function M._on_event(message)
         buffers.set_state(target, agent.state == 'busy' and 'busy' or 'idle')
       end
     end
-    if not buffers.get_member(state.selected) then state.selected = 'standard' end
+    if state.primary_target and reported_agents[state.primary_target] then
+      state.mode = 'primary'
+    end
+    if not state.selected or not buffers.get_member(state.selected) then
+      state.selected = fallback_member()
+    end
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   elseif message.type == 'sessions.list' then
@@ -2909,22 +2995,27 @@ function M._on_event(message)
     notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
     return
   elseif message.type == 'agents.requested' then
+    local member_id = event_member(message)
+    if not member_id then return end
     buffers.append_activity_block(
-      'standard',
+      member_id,
       'Agents requested',
-      ('%d standalone agent%s will start when Standard becomes idle.'):format(
+      ('%d standalone agent%s will start when the primary agent becomes idle.'):format(
         tonumber(payload.count) or #(payload.agents or {}),
         (tonumber(payload.count) or #(payload.agents or {})) == 1 and '' or 's'
       )
     )
     return
-  elseif message.type == 'standard.ready' then
+  elseif message.type == 'primary.ready' then
     close_task_detail()
-    state.mode = 'standard'
-    add_to_order('standard')
-    ensure_member('standard', payload.displayName or 'Copilot')
-    buffers.set_state('standard', 'idle')
-    if not buffers.get_member(state.selected) then state.selected = 'standard' end
+    local target = set_primary(payload)
+    if not target then return end
+    state.mode = 'primary'
+    state.agents[target] = vim.deepcopy(payload)
+    state.member_meta[target] = vim.deepcopy(payload)
+    ensure_member(target, payload.displayName or 'Copilot')
+    buffers.set_state(target, 'idle')
+    if not buffers.get_member(state.selected) then state.selected = target end
     if protocol.is_running() then send('hello') end
     if is_ui_open() and buffers.get_member(state.selected) then
       M.show_member(state.selected)
@@ -2933,25 +3024,35 @@ function M._on_event(message)
     restore_resume_cursor_animation(100)
     return
   elseif message.type == 'session.loading' then
-    -- Only the Standard session is reloaded; independent agents are untouched.
+    -- Only the dynamic primary session is replaced; independent agents are untouched.
+    local target = payload.target or message.memberId or state.primary_target
+    if not target then return end
+    set_primary({
+      target = target,
+      agentId = payload.agentId or state.primary_agent_id,
+    })
     close_task_detail()
-    reset_member('standard', true)
-    state.mode = 'standard-loading'
-    add_to_order('standard')
-    ensure_member('standard', 'Copilot')
-    buffers.set_state('standard', 'loading')
-    state.selected = 'standard'
-    if is_ui_open() then refresh_member('standard') end
+    reset_member(target, true)
+    state.mode = 'primary-loading'
+    add_to_order(target)
+    ensure_member(target, 'Copilot')
+    buffers.set_state(target, 'loading')
+    state.selected = target
+    if is_ui_open() then refresh_member(target) end
     return
   elseif message.type == 'agent.loading' or message.type == 'agent.ready' then
     local target = payload.target
     if not target then return end
+    if payload.primary then
+      set_primary(payload)
+      state.mode = message.type == 'agent.loading' and 'primary-loading' or 'primary'
+    end
     state.agents[target] = vim.deepcopy(payload)
     state.member_meta[target] = vim.deepcopy(payload)
     ensure_member(target, payload.displayName or payload.alias or target)
     add_to_order(target)
     buffers.set_state(target, message.type == 'agent.loading' and 'loading' or 'idle')
-    if message.type == 'agent.loading' then
+    if message.type == 'agent.loading' and not payload.primary then
       buffers.append_activity_block(
         target,
         payload.recovered and 'Recovering agent' or 'Starting agent',
@@ -2979,28 +3080,57 @@ function M._on_event(message)
     reset_member(target)
     remove_from_order(target)
     state.agents[target] = nil
-    if state.selected == target then state.selected = 'standard' end
-    if not buffers.get_member(state.selected) then state.selected = 'standard' end
+    if target == state.primary_target then
+      state.primary_target = nil
+      state.primary_agent_id = nil
+      state.mode = 'stopped'
+    end
+    if state.selected == target then state.selected = fallback_member() end
+    if not buffers.get_member(state.selected) then state.selected = fallback_member() end
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   elseif message.type == 'agent.error' then
     local target = payload.target
     if target then
-      reset_member(target)
-      remove_from_order(target)
-      state.agents[target] = nil
-      if state.selected == target then state.selected = 'standard' end
+      if payload.primary or target == state.primary_target then
+        state.mode = 'stopped'
+        state.agents[target] = vim.deepcopy(payload)
+        state.member_meta[target] = vim.deepcopy(payload)
+        ensure_member(target, payload.displayName or 'Copilot')
+        buffers.set_state(target, 'error')
+        state.selected = target
+      else
+        reset_member(target)
+        remove_from_order(target)
+        state.agents[target] = nil
+        if state.selected == target then state.selected = fallback_member() end
+      end
     end
-    buffers.append_activity_block(
-      'standard',
-      'Agent error',
-      ('%s: %s'):format(payload.alias or payload.agentId or 'Agent', payload.message or 'startup failed')
-    )
+    local error_target = state.primary_target or target
+    if error_target then
+      buffers.append_activity_block(
+        error_target,
+        'Agent error',
+        ('%s: %s'):format(
+          payload.alias or payload.agentId or 'Agent',
+          payload.message or 'startup failed'
+        )
+      )
+    end
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   end
 
   local member_id = event_member(message)
+  if not member_id then
+    notify(
+      ('Ignoring memberless host event `%s` before a primary target was discovered.'):format(
+        tostring(message.type)
+      ),
+      vim.log.levels.WARN
+    )
+    return
+  end
   local entry = ensure_member(member_id)
   if message.type == 'session.history' then
     local first_event = type(payload.events) == 'table' and payload.events[1] or nil

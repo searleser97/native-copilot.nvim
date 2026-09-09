@@ -117,10 +117,6 @@ async function main(): Promise<void> {
             workspace: options.workspace,
             databasePath: options.databasePath,
             interruptedRuns,
-            standard: {
-              id: "standard",
-              displayName: "Copilot",
-            },
             status: runtime.status(),
             recoverableAgents: runtime.recoverableAgentRuns(),
           },
@@ -148,7 +144,7 @@ async function main(): Promise<void> {
         );
         return;
       case "session.resume":
-        await runtime.resumeStandardSession(requiredString(payload, "sessionId", command.type));
+        await runtime.resumePrimarySession(requiredString(payload, "sessionId", command.type));
         protocol.send("request.complete", { type: command.type }, {
           requestId: command.id,
           done: true,
@@ -278,8 +274,8 @@ async function main(): Promise<void> {
         );
         return;
       }
-      case "mode.standard":
-        await runtime.openStandard();
+      case "mode.primary":
+        await runtime.openPrimary();
         protocol.send("request.complete", { type: command.type }, {
           requestId: command.id,
           done: true,
@@ -289,13 +285,13 @@ async function main(): Promise<void> {
         if (!Array.isArray(payload.agents)) {
           throw new Error(`${command.type} requires payload.agents`);
         }
-        const standardCanTalkTo = Array.isArray(payload.standardCanTalkTo)
-          ? payload.standardCanTalkTo.filter(
+        const callerCanTalkTo = Array.isArray(payload.callerCanTalkTo)
+          ? payload.callerCanTalkTo.filter(
               (alias): alias is string => typeof alias === "string",
             )
           : [];
-        const standardCanObserve = Array.isArray(payload.standardCanObserve)
-          ? payload.standardCanObserve.filter(
+        const callerCanObserve = Array.isArray(payload.callerCanObserve)
+          ? payload.callerCanObserve.filter(
               (alias): alias is string => typeof alias === "string",
             )
           : [];
@@ -310,8 +306,8 @@ async function main(): Promise<void> {
               canObserve: Array.isArray(candidate.canObserve) ? candidate.canObserve : [],
             };
           }) as DynamicAgentDefinition[],
-          standardCanTalkTo,
-          standardCanObserve,
+          callerCanTalkTo,
+          callerCanObserve,
         };
         protocol.send(
           "agents.spawned",
@@ -356,11 +352,11 @@ async function main(): Promise<void> {
             ...candidate,
             canObserve: Array.isArray(candidate.canObserve) ? candidate.canObserve : [],
           } as DynamicAgentDefinition,
-          ...(typeof payload.standardCanTalk === "boolean"
-            ? { standardCanTalk: payload.standardCanTalk }
+          ...(typeof payload.callerCanTalk === "boolean"
+            ? { callerCanTalk: payload.callerCanTalk }
             : {}),
-          ...(typeof payload.standardCanObserve === "boolean"
-            ? { standardCanObserve: payload.standardCanObserve }
+          ...(typeof payload.callerCanObserve === "boolean"
+            ? { callerCanObserve: payload.callerCanObserve }
             : {}),
         });
         protocol.send("agent.updated", result, {
