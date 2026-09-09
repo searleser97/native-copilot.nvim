@@ -20,6 +20,8 @@ interface RuntimeEmitter {
 
 interface PendingPermission {
   target: string;
+  agentId: string;
+  generation: number;
 }
 
 interface ScriptedTransition {
@@ -112,6 +114,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
     };
     this.generations.set(agent.agentId, transition.generation);
     this.transitions.set(agent.agentId, transition);
+    for (const [requestId, pending] of this.pendingPermissions) {
+      if (pending.agentId === agent.agentId) {
+        this.pendingPermissions.delete(requestId);
+      }
+    }
     return transition;
   }
 
@@ -432,8 +439,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   private permission(target: string): void {
+    const agent = this.requireAvailableAgent(target);
     const requestId = "e2e-permission-request";
-    this.pendingPermissions.set(requestId, { target });
+    this.pendingPermissions.set(requestId, {
+      target,
+      agentId: agent.agentId,
+      generation: this.generations.get(agent.agentId) ?? 0,
+    });
     this.emitBusy(target, "e2e-permission-turn");
     this.emit("permission.requested", {
       requestId,
@@ -527,12 +539,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
         true,
       );
       this.db.upsertSession(primary.runId, primary.sessionId, "connected");
-      this.db.adoptPrimaryMessages(
-        primary.runId,
-        this.workspace,
-        primary.agentId,
-        primary.target,
-      );
       const target = primary.target;
       this.emit("agent.loading", { ...this.agentPayload(primary), recovered: false }, {
         runId: primary.runId,
@@ -549,7 +555,12 @@ export class ScriptedRuntime implements RuntimeAdapter {
         target: "status",
         done: true,
       });
-      this.db.completeRunStartup(primary.runId);
+      this.db.completePrimaryStartup(
+        primary.runId,
+        this.workspace,
+        primary.agentId,
+        primary.target,
+      );
       this.emit("agent.ready", {
         ...this.agentPayload(primary),
         recovered: false,
@@ -612,7 +623,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return false;
     this.pendingPermissions.delete(requestId);
+    if (
+      this.generations.get(pending.agentId) !== pending.generation ||
+      this.transitions.has(pending.agentId)
+    ) {
+      return false;
+    }
     void delay(20).then(() => {
+      if (
+        this.generations.get(pending.agentId) !== pending.generation ||
+        this.transitions.has(pending.agentId)
+      ) {
+        return;
+      }
       this.emitMessage(
         pending.target,
         "e2e-permission-message",
@@ -728,11 +751,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
     const transition = this.beginTransition(primary, `replacing its session with "${sessionId}"`);
     const oldRunId = primary.runId;
     const oldSessionId = primary.sessionId;
-    let oldRunStopped = false;
     let newRunCreated = false;
+    let replacementActivated = false;
     try {
-      this.db.finishRun(primary.runId, "stopped", `Resuming session ${sessionId}`);
-      oldRunStopped = true;
       const runId = randomUUID();
       this.primaryRunId = runId;
       primary.runId = runId;
@@ -748,13 +769,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
       );
       newRunCreated = true;
       this.db.upsertSession(primary.runId, primary.sessionId, "connected");
-      this.db.adoptAgentMessages(
-        primary.runId,
-        this.workspace,
-        primary.agentId,
-        primary.target,
-      );
-      this.resumedCliSession = true;
       const target = primary.target;
       this.emit("session.loading", {
       mode: "primary-loading",
@@ -1136,7 +1150,16 @@ export class ScriptedRuntime implements RuntimeAdapter {
       state: "idle",
       sessionId,
     }, { runId: primary.runId, memberId: target, target: "status", done: true });
-    this.db.completeRunStartup(primary.runId);
+    this.db.completePrimaryReplacementStartup(
+      primary.runId,
+      oldRunId,
+      this.workspace,
+      primary.agentId,
+      primary.target,
+      `Resuming session ${sessionId}`,
+    );
+    replacementActivated = true;
+    this.resumedCliSession = true;
     this.emit("primary.ready", {
       ...this.agentPayload(primary),
       mode: "primary",
@@ -1146,21 +1169,29 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }, { runId: primary.runId, memberId: target, target: "status", done: true });
     } catch (error) {
       const failedRunId = primary.runId;
+      this.resumedCliSession = false;
       primary.runId = oldRunId;
       primary.sessionId = oldSessionId;
       this.primaryRunId = oldRunId;
       if (newRunCreated) {
-        this.db.rollbackPrimaryReplacement(
-          failedRunId,
-          oldRunId,
-          this.workspace,
-          primary.agentId,
-          primary.target,
-          process.pid,
-          `Scripted primary replacement with "${sessionId}" failed`,
-        );
-      } else if (oldRunStopped) {
-        this.db.resumeRun(oldRunId, process.pid);
+        if (replacementActivated) {
+          this.db.rollbackPrimaryReplacement(
+            failedRunId,
+            oldRunId,
+            this.workspace,
+            primary.agentId,
+            primary.target,
+            process.pid,
+            `Scripted primary replacement with "${sessionId}" failed`,
+          );
+        } else {
+          this.db.disqualifyPrimaryRun(
+            failedRunId,
+            this.workspace,
+            primary.agentId,
+            `Scripted primary replacement with "${sessionId}" failed`,
+          );
+        }
       }
       throw error;
     } finally {
@@ -1383,6 +1414,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       };
       this.agents.set(agentId, agent);
       const transition = this.beginTransition(agent, "starting its scripted task");
+      let runCreated = false;
       try {
         this.db.createAgentRun(
           agent.runId,
@@ -1392,6 +1424,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
           this.workspace,
           process.pid,
         );
+        runCreated = true;
         this.db.upsertSession(agent.runId, agent.sessionId, "connected");
         this.emit("agent.loading", { ...this.agentPayload(agent), recovered: false }, {
           runId: agent.runId,
@@ -1415,7 +1448,22 @@ export class ScriptedRuntime implements RuntimeAdapter {
           `SCRIPTED-AGENT-TASK: ${agent.task}`,
         );
         this.emitIdle(agent.target);
-        this.db.completeMessage(taskMessageId);
+        const claimedTask = this.db.claimMessage(
+          taskMessageId,
+          agent.runId,
+          agent.target,
+        );
+        if (
+          !claimedTask ||
+          !this.db.completeMessage(
+            claimedTask.id,
+            claimedTask.runId,
+            claimedTask.target,
+            claimedTask.leaseToken,
+          )
+        ) {
+          throw new Error("The scripted initial task lost its delivery lease.");
+        }
         this.db.completeRunStartup(agent.runId);
         this.emit(
           "agent.ready",
@@ -1427,25 +1475,22 @@ export class ScriptedRuntime implements RuntimeAdapter {
         const message = error instanceof Error ? error.message : String(error);
         failedAgentIds.add(agent.agentId);
         this.agents.delete(agent.agentId);
-        this.db.finishRun(agent.runId, "interrupted", message);
-        for (const related of this.agents.values()) {
-          const recipients = related.recipients.filter(
-            (agentId) => agentId !== agent.agentId,
+        if (runCreated) {
+          const permanentlyDisqualified = this.db.failAgentStartup(
+            agent.runId,
+            this.workspace,
+            agent.agentId,
+            message,
           );
-          const observes = related.observes.filter(
-            (agentId) => agentId !== agent.agentId,
-          );
-          if (
-            recipients.length !== related.recipients.length ||
-            observes.length !== related.observes.length
-          ) {
-            related.recipients = recipients;
-            related.observes = observes;
-            this.db.updateAgentRun(
-              related.runId,
-              related.alias,
-              this.storedAgentJson(related),
-            );
+          if (permanentlyDisqualified) {
+            for (const related of this.agents.values()) {
+              related.recipients = related.recipients.filter(
+                (agentId) => agentId !== agent.agentId,
+              );
+              related.observes = related.observes.filter(
+                (agentId) => agentId !== agent.agentId,
+              );
+            }
           }
         }
         results.push({
@@ -1589,13 +1634,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }
     this.db.updateAgentRun(agent.runId, agent.alias, this.storedAgentJson(agent));
     this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
-    this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: false }, {
+    this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: true }, {
       runId: agent.runId,
       memberId: agent.target,
       target: "status",
       done: true,
     });
-    return { action: "updated", ...this.agentPayload(agent), reconnected: false };
+    return { action: "updated", ...this.agentPayload(agent), reconnected: true };
     } finally {
       this.endTransition(agent, transition);
     }
@@ -1608,6 +1653,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       this.db.finishRun(agent.runId, "stopped", reason);
     }
     this.agents.clear();
+    this.pendingPermissions.clear();
     this.transitions.clear();
     this.generations.clear();
     this.primaryRunId = undefined;

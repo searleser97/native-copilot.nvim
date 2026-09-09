@@ -3135,10 +3135,12 @@ function M._on_event(message)
   if message.type == 'session.history' then
     local first_event = type(payload.events) == 'table' and payload.events[1] or nil
     local first_timestamp = first_event and tonumber(json_value(first_event.replayTimestamp))
-    buffers.prepare_history(
-      member_id,
-      first_timestamp and math.floor(first_timestamp / 1000) or nil
-    )
+    if json_value(payload.incremental) ~= true then
+      buffers.prepare_history(
+        member_id,
+        first_timestamp and math.floor(first_timestamp / 1000) or nil
+      )
+    end
     local context = {
       agent_messages = {},
       agent_tool_prompts = {},

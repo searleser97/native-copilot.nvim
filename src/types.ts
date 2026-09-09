@@ -42,6 +42,7 @@ export interface DynamicAgentDefinition {
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
   permissions?: DynamicPermission;
+  /** Optional subset of the primary MCP ceiling captured when this agent is created. */
   mcpServers?: string[];
   /**
    * Directional outgoing recipient selectors. `caller` resolves to the spawning
@@ -78,6 +79,7 @@ export interface ResolvedAgent {
   reasoningEffort?: ReasoningEffort;
   reasoningSummary: ReasoningSummary;
   permission?: DynamicPermission;
+  /** Explicit MCP subset; omission inherits the durable captured ceiling. */
   mcpServers?: Set<string>;
   /** Request-local selectors resolved to UUID grants by the runtime. */
   recipientSelectors: Set<string>;

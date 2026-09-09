@@ -17,7 +17,10 @@ import {
   type Tool,
 } from "@github/copilot-sdk";
 import { z } from "zod";
-import { AgentAliasConflictError, AgentDatabase } from "./database.js";
+import {
+  AgentAliasConflictError,
+  AgentDatabase,
+} from "./database.js";
 import {
   CALLER_SELECTOR,
   LEGACY_PRIMARY_SELECTOR,
@@ -175,6 +178,7 @@ export function routeTarget(target: string): TargetRoute {
 /** One live SDK session owned by exactly one durable agent. */
 interface LiveSession {
   session: CopilotSession;
+  binding: SessionHandlerBinding;
   runId: string;
   // Runtime/UI identity: always "agent:<uuid>".
   target: string;
@@ -190,6 +194,8 @@ interface LiveSession {
   // from. Any difference means the live session must be reconnected with a rebuilt
   // config while preserving its session id and history.
   configSignature: string;
+  /** Primary MCP server names used to build this connection's deny list. */
+  availableMcpServers: Set<string>;
   modelId: string | undefined;
   aicUsed: number;
   busy: boolean;
@@ -218,6 +224,33 @@ interface AgentTransition {
   reason: string;
 }
 
+interface SessionHandlerBinding {
+  id: string;
+  agentId: string;
+  target: string;
+  runId: string;
+  generation: number;
+  transition: AgentTransition | undefined;
+  sessionId: string | undefined;
+  active: boolean;
+}
+
+interface SessionContinuity {
+  seenEventIds: Set<string>;
+  modelId: string | undefined;
+  aicUsed: number;
+  busy: boolean;
+  foregroundBusy: boolean;
+  foregroundTurnId: string | undefined;
+  foregroundTurnSequence: number;
+  foregroundCompleteTurnId: string | undefined;
+  foregroundTurnHasToolRequests: boolean;
+  foregroundAbortSequence: number | undefined;
+  sequence: number;
+  idleCycle: number;
+  mailboxDrainCycle: number;
+}
+
 interface SessionConnectionOptions {
   runId: string;
   target: string;
@@ -226,8 +259,9 @@ interface SessionConnectionOptions {
   sessionId: string | undefined;
   config: SessionConfig;
   configSignature: string;
+  availableMcpServers: Set<string>;
   resumeExisting?: boolean;
-  suppressHistory?: boolean;
+  continuity?: SessionContinuity;
   transition?: AgentTransition;
 }
 
@@ -237,6 +271,7 @@ interface ConnectionRequest {
   agentId: string;
   requestedSessionId: string | undefined;
   configSignature: string;
+  availableMcpServers: Set<string>;
   generation: number;
   transition: AgentTransition | undefined;
 }
@@ -876,7 +911,9 @@ export class CopilotRuntime implements RuntimeAdapter {
   private readonly connecting = new Map<string, ConnectionAttempt>();
   private readonly agentGenerations = new Map<string, number>();
   private readonly transitions = new Map<string, AgentTransition>();
+  private readonly sessionBindings = new Map<string, SessionHandlerBinding>();
   private readonly drainingMailboxes = new Set<string>();
+  private readonly mailboxDrainRequested = new Set<string>();
   private readonly mailboxRetryTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -892,6 +929,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   private readonly agents = new Map<string, AgentContext>();
   // Alias index over active agents. Durable ACLs never depend on this index.
   private readonly aliasIndex = new Map<string, string>();
+  private readonly disqualifiedAgentIds = new Set<string>();
   private shuttingDown = false;
   // Spawn requests accepted while their primary caller is busy.
   private readonly pendingSpawns: Array<{
@@ -900,7 +938,12 @@ export class CopilotRuntime implements RuntimeAdapter {
   }> = [];
   private readonly pendingPermissions = new Map<
     string,
-    { target: string; respond: (result: PermissionRequestResult) => void }
+    {
+      target: string;
+      binding: SessionHandlerBinding;
+      sessionId: string;
+      respond: (result: PermissionRequestResult) => void;
+    }
   >();
   // Serializes lifecycle operations per agent UUID so concurrent update/stop
   // requests cannot interleave on the same agent.
@@ -981,6 +1024,114 @@ export class CopilotRuntime implements RuntimeAdapter {
     );
   }
 
+  private sessionBindingCurrent(
+    binding: SessionHandlerBinding,
+    sessionId?: string,
+  ): boolean {
+    if (
+      !binding.active ||
+      this.shuttingDown ||
+      this.sessionBindings.get(binding.agentId) !== binding
+    ) {
+      return false;
+    }
+    const context = this.agents.get(binding.agentId);
+    const transition = this.transitions.get(binding.agentId);
+    if (
+      !context ||
+      context.target !== binding.target ||
+      context.runId !== binding.runId ||
+      this.agentGenerations.get(binding.agentId) !== binding.generation ||
+      (
+        binding.transition === undefined
+          ? transition !== undefined
+          : transition !== binding.transition
+      )
+    ) {
+      return false;
+    }
+    if (sessionId !== undefined) {
+      if (binding.sessionId !== undefined && binding.sessionId !== sessionId) {
+        return false;
+      }
+      binding.sessionId = sessionId;
+    }
+    return true;
+  }
+
+  private invalidateSessionBinding(binding: SessionHandlerBinding, reason: string): void {
+    if (!binding.active) {
+      return;
+    }
+    binding.active = false;
+    if (this.sessionBindings.get(binding.agentId) === binding) {
+      this.sessionBindings.delete(binding.agentId);
+    }
+    const live = this.live.get(binding.target);
+    if (live?.binding === binding && live.approveAll) {
+      void live.session.rpc.permissions.setApproveAll({ enabled: false }).catch(() => undefined);
+    }
+    for (const [requestId, pending] of this.pendingPermissions) {
+      if (pending.binding !== binding) {
+        continue;
+      }
+      this.pendingPermissions.delete(requestId);
+      pending.respond(reject(`Permission request cancelled: ${reason}`));
+    }
+  }
+
+  private activateSessionBinding(request: ConnectionRequest): SessionHandlerBinding {
+    this.assertConnectionCurrent(request);
+    const previous = this.sessionBindings.get(request.agentId);
+    if (previous) {
+      this.invalidateSessionBinding(previous, "the SDK session connection was replaced");
+    }
+    const binding: SessionHandlerBinding = {
+      id: randomUUID(),
+      agentId: request.agentId,
+      target: request.target,
+      runId: request.runId,
+      generation: request.generation,
+      transition: request.transition,
+      sessionId: undefined,
+      active: true,
+    };
+    this.sessionBindings.set(request.agentId, binding);
+    return binding;
+  }
+
+  private captureContinuity(live: LiveSession): SessionContinuity {
+    return {
+      seenEventIds: new Set(live.seenEventIds),
+      modelId: live.modelId,
+      aicUsed: live.aicUsed,
+      busy: live.busy,
+      foregroundBusy: live.foregroundBusy,
+      foregroundTurnId: live.foregroundTurnId,
+      foregroundTurnSequence: live.foregroundTurnSequence,
+      foregroundCompleteTurnId: live.foregroundCompleteTurnId,
+      foregroundTurnHasToolRequests: live.foregroundTurnHasToolRequests,
+      foregroundAbortSequence: live.foregroundAbortSequence,
+      sequence: live.sequence,
+      idleCycle: live.idleCycle,
+      mailboxDrainCycle: live.mailboxDrainCycle,
+    };
+  }
+
+  private liveConnectionCurrent(live: LiveSession, allowTransition: boolean): boolean {
+    const context = this.agents.get(live.agentId);
+    if (
+      this.live.get(live.target) !== live ||
+      !context ||
+      context.runId !== live.runId ||
+      this.agentGenerations.get(live.agentId) !== live.generation ||
+      !this.sessionBindingCurrent(live.binding, live.session.sessionId)
+    ) {
+      return false;
+    }
+    return allowTransition || !this.transitions.has(live.agentId);
+  }
+
   private beginAgentTransition(context: AgentContext, reason: string): AgentTransition {
     if (this.shuttingDown) {
       throw new Error("The Copilot runtime is shutting down.");
@@ -997,6 +1148,10 @@ export class CopilotRuntime implements RuntimeAdapter {
     };
     this.agentGenerations.set(context.agentId, transition.generation);
     this.transitions.set(context.agentId, transition);
+    const binding = this.sessionBindings.get(context.agentId);
+    if (binding) {
+      this.invalidateSessionBinding(binding, reason);
+    }
     for (const [requestId, pending] of this.pendingPermissions) {
       if (pending.target !== context.target) {
         continue;
@@ -1018,9 +1173,18 @@ export class CopilotRuntime implements RuntimeAdapter {
       live &&
       live.agentId === context.agentId &&
       live.runId === context.runId &&
-      live.configSignature === this.sessionSignature(context)
+      live.configSignature === this.sessionSignature(context, live.availableMcpServers) &&
+      live.binding.transition === transition &&
+      this.sessionBindings.get(context.agentId) === live.binding &&
+      live.binding.active
     ) {
       live.generation = transition.generation;
+      live.binding.transition = undefined;
+    } else {
+      const binding = this.sessionBindings.get(transition.agentId);
+      if (binding?.transition === transition) {
+        this.invalidateSessionBinding(binding, "the lifecycle transition ended without a session");
+      }
     }
     this.transitions.delete(transition.agentId);
     if (resumeMailbox && context && this.currentLive(context)) {
@@ -1068,7 +1232,8 @@ export class CopilotRuntime implements RuntimeAdapter {
       live.agentId !== context.agentId ||
       live.runId !== context.runId ||
       live.generation !== (this.agentGenerations.get(context.agentId) ?? 0) ||
-      live.configSignature !== this.sessionSignature(context)
+      live.configSignature !== this.sessionSignature(context, live.availableMcpServers) ||
+      !this.sessionBindingCurrent(live.binding, live.session.sessionId)
     ) {
       return undefined;
     }
@@ -1205,6 +1370,15 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   async setMcpEnabled(target: string, serverName: string, enabled: boolean): Promise<unknown> {
     const live = await this.activeSession(target);
+    const context = this.assertLiveAvailable(live);
+    if (
+      enabled &&
+      !this.childMcpServerAllowed(context, serverName)
+    ) {
+      throw new Error(
+        `MCP server "${serverName}" is outside agent "${context.alias}"'s effective allowlist.`,
+      );
+    }
     const result = enabled
       ? await live.session.rpc.mcp.enable({ serverName })
       : await live.session.rpc.mcp.disable({ serverName });
@@ -1213,6 +1387,12 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   async listMcpTools(target: string, serverName: string): Promise<unknown[]> {
     const live = await this.activeSession(target);
+    const context = this.assertLiveAvailable(live);
+    if (!this.childMcpServerAllowed(context, serverName)) {
+      throw new Error(
+        `MCP server "${serverName}" is outside agent "${context.alias}"'s effective allowlist.`,
+      );
+    }
     return (await live.session.rpc.mcp.listTools({ serverName })).tools;
   }
 
@@ -1222,6 +1402,11 @@ export class CopilotRuntime implements RuntimeAdapter {
       name,
       ...(input === undefined ? {} : { input }),
     });
+    if (!this.liveConnectionCurrent(live, false)) {
+      throw new Error(
+        `Command "/${name}" returned from an SDK session that is no longer current.`,
+      );
+    }
     if (result.kind !== "agent-prompt") {
       return result;
     }
@@ -1229,37 +1414,68 @@ export class CopilotRuntime implements RuntimeAdapter {
     const id = randomUUID();
     const display = result.displayPrompt || `/${name}${input ? ` ${input}` : ""}`;
     this.db.enqueueMessage(id, live.runId, "user", live.target, "user", display);
+    const claim = this.db.claimMessage(id, live.runId, live.target);
+    if (!claim) {
+      throw new Error(`Command message "${id}" could not be claimed for delivery.`);
+    }
     this.emit(
       "prompt.queued",
       { id, source: "command", target: live.target, content: display },
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
+    let sdkMessageId: string;
     try {
-      const sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "immediate" });
-      this.db.completeMessage(id);
-      this.emit(
-        "prompt.accepted",
-        { id, sdkMessageId, source: "user", target: live.target, content: display },
-        { runId: live.runId, memberId: live.target, target: "conversation" },
-      );
-      return {
-        kind: result.kind,
-        notice: result.notice,
-        runtimeSettingsChanged: result.runtimeSettingsChanged,
-      };
+      sdkMessageId = await live.session.send({ prompt: result.prompt, mode: "immediate" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The durable row contains the user-facing slash command, while the SDK
       // prompt may be expanded or rewritten. Do not retry the display text as if
       // it were the authoritative command prompt.
-      this.db.failMessage(id, message, false);
-      this.emit(
-        "prompt.failed",
-        { id, source: "command", message },
-        { runId: live.runId, memberId: live.target, target: "activity", done: true },
+      const failed = this.db.failMessage(
+        claim.id,
+        claim.runId,
+        claim.target,
+        claim.leaseToken,
+        message,
+        false,
       );
+      if (failed) {
+        this.emit(
+          "prompt.failed",
+          { id, source: "command", message },
+          { runId: live.runId, memberId: live.target, target: "activity", done: true },
+        );
+      }
       throw error;
     }
+    if (!this.liveConnectionCurrent(live, false)) {
+      this.db.failMessage(
+        claim.id,
+        claim.runId,
+        claim.target,
+        claim.leaseToken,
+        "The command was accepted by a superseded SDK session.",
+        false,
+      );
+      throw new Error(
+        `Command "/${name}" was accepted by an SDK session that is no longer current.`,
+      );
+    }
+    if (!this.db.completeMessage(claim.id, claim.runId, claim.target, claim.leaseToken)) {
+      throw new Error(
+        `Command message "${id}" lost its delivery lease before completion.`,
+      );
+    }
+    this.emit(
+      "prompt.accepted",
+      { id, sdkMessageId, source: "user", target: live.target, content: display },
+      { runId: live.runId, memberId: live.target, target: "conversation" },
+    );
+    return {
+      kind: result.kind,
+      notice: result.notice,
+      runtimeSettingsChanged: result.runtimeSettingsChanged,
+    };
   }
 
   async listTasks(target: string): Promise<unknown[]> {
@@ -1275,7 +1491,20 @@ export class CopilotRuntime implements RuntimeAdapter {
       { runId: live.runId, memberId: live.target, target: "activity", done: false },
     );
     await live.session.rpc.mcp.reload();
-    const { servers } = await live.session.rpc.mcp.list();
+    const context = this.assertLiveAvailable(live);
+    let { servers } = await live.session.rpc.mcp.list();
+    if (context.agentId !== this.primaryAgentId) {
+      const disallowed = servers.filter(
+        (server) => !this.childMcpServerAllowed(context, server.name),
+      );
+      for (const server of disallowed) {
+        this.assertLiveAvailable(live);
+        await live.session.rpc.mcp.disable({ serverName: server.name });
+      }
+      if (disallowed.length > 0) {
+        ({ servers } = await live.session.rpc.mcp.list());
+      }
+    }
     this.emit(
       "environment.loaded",
       { component: "MCP servers", items: servers },
@@ -1305,6 +1534,12 @@ export class CopilotRuntime implements RuntimeAdapter {
       return false;
     }
     this.pendingPermissions.delete(requestId);
+    if (!this.sessionBindingCurrent(pending.binding, pending.sessionId)) {
+      pending.respond(
+        reject("Permission request denied because its SDK session is no longer current."),
+      );
+      return false;
+    }
     pending.respond(
       approved
         ? { kind: "approve-once", approvedInteractively: true }
@@ -1315,13 +1550,32 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   private permissionHandler(
     permission: DynamicPermission | PermissionProfile | undefined,
-    uiTarget: string,
+    binding: SessionHandlerBinding,
   ): PermissionHandler {
-    if (usesApproveAll(permission, this.policy.allowAll)) {
-      return approveAll;
-    }
+    const automaticallyApprove = usesApproveAll(permission, this.policy.allowAll);
     const ceiling = permission && !("mode" in permission) ? permission : undefined;
-    return (request: PermissionRequest): PermissionRequestResult | Promise<PermissionRequestResult> => {
+    return (
+      request,
+      invocation,
+    ) => {
+      if (!this.sessionBindingCurrent(binding, invocation.sessionId)) {
+        return reject(
+          "Permission request denied because its agent lifecycle generation is no longer current.",
+        );
+      }
+      const context = this.agents.get(binding.agentId);
+      if (
+        request.kind === "mcp" &&
+        context &&
+        !this.childMcpServerAllowed(context, request.serverName)
+      ) {
+        return reject(
+          `MCP server "${request.serverName}" is outside agent "${context.alias}"'s effective allowlist.`,
+        );
+      }
+      if (automaticallyApprove) {
+        return approveAll(request, invocation);
+      }
       if (ceiling) {
         const decision = permissionDecision(ceiling, this.workspace, request);
         if (decision.kind !== "no-result") {
@@ -1332,10 +1586,28 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.emit(
         "permission.requested",
         { requestId, request },
-        { memberId: uiTarget, target: "status", done: false },
+        {
+          runId: binding.runId,
+          memberId: binding.target,
+          target: "status",
+          done: false,
+        },
       );
-      return new Promise((resolve) => {
-        this.pendingPermissions.set(requestId, { target: uiTarget, respond: resolve });
+      return new Promise<PermissionRequestResult>((resolve) => {
+        if (!this.sessionBindingCurrent(binding, invocation.sessionId)) {
+          resolve(
+            reject(
+              "Permission request denied because its SDK session is no longer current.",
+            ),
+          );
+          return;
+        }
+        this.pendingPermissions.set(requestId, {
+          target: binding.target,
+          binding,
+          sessionId: invocation.sessionId,
+          respond: resolve,
+        });
       });
     };
   }
@@ -1363,11 +1635,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     live.recoveringEvents = true;
     try {
       const events = await live.session.getEvents();
-      if (
-        this.live.get(live.target) !== live ||
-        this.agentGenerations.get(live.agentId) !== live.generation ||
-        this.transitions.has(live.agentId)
-      ) {
+      if (!this.liveConnectionCurrent(live, false)) {
         return;
       }
       for (const event of events) {
@@ -1377,9 +1645,17 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
 
       const { items } = await live.session.rpc.permissions.pendingRequests();
+      if (!this.liveConnectionCurrent(live, false)) {
+        return;
+      }
       for (const pending of items) {
+        if (!this.liveConnectionCurrent(live, false)) {
+          return;
+        }
         if (live.approveAll) {
-          await live.session.rpc.permissions.setApproveAll({ enabled: true });
+          if (!this.liveConnectionCurrent(live, false)) {
+            return;
+          }
           await live.session.rpc.permissions.handlePendingPermissionRequest({
             requestId: pending.requestId,
             result: { kind: "approve-once" },
@@ -1389,13 +1665,17 @@ export class CopilotRuntime implements RuntimeAdapter {
         if (
           this.pendingPermissions.has(pending.requestId)
           || [...this.pendingPermissions.values()].some(
-            (request) => request.target === live.target,
+            (request) =>
+              request.binding === live.binding &&
+              request.sessionId === live.session.sessionId,
           )
         ) {
           continue;
         }
         this.pendingPermissions.set(pending.requestId, {
           target: live.target,
+          binding: live.binding,
+          sessionId: live.session.sessionId,
           respond: (result) => {
             if (result.kind === "no-result") {
               return;
@@ -1403,6 +1683,9 @@ export class CopilotRuntime implements RuntimeAdapter {
             void live.session.rpc.permissions
               .handlePendingPermissionRequest({ requestId: pending.requestId, result })
               .catch((error: unknown) => {
+                if (!this.liveConnectionCurrent(live, false)) {
+                  return;
+                }
                 this.emit(
                   "member.error",
                   {
@@ -1433,36 +1716,63 @@ export class CopilotRuntime implements RuntimeAdapter {
         );
       }
     } catch (error) {
-      this.emit(
-        "tasks.error",
-        {
-          message: `Session recovery failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        },
-        { runId: live.runId, memberId: live.target, target: "status", done: true },
-      );
+      if (this.liveConnectionCurrent(live, false)) {
+        this.emit(
+          "tasks.error",
+          {
+            message: `Session recovery failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          },
+          { runId: live.runId, memberId: live.target, target: "status", done: true },
+        );
+      }
     } finally {
       live.recoveringEvents = false;
     }
   }
 
-  // Attaches per-session permission and MCP-auth handlers to the shared native base
-  // (nativeSessionScaffold). Every agent builds from that identical base
-  // and then only narrow or deliberately override individual fields, so there is one
-  // source of truth for inherited defaults. The uiTarget is `agent:<uuid>`.
-  private baseSessionConfig(
-    uiTarget: string,
-    permission: DynamicPermission | undefined,
-  ): SessionConfig {
-    const config = nativeSessionScaffold(this.policy);
-    config.onPermissionRequest = this.permissionHandler(permission, uiTarget);
-    config.onMcpAuthRequest = this.mcpAuthHandler(uiTarget);
-    return config;
+  private baseSessionConfig(): SessionConfig {
+    return nativeSessionScaffold(this.policy);
   }
 
-  private mcpAuthHandler(uiTarget: string): McpAuthHandler {
-    return async (request) => {
+  private bindSessionHandlers(
+    config: SessionConfig,
+    permission: DynamicPermission | undefined,
+    binding: SessionHandlerBinding,
+  ): SessionConfig {
+    return {
+      ...config,
+      onPermissionRequest: this.permissionHandler(permission, binding),
+      onMcpAuthRequest: this.mcpAuthHandler(binding),
+    };
+  }
+
+  private mcpAuthHandler(binding: SessionHandlerBinding): McpAuthHandler {
+    return async (request, invocation) => {
+      if (!this.sessionBindingCurrent(binding, invocation.sessionId)) {
+        return { kind: "cancelled" };
+      }
+      const context = this.agents.get(binding.agentId);
+      if (
+        context &&
+        !this.childMcpServerAllowed(context, request.serverName)
+      ) {
+        this.emit(
+          "environment.error",
+          {
+            component: `${request.serverName} authentication`,
+            message: "This MCP server is outside the agent's captured allowlist.",
+          },
+          {
+            runId: binding.runId,
+            memberId: binding.target,
+            target: "activity",
+            done: true,
+          },
+        );
+        return { kind: "cancelled" };
+      }
       if (request.serverName !== "github-mcp-server") {
         this.emit(
           "environment.error",
@@ -1470,7 +1780,12 @@ export class CopilotRuntime implements RuntimeAdapter {
             component: `${request.serverName} authentication`,
             message: "This MCP server requires a host authentication provider.",
           },
-          { memberId: uiTarget, target: "activity", done: true },
+          {
+            runId: binding.runId,
+            memberId: binding.target,
+            target: "activity",
+            done: true,
+          },
         );
         return { kind: "cancelled" };
       }
@@ -1479,24 +1794,45 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.emit(
         "environment.progress",
         { component, message: "Reading credentials from the authenticated GitHub CLI" },
-        { memberId: uiTarget, target: "activity", done: false },
+        {
+          runId: binding.runId,
+          memberId: binding.target,
+          target: "activity",
+          done: false,
+        },
       );
       try {
         const accessToken = await githubCliAuthToken();
+        if (!this.sessionBindingCurrent(binding, invocation.sessionId)) {
+          return { kind: "cancelled" };
+        }
         this.emit(
           "environment.loaded",
           { component, items: [{ status: "authenticated" }] },
-          { memberId: uiTarget, target: "activity", done: true },
+          {
+            runId: binding.runId,
+            memberId: binding.target,
+            target: "activity",
+            done: true,
+          },
         );
         return { kind: "token", accessToken };
       } catch {
+        if (!this.sessionBindingCurrent(binding, invocation.sessionId)) {
+          return { kind: "cancelled" };
+        }
         this.emit(
           "environment.error",
           {
             component,
             message: "Run `gh auth login` and restart the Copilot session.",
           },
-          { memberId: uiTarget, target: "activity", done: true },
+          {
+            runId: binding.runId,
+            memberId: binding.target,
+            target: "activity",
+            done: true,
+          },
         );
         return { kind: "cancelled" };
       }
@@ -1537,12 +1873,29 @@ export class CopilotRuntime implements RuntimeAdapter {
       });
   }
 
-  private agentConfig(context: AgentContext): SessionConfig {
+  private effectiveMcpServers(context: AgentContext): ReadonlySet<string> {
+    return context.agent.mcpServers ?? context.mcpServers;
+  }
+
+  private childMcpServerAllowed(context: AgentContext, serverName: string): boolean {
+    return (
+      context.agentId === this.primaryAgentId ||
+      (
+        this.effectiveMcpServers(context).has(serverName) &&
+        !this.policy.disabledMcpServers.includes(serverName)
+      )
+    );
+  }
+
+  private agentConfig(
+    context: AgentContext,
+    availableMcpServers: ReadonlySet<string>,
+  ): SessionConfig {
     // Start from the identical native base the primary session uses. The base has
     // already layered the canonical native policy, so everything below only narrows
     // or deliberately overrides individual inherited fields.
     const agent = context.agent;
-    const config = this.baseSessionConfig(context.target, agent.permission);
+    const config = this.baseSessionConfig();
     config.includeSubAgentStreamingEvents = false;
     config.reasoningSummary = agent.reasoningSummary;
     config.systemMessage = { mode: "append", content: agent.initialPrompt };
@@ -1575,11 +1928,23 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (agent.reasoningEffort !== undefined) {
       config.reasoningEffort = agent.reasoningEffort;
     }
-    if (agent.mcpServers) {
+    if (context.agentId !== this.primaryAgentId) {
+      const effectiveMcpServers = this.effectiveMcpServers(context);
+      for (const server of effectiveMcpServers) {
+        if (!context.mcpServers.has(server)) {
+          throw new Error(
+            `Agent "${context.alias}" attempted to widen its captured MCP ceiling with "${server}".`,
+          );
+        }
+      }
+      const knownServers = new Set([
+        ...availableMcpServers,
+        ...context.mcpServers,
+      ]);
       config.disabledMcpServers = [
         ...new Set([
           ...(config.disabledMcpServers ?? []),
-          ...[...context.mcpServers].filter((server) => !agent.mcpServers!.has(server)),
+          ...[...knownServers].filter((server) => !effectiveMcpServers.has(server)),
         ]),
       ];
     }
@@ -2118,6 +2483,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private storedAgentJson(context: AgentContext): string {
+    this.sanitizeContextAcls(context);
     const record: StoredAgentRecord = {
       definition: context.definition,
       mcpServers: [...context.mcpServers],
@@ -2133,19 +2499,47 @@ export class CopilotRuntime implements RuntimeAdapter {
       : this.agents.get(this.primaryAgentId);
     const primary = context === undefined ? undefined : this.currentLive(context);
     if (!primary) {
-      return new Set();
+      throw new Error(
+        "The primary agent must be ready before an additional agent MCP ceiling can be built.",
+      );
     }
     return new Set((await primary.session.rpc.mcp.list()).servers.map((server) => server.name));
   }
 
+  private async sessionConnectionPlan(
+    context: AgentContext,
+  ): Promise<{
+    availableMcpServers: Set<string>;
+    config: SessionConfig;
+    configSignature: string;
+  }> {
+    const availableMcpServers =
+      context.agentId === this.primaryAgentId
+        ? new Set<string>()
+        : await this.availableMcpServers();
+    return {
+      availableMcpServers,
+      config: this.agentConfig(context, availableMcpServers),
+      configSignature: this.sessionSignature(context, availableMcpServers),
+    };
+  }
+
   /**
    * The complete signature of the SessionConfig an agent would be connected with:
-   * its full definition plus its original MCP ceiling.
+   * its full definition, original MCP ceiling, and the primary MCP list used to
+   * derive the connection's explicit deny list.
    */
-  private sessionSignature(context: AgentContext): string {
+  private sessionSignature(
+    context: AgentContext,
+    availableMcpServers: ReadonlySet<string>,
+  ): string {
     return stableStringify({
       definition: context.definition,
       mcpCeiling: [...context.mcpServers].sort(),
+      availableMcpServers:
+        context.agentId === this.primaryAgentId
+          ? []
+          : [...availableMcpServers].sort(),
     });
   }
 
@@ -2187,11 +2581,95 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private unregisterAgent(context: AgentContext): void {
+    const binding = this.sessionBindings.get(context.agentId);
+    if (binding) {
+      this.invalidateSessionBinding(binding, `agent "${context.alias}" was unregistered`);
+    }
     this.agents.delete(context.agentId);
     if (this.aliasIndex.get(context.alias) === context.agentId) {
       this.aliasIndex.delete(context.alias);
     }
     this.cancelMailboxRetry(context.target);
+    this.mailboxDrainRequested.delete(context.target);
+  }
+
+  private sanitizeContextAcls(context: AgentContext, alreadyChanged = false): boolean {
+    let changed = alreadyChanged;
+    for (const agentId of this.disqualifiedAgentIds) {
+      changed = context.canTalkTo.delete(agentId) || changed;
+      changed = context.canObserve.delete(agentId) || changed;
+    }
+    const isDisqualifiedSelector = (selector: string): boolean => {
+      if (this.disqualifiedAgentIds.has(selector)) {
+        return true;
+      }
+      if (
+        selector.startsWith(AGENT_TARGET_PREFIX) &&
+        this.disqualifiedAgentIds.has(
+          selector.slice(AGENT_TARGET_PREFIX.length),
+        )
+      ) {
+        return true;
+      }
+      return false;
+    };
+    const canTalkTo = context.definition.canTalkTo.filter(
+      (selector) => !isDisqualifiedSelector(selector),
+    );
+    const canObserve = context.definition.canObserve.filter(
+      (selector) => !isDisqualifiedSelector(selector),
+    );
+    if (
+      canTalkTo.length !== context.definition.canTalkTo.length ||
+      canObserve.length !== context.definition.canObserve.length
+    ) {
+      changed = true;
+    }
+    if (changed) {
+      context.definition = {
+        ...context.definition,
+        canTalkTo,
+        canObserve,
+      };
+      context.agent = {
+        ...context.agent,
+        recipientSelectors: new Set(canTalkTo),
+        observeSelectors: new Set(canObserve),
+      };
+      const live = this.live.get(context.target);
+      if (live && live.runId === context.runId) {
+        live.configSignature = this.sessionSignature(
+          context,
+          live.availableMcpServers,
+        );
+      }
+    }
+    return changed;
+  }
+
+  private synchronizeDisqualifiedAgent(agentId: string, alias: string): void {
+    this.disqualifiedAgentIds.add(agentId);
+    for (const context of this.agents.values()) {
+      if (context.agentId !== agentId) {
+        const canTalkTo = context.definition.canTalkTo.filter(
+          (selector) => selector !== alias,
+        );
+        const canObserve = context.definition.canObserve.filter(
+          (selector) => selector !== alias,
+        );
+        const aliasChanged =
+          canTalkTo.length !== context.definition.canTalkTo.length ||
+          canObserve.length !== context.definition.canObserve.length;
+        if (aliasChanged) {
+          context.definition = {
+            ...context.definition,
+            canTalkTo,
+            canObserve,
+          };
+        }
+        this.sanitizeContextAcls(context, aliasChanged);
+      }
+    }
   }
 
   private resolveGrantSelectors(
@@ -2219,6 +2697,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
       if (agentId === undefined) {
         throw new Error(`Agent selector "${selector}" no longer resolves.`);
+      }
+      if (this.disqualifiedAgentIds.has(agentId)) {
+        throw new Error(`Agent selector "${selector}" refers to a permanently failed agent.`);
       }
       if (
         !batchAliases.has(selector) &&
@@ -2396,7 +2877,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (
       context.target !== options.target ||
       context.runId !== options.runId ||
-      this.sessionSignature(context) !== options.configSignature
+      this.sessionSignature(context, options.availableMcpServers) !== options.configSignature
     ) {
       throw new Error(
         `The requested SDK connection for agent "${context.alias}" no longer matches its ` +
@@ -2409,6 +2890,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       agentId: options.agentId,
       requestedSessionId: options.sessionId,
       configSignature: options.configSignature,
+      availableMcpServers: new Set(options.availableMcpServers),
       generation,
       transition: options.transition,
     };
@@ -2428,7 +2910,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         : activeTransition !== request.transition) ||
       context.target !== request.target ||
       context.runId !== request.runId ||
-      this.sessionSignature(context) !== request.configSignature
+      this.sessionSignature(context, request.availableMcpServers) !== request.configSignature
     ) {
       throw this.transitionUnavailable(context, activeTransition);
     }
@@ -2461,6 +2943,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       live.agentId !== request.agentId ||
       live.configSignature !== request.configSignature ||
       live.generation !== request.generation ||
+      !this.sessionBindingCurrent(live.binding, live.session.sessionId) ||
       (
         request.requestedSessionId !== undefined &&
         live.session.sessionId !== request.requestedSessionId
@@ -2528,25 +3011,32 @@ export class CopilotRuntime implements RuntimeAdapter {
     sessionId: string | undefined;
     config: SessionConfig;
     configSignature: string;
+    availableMcpServers: Set<string>;
     resumeExisting?: boolean;
-    suppressHistory?: boolean;
+    continuity?: SessionContinuity;
     transition?: AgentTransition;
   }, request: ConnectionRequest): Promise<LiveSession> {
     const { runId, target, agentId, alias, sessionId, config } = options;
     const resumeExisting = options.resumeExisting === true;
     let session: CopilotSession | undefined;
     let live: LiveSession | undefined;
+    let binding: SessionHandlerBinding | undefined;
     let sessionPersisted = false;
     try {
-      this.assertConnectionCurrent(request);
+      const context = this.assertConnectionCurrent(request);
+      binding = this.activateSessionBinding(request);
+      const boundConfig = this.bindSessionHandlers(config, context.agent.permission, binding);
       const client = await this.ensureClient();
       this.assertConnectionCurrent(request);
       if (sessionId && (resumeExisting || this.knownSessionIds.has(sessionId))) {
         // Managed sessions are never silently recreated: a missing SDK conversation
         // would discard schedules and state that SQLite intentionally does not copy.
-        session = await client.resumeSession(sessionId, { ...config, suppressResumeEvent: true });
+        session = await client.resumeSession(sessionId, {
+          ...boundConfig,
+          suppressResumeEvent: true,
+        });
       } else {
-        session = await client.createSession(config);
+        session = await client.createSession(boundConfig);
       }
       const actualSessionId = session.sessionId;
       if (sessionId !== undefined && actualSessionId !== sessionId) {
@@ -2556,33 +3046,48 @@ export class CopilotRuntime implements RuntimeAdapter {
         );
       }
       this.assertConnectionCurrent(request);
+      if (!this.sessionBindingCurrent(binding, actualSessionId)) {
+        throw new Error(
+          `Copilot session "${actualSessionId}" belongs to a stale agent lifecycle generation.`,
+        );
+      }
+      await session.rpc.permissions.setApproveAll({ enabled: false });
+      this.assertConnectionCurrent(request);
+      if (!this.sessionBindingCurrent(binding, actualSessionId)) {
+        throw new Error(
+          `Copilot session "${actualSessionId}" became stale while permissions were initialized.`,
+        );
+      }
       this.knownSessionIds.add(actualSessionId);
+      const continuity = options.continuity;
       live = {
         session,
+        binding,
         runId,
         target,
         agentId,
         alias,
         generation: request.generation,
         configSignature: options.configSignature,
-        modelId: config.model,
-        aicUsed: 0,
-        busy: false,
-        foregroundBusy: false,
-        foregroundTurnId: undefined,
-        foregroundTurnSequence: 0,
-        foregroundCompleteTurnId: undefined,
-        foregroundTurnHasToolRequests: false,
-        foregroundAbortSequence: undefined,
-        sequence: 0,
+        availableMcpServers: new Set(options.availableMcpServers),
+        modelId: continuity?.modelId ?? config.model,
+        aicUsed: continuity?.aicUsed ?? 0,
+        busy: continuity?.busy ?? false,
+        foregroundBusy: continuity?.foregroundBusy ?? false,
+        foregroundTurnId: continuity?.foregroundTurnId,
+        foregroundTurnSequence: continuity?.foregroundTurnSequence ?? 0,
+        foregroundCompleteTurnId: continuity?.foregroundCompleteTurnId,
+        foregroundTurnHasToolRequests: continuity?.foregroundTurnHasToolRequests ?? false,
+        foregroundAbortSequence: continuity?.foregroundAbortSequence,
+        sequence: continuity?.sequence ?? 0,
         taskRefresh: 0,
-        seenEventIds: new Set<string>(),
+        seenEventIds: new Set(continuity?.seenEventIds ?? []),
         lastEventAt: Date.now(),
         lastRecoveryAt: 0,
         recoveringEvents: false,
-        idleCycle: 1,
-        mailboxDrainCycle: 0,
-        approveAll: config.onPermissionRequest === approveAll,
+        idleCycle: continuity?.idleCycle ?? 1,
+        mailboxDrainCycle: continuity?.mailboxDrainCycle ?? 0,
+        approveAll: usesApproveAll(context.agent.permission, this.policy.allowAll),
         unsubscribe: () => undefined,
       };
       this.assertConnectionCurrent(request);
@@ -2592,15 +3097,21 @@ export class CopilotRuntime implements RuntimeAdapter {
       sessionPersisted = true;
       const history = await session.getEvents();
       this.assertLiveMatchesRequest(live, request);
-      const replayEvents = history.filter((event) => !live!.seenEventIds.has(event.id));
+      const durableHistory = history.filter((event) => event.ephemeral !== true);
+      const stateReplayEvents = durableHistory.filter(
+        (event) => !live!.seenEventIds.has(event.id),
+      );
+      const replayEvents =
+        continuity === undefined
+          ? durableHistory
+          : stateReplayEvents;
+      for (const event of stateReplayEvents) {
+        this.applyReplayedSessionState(live, event);
+      }
       for (const event of history) {
         live.seenEventIds.add(event.id);
       }
-      // Skip the history replay for an in-process reconnect: the UI buffer for this
-      // target is retained across the reconnect (an ACL change never resets a buffer),
-      // so re-emitting the full transcript would duplicate it. A fresh connect or a
-      // host-restart recovery still needs the history to render.
-      if (options.suppressHistory !== true) {
+      if (continuity === undefined || replayEvents.length > 0) {
         this.emit(
           "session.history",
           {
@@ -2608,9 +3119,12 @@ export class CopilotRuntime implements RuntimeAdapter {
               ...event,
               replayTimestamp: Date.parse(event.timestamp),
             })),
+            incremental: continuity !== undefined,
           },
           { runId, memberId: target, target: "conversation", done: true },
         );
+      }
+      if (continuity === undefined) {
         this.emit(
           "session.identity",
           { sessionId: actualSessionId },
@@ -2663,7 +3177,10 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
       this.emit(
         "member.state",
-        { state: "idle", sessionId: actualSessionId },
+        {
+          state: live.foregroundBusy || live.busy ? "busy" : "idle",
+          sessionId: actualSessionId,
+        },
         { runId, memberId: target, target: "status" },
       );
       try {
@@ -2688,6 +3205,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.refreshTasks(live);
       return live;
     } catch (error) {
+      if (binding) {
+        this.invalidateSessionBinding(binding, "the SDK session connection failed");
+      }
       if (live && this.live.get(target) === live) {
         this.live.delete(target);
       }
@@ -2726,28 +3246,94 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Agent "${agentId}" is not active.`);
     }
     this.assertTransitionAccess(context, transition);
+    if (transition === undefined) {
+      const existing = this.currentLive(context);
+      if (existing) {
+        return existing;
+      }
+    }
     const storedSessionId = this.db.session(context.runId)?.sessionId;
+    const plan = await this.sessionConnectionPlan(context);
     return this.connectSession({
       runId: context.runId,
       target: context.target,
       agentId: context.agentId,
       alias: context.alias,
       sessionId: storedSessionId,
-      config: this.agentConfig(context),
-      configSignature: this.sessionSignature(context),
+      config: plan.config,
+      configSignature: plan.configSignature,
+      availableMcpServers: plan.availableMcpServers,
       resumeExisting: storedSessionId !== undefined,
       ...(transition === undefined ? {} : { transition }),
     });
   }
 
+  private applyReplayedSessionState(live: LiveSession, event: SessionEvent): void {
+    switch (event.type) {
+      case "assistant.message":
+        if (event.agentId === undefined) {
+          const turnId = event.data.turnId ?? live.foregroundTurnId;
+          if (turnId === live.foregroundTurnId) {
+            if ((event.data.toolRequests?.length ?? 0) > 0) {
+              live.foregroundTurnHasToolRequests = true;
+              live.foregroundCompleteTurnId = undefined;
+            } else if (turnId !== undefined && !live.foregroundTurnHasToolRequests) {
+              live.foregroundCompleteTurnId = turnId;
+            }
+          }
+        }
+        break;
+      case "assistant.usage":
+        live.modelId = event.data.model || live.modelId;
+        live.aicUsed += (event.data.copilotUsage?.totalNanoAiu ?? 0) / 1_000_000_000;
+        break;
+      case "assistant.turn_start":
+        if (event.agentId === undefined) {
+          live.busy = true;
+          live.foregroundBusy = true;
+          live.foregroundTurnId = event.data.turnId;
+          live.foregroundTurnSequence += 1;
+          live.foregroundCompleteTurnId = undefined;
+          live.foregroundTurnHasToolRequests = false;
+        }
+        break;
+      case "assistant.turn_end":
+        if (event.agentId === undefined && event.data.turnId === live.foregroundTurnId) {
+          const foregroundComplete = live.foregroundCompleteTurnId === event.data.turnId;
+          live.foregroundTurnId = undefined;
+          live.foregroundCompleteTurnId = undefined;
+          live.foregroundTurnHasToolRequests = false;
+          if (foregroundComplete) {
+            live.foregroundBusy = false;
+            live.foregroundAbortSequence = undefined;
+          }
+        }
+        break;
+      case "assistant.idle":
+        if (event.agentId === undefined && event.data.aborted === true) {
+          live.foregroundBusy = false;
+          live.foregroundTurnId = undefined;
+          live.foregroundCompleteTurnId = undefined;
+          live.foregroundTurnHasToolRequests = false;
+          live.foregroundAbortSequence = undefined;
+        }
+        break;
+      case "session.idle":
+        live.busy = false;
+        live.foregroundBusy = false;
+        live.foregroundTurnId = undefined;
+        live.foregroundCompleteTurnId = undefined;
+        live.foregroundTurnHasToolRequests = false;
+        live.foregroundAbortSequence = undefined;
+        live.idleCycle += 1;
+        break;
+      default:
+        break;
+    }
+  }
+
   private handleSessionEvent(live: LiveSession, event: SessionEvent): void {
-    const context = this.agents.get(live.agentId);
-    if (
-      this.live.get(live.target) !== live ||
-      !context ||
-      context.runId !== live.runId ||
-      this.agentGenerations.get(live.agentId) !== live.generation
-    ) {
+    if (!this.liveConnectionCurrent(live, true)) {
       return;
     }
     if (live.seenEventIds.has(event.id)) {
@@ -2983,6 +3569,34 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
         break;
       case "session.mcp_servers_loaded":
+        {
+          const context = this.agents.get(live.agentId);
+          if (context && context.agentId !== this.primaryAgentId) {
+            for (const server of event.data.servers) {
+              if (this.childMcpServerAllowed(context, server.name)) {
+                continue;
+              }
+              void live.session.rpc.mcp.disable({ serverName: server.name }).catch(
+                (error: unknown) => {
+                  if (!this.liveConnectionCurrent(live, true)) {
+                    return;
+                  }
+                  this.emit(
+                    "environment.error",
+                    {
+                      component: `MCP ${server.name}`,
+                      message:
+                        `Could not enforce the agent MCP ceiling: ${
+                          error instanceof Error ? error.message : String(error)
+                        }`,
+                    },
+                    { ...fields, target: "activity", done: true },
+                  );
+                },
+              );
+            }
+          }
+        }
         this.emit(
           "environment.loaded",
           { component: "MCP servers", items: event.data.servers },
@@ -3112,7 +3726,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           this.workspace,
           context.agentId,
           "Fresh primary context failed before SDK startup",
-          [],
         );
       }
       throw error;
@@ -3120,6 +3733,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private async disconnectLiveSession(live: LiveSession, reason: string): Promise<void> {
+    this.invalidateSessionBinding(live.binding, reason);
     live.unsubscribe();
     try {
       await live.session.disconnect();
@@ -3177,24 +3791,13 @@ export class CopilotRuntime implements RuntimeAdapter {
             "safely. Use /resume to select an existing Copilot session.",
         );
       }
-      const live = await this.connectSession({
-        runId: context.runId,
-        target: context.target,
-        agentId: context.agentId,
-        alias: context.alias,
-        sessionId,
-        config: this.agentConfig(context),
-        configSignature: this.sessionSignature(context),
-        resumeExisting: recovered,
-        transition,
-      });
-      const adoptedMessages = this.db.adoptPrimaryMessages(
+      const live = await this.ensureAgentSession(context.agentId, transition);
+      const adoptedMessages = this.db.completePrimaryStartup(
         context.runId,
         this.workspace,
         context.agentId,
         context.target,
       );
-      this.db.completeRunStartup(context.runId);
       this.emitAgentLifecycle("agent.ready", context, {
         recovered,
         sessionId: live.session.sessionId,
@@ -3229,7 +3832,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           this.workspace,
           context.agentId,
           "Primary Copilot agent failed to start",
-          [],
         );
       }
       this.emit(
@@ -3305,8 +3907,8 @@ export class CopilotRuntime implements RuntimeAdapter {
           `replacing its SDK session with "${sessionId}"`,
         );
       let resumeMailbox = false;
-      let oldRunStopped = false;
       let newRunCreated = false;
+      let replacementActivated = false;
       try {
         if (claimedContext) {
           this.emitAgentLifecycle("agent.loading", primaryContext, { recovered: true });
@@ -3335,8 +3937,6 @@ export class CopilotRuntime implements RuntimeAdapter {
             "Previous primary SDK session disconnect failed during replacement",
           );
         }
-        this.db.finishRun(oldRunId, "stopped", `Resuming session ${sessionId}`);
-        oldRunStopped = true;
         primaryContext.runId = runId;
         this.db.createAgentRun(
           runId,
@@ -3348,24 +3948,28 @@ export class CopilotRuntime implements RuntimeAdapter {
           true,
         );
         newRunCreated = true;
-        const adoptedMessages = this.db.adoptAgentMessages(
-          runId,
-          this.workspace,
-          primaryContext.agentId,
-          primaryContext.target,
-        );
+        const plan = await this.sessionConnectionPlan(primaryContext);
         const live = await this.connectSession({
           runId,
           target: primaryContext.target,
           agentId: primaryContext.agentId,
           alias: primaryContext.alias,
           sessionId,
-          config: this.agentConfig(primaryContext),
-          configSignature: this.sessionSignature(primaryContext),
+          config: plan.config,
+          configSignature: plan.configSignature,
+          availableMcpServers: plan.availableMcpServers,
           resumeExisting: true,
           transition,
         });
-        this.db.completeRunStartup(runId);
+        const adoptedMessages = this.db.completePrimaryReplacementStartup(
+          runId,
+          oldRunId,
+          this.workspace,
+          primaryContext.agentId,
+          primaryContext.target,
+          `Resuming session ${sessionId}`,
+        );
+        replacementActivated = true;
         if (claimedContext) {
           this.emitAgentLifecycle("agent.ready", primaryContext, {
             recovered: true,
@@ -3395,18 +3999,25 @@ export class CopilotRuntime implements RuntimeAdapter {
         try {
           let restoredMessages = 0;
           if (newRunCreated) {
-            restoredMessages = this.db.rollbackPrimaryReplacement(
-              runId,
-              oldRunId,
-              this.workspace,
-              primaryContext.agentId,
-              primaryContext.target,
-              process.pid,
-              failureReason,
-            );
+            if (replacementActivated) {
+              restoredMessages = this.db.rollbackPrimaryReplacement(
+                runId,
+                oldRunId,
+                this.workspace,
+                primaryContext.agentId,
+                primaryContext.target,
+                process.pid,
+                failureReason,
+              );
+            } else {
+              this.db.disqualifyPrimaryRun(
+                runId,
+                this.workspace,
+                primaryContext.agentId,
+                failureReason,
+              );
+            }
             durableRollbackCompleted = true;
-          } else if (oldRunStopped) {
-            this.db.resumeRun(oldRunId, process.pid);
           }
           if (oldSessionId === undefined) {
             throw new Error(
@@ -3414,14 +4025,16 @@ export class CopilotRuntime implements RuntimeAdapter {
                 "be restored safely.",
             );
           }
+          const restorePlan = await this.sessionConnectionPlan(primaryContext);
           const restored = await this.connectSession({
             runId: oldRunId,
             target: primaryContext.target,
             agentId: primaryContext.agentId,
             alias: primaryContext.alias,
             sessionId: oldSessionId,
-            config: this.agentConfig(primaryContext),
-            configSignature: this.sessionSignature(primaryContext),
+            config: restorePlan.config,
+            configSignature: restorePlan.configSignature,
+            availableMcpServers: restorePlan.availableMcpServers,
             resumeExisting: true,
             transition,
           });
@@ -3451,12 +4064,20 @@ export class CopilotRuntime implements RuntimeAdapter {
           let disqualificationError: unknown;
           if (newRunCreated && !durableRollbackCompleted) {
             try {
-              this.db.disqualifyPrimaryRun(
-                runId,
-                this.workspace,
-                primaryContext.agentId,
-                failureReason,
-              );
+              if (replacementActivated) {
+                this.db.finishRun(
+                  runId,
+                  "interrupted",
+                  `${failureReason}; rollback to the previous primary run failed`,
+                );
+              } else {
+                this.db.disqualifyPrimaryRun(
+                  runId,
+                  this.workspace,
+                  primaryContext.agentId,
+                  failureReason,
+                );
+              }
             } catch (rollbackError) {
               disqualificationError = rollbackError;
             }
@@ -3506,7 +4127,11 @@ export class CopilotRuntime implements RuntimeAdapter {
               recoveryFailed: true,
               failedRunId: newRunCreated ? runId : undefined,
               failedReplacementDisqualified:
-                newRunCreated && (durableRollbackCompleted || disqualificationError === undefined),
+                newRunCreated &&
+                (
+                  durableRollbackCompleted ||
+                  (!replacementActivated && disqualificationError === undefined)
+                ),
             },
             { runId: oldRunId, memberId: primaryContext.target, target: "activity", done: true },
           );
@@ -3694,8 +4319,6 @@ export class CopilotRuntime implements RuntimeAdapter {
         });
       } catch (error) {
         const message = await this.failStartingAgent(
-          caller,
-          contexts,
           context,
           transition,
           error instanceof Error ? error.message : String(error),
@@ -3712,76 +4335,27 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private async failStartingAgent(
-    caller: AgentContext,
-    batch: readonly AgentContext[],
     context: AgentContext,
     transition: AgentTransition,
     message: string,
   ): Promise<string> {
     let finalMessage = message;
-    const changed: AgentContext[] = [];
     try {
       await this.discardLiveRun(context.target, context.runId, transition);
-      const related = new Map<string, AgentContext>();
-      related.set(caller.agentId, caller);
-      for (const peer of batch) {
-        if (
-          peer.agentId !== context.agentId &&
-          this.agents.get(peer.agentId) === peer
-        ) {
-          related.set(peer.agentId, peer);
-        }
-      }
-      for (const peer of related.values()) {
-        const talkChanged = peer.canTalkTo.delete(context.agentId);
-        const observeChanged = peer.canObserve.delete(context.agentId);
-        if (talkChanged || observeChanged) {
-          changed.push(peer);
-        }
-      }
-      this.db.failAgentStartup(
+      const permanentlyDisqualified = this.db.failAgentStartup(
         context.runId,
         this.workspace,
         context.agentId,
         message,
-        changed.map((peer) => ({
-          id: peer.runId,
-          alias: peer.alias,
-          definition: this.storedAgentJson(peer),
-        })),
       );
+      if (permanentlyDisqualified) {
+        this.synchronizeDisqualifiedAgent(context.agentId, context.alias);
+      }
     } catch (cleanupError) {
-      const cleanupFailures = [
-        cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-      ];
-      try {
-        this.db.failAgentStartup(
-          context.runId,
-          this.workspace,
-          context.agentId,
-          message,
-          [],
-        );
-      } catch (releaseError) {
-        cleanupFailures.push(
-          `run release failed: ${
-            releaseError instanceof Error ? releaseError.message : String(releaseError)
-          }`,
-        );
-      }
-      for (const peer of changed) {
-        try {
-          this.db.updateAgentRun(peer.runId, peer.alias, this.storedAgentJson(peer));
-        } catch (aclError) {
-          cleanupFailures.push(
-            `ACL cleanup for "${peer.alias}" failed: ${
-              aclError instanceof Error ? aclError.message : String(aclError)
-            }`,
-          );
-        }
-      }
       finalMessage =
-        `${message}. Failed startup cleanup required a fallback: ${cleanupFailures.join("; ")}`;
+        `${message}. Atomic failed-startup and ACL cleanup also failed: ${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }`;
     } finally {
       this.unregisterAgent(context);
       this.endAgentTransition(transition, false);
@@ -3846,13 +4420,19 @@ export class CopilotRuntime implements RuntimeAdapter {
     this.assertPermissionCeiling([definition]);
     this.assertAliasesAvailable([definition.id], stored.agentId);
     await this.openPrimary();
-    // Recovery must not widen the agent's environment: its ceiling is the MCP server
-    // set captured when it was created, narrowed to what the primary currently exposes.
-    // Servers added to the workspace since then stay out of reach, and a server the
-    // definition still requests but that is gone fails the recovery explicitly.
-    const available = await this.availableMcpServers();
-    const mcpServers = new Set(record.mcpServers.filter((server) => available.has(server)));
+    // Recovery retains the original captured ceiling. The connection plan separately
+    // disables every currently visible primary server outside it, so newly added
+    // servers can never become available to a recovered agent.
+    const mcpServers = new Set(record.mcpServers);
     this.assertMcpCeiling([definition], mcpServers);
+    const available = await this.availableMcpServers();
+    for (const server of definition.mcpServers ?? []) {
+      if (!available.has(server)) {
+        throw new Error(
+          `Agent "${definition.id}" requested MCP server "${server}", which is no longer available.`,
+        );
+      }
+    }
     this.assertAliasesAvailable([definition.id], stored.agentId);
 
     this.db.resumeRun(runId, process.pid);
@@ -3876,17 +4456,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         recovered: true,
         sessionId: stored.session.sessionId,
       });
-      const live = await this.connectSession({
-        runId,
-        target: context.target,
-        agentId: context.agentId,
-        alias: context.alias,
-        sessionId: stored.session.sessionId,
-        config: this.agentConfig(context),
-        configSignature: this.sessionSignature(context),
-        resumeExisting: true,
-        transition,
-      });
+      const live = await this.ensureAgentSession(context.agentId, transition);
       this.emitAgentLifecycle("agent.ready", context, {
         recovered: true,
         sessionId: live.session.sessionId,
@@ -4035,10 +4605,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       if (live) {
         live.alias = context.alias;
       }
-      try {
-        this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
-        this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
-      } catch (error) {
+      const restorePreviousState = async (cause: unknown): Promise<never> => {
         this.aliasIndex.delete(context.alias);
         context.alias = previousAlias;
         this.aliasIndex.set(previousAlias, context.agentId);
@@ -4049,9 +4616,34 @@ export class CopilotRuntime implements RuntimeAdapter {
         caller.canTalkTo = previousCallerCanTalkTo;
         caller.canObserve = previousCallerCanObserve;
         if (live) live.alias = previousAlias;
+        const currentLive = this.live.get(context.target);
+        if (currentLive) currentLive.alias = previousAlias;
+        try {
+          this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
+          this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
+          await this.reconnectAgent(context, transition);
+          resumeMailbox = true;
+        } catch (restoreError) {
+          const restoreMessage =
+            restoreError instanceof Error ? restoreError.message : String(restoreError);
+          await this.failAgent(
+            context,
+            `Agent update rollback could not restore its durable/live state: ${restoreMessage}`,
+            transition,
+          );
+          throw new Error(
+            `Agent "${previousAlias}" update failed and its previous state could not be ` +
+              `restored: ${restoreMessage}`,
+            { cause },
+          );
+        }
+        throw cause;
+      };
+      try {
         this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
         this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
-        throw error;
+      } catch (error) {
+        return restorePreviousState(error);
       }
 
       let reconnected = false;
@@ -4061,19 +4653,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         // The reconnect failed, so restore the previous definition durably and in
         // memory rather than leaving a committed update the live session never
         // received, then surface the failure.
-        this.aliasIndex.delete(context.alias);
-        context.alias = previousAlias;
-        this.aliasIndex.set(previousAlias, context.agentId);
-        context.definition = previousDefinition;
-        context.agent = previousAgent;
-        context.canTalkTo = previousCanTalkTo;
-        context.canObserve = previousCanObserve;
-        caller.canTalkTo = previousCallerCanTalkTo;
-        caller.canObserve = previousCallerCanObserve;
-        if (live) live.alias = previousAlias;
-        this.db.updateAgentRun(context.runId, context.alias, this.storedAgentJson(context));
-        this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
-        throw error;
+        return restorePreviousState(error);
       }
       this.emitAgentLifecycle("agent.updated", context, { reconnected });
       resumeMailbox = true;
@@ -4101,10 +4681,14 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (!live) {
       return false;
     }
-    if (this.sessionSignature(context) === live.configSignature) {
+    const plan = await this.sessionConnectionPlan(context);
+    if (
+      plan.configSignature === live.configSignature &&
+      this.liveConnectionCurrent(live, true)
+    ) {
       return false;
     }
-    await this.reconnectAgent(context, transition);
+    await this.reconnectAgent(context, transition, plan);
     return true;
   }
 
@@ -4117,8 +4701,14 @@ export class CopilotRuntime implements RuntimeAdapter {
   private async reconnectAgent(
     context: AgentContext,
     transition: AgentTransition,
+    initialPlan?: {
+      availableMcpServers: Set<string>;
+      config: SessionConfig;
+      configSignature: string;
+    },
   ): Promise<void> {
     const target = context.target;
+    let continuity: SessionContinuity | undefined;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const pending = this.connecting.get(target);
       if (pending) {
@@ -4129,13 +4719,21 @@ export class CopilotRuntime implements RuntimeAdapter {
           () => undefined,
         );
       }
-      const desired = this.sessionSignature(context);
+      const plan =
+        attempt === 0 && initialPlan !== undefined
+          ? initialPlan
+          : await this.sessionConnectionPlan(context);
       const live = this.live.get(target);
-      if (live && live.configSignature === desired) {
+      if (
+        live &&
+        live.configSignature === plan.configSignature &&
+        this.liveConnectionCurrent(live, true)
+      ) {
         return;
       }
       const sessionId = live?.session.sessionId ?? this.db.session(context.runId)?.sessionId;
       if (live) {
+        continuity = this.captureContinuity(live);
         this.live.delete(target);
         await this.disconnectLiveSession(
           live,
@@ -4148,15 +4746,18 @@ export class CopilotRuntime implements RuntimeAdapter {
         agentId: context.agentId,
         alias: context.alias,
         sessionId,
-        config: this.agentConfig(context),
-        configSignature: this.sessionSignature(context),
+        config: plan.config,
+        configSignature: plan.configSignature,
+        availableMcpServers: plan.availableMcpServers,
         resumeExisting: true,
-        suppressHistory: true,
+        ...(continuity === undefined ? {} : { continuity }),
         transition,
       });
-      if (connected.configSignature === this.sessionSignature(context)) {
+      const verifiedPlan = await this.sessionConnectionPlan(context);
+      if (connected.configSignature === verifiedPlan.configSignature) {
         return;
       }
+      continuity = this.captureContinuity(connected);
     }
     throw new Error(
       `Agent "${context.alias}" could not be reconnected with its current configuration.`,
@@ -4263,26 +4864,58 @@ export class CopilotRuntime implements RuntimeAdapter {
     content: string,
     retryOnFailure: boolean,
   ): Promise<string> {
+    if (!this.liveConnectionCurrent(live, true)) {
+      throw new Error("The SDK session selected for this prompt is no longer current.");
+    }
     const runId = live.runId;
     const id = randomUUID();
     this.db.enqueueMessage(id, runId, "user", live.target, "user", content);
+    const claim = this.db.claimMessage(id, runId, live.target);
+    if (!claim) {
+      throw new Error(`Prompt message "${id}" could not be claimed for delivery.`);
+    }
+    let sdkMessageId: string;
     try {
-      const sdkMessageId = await live.session.send({ prompt: content, mode: "immediate" });
-      this.db.completeMessage(id);
-      this.emit(
-        "prompt.accepted",
-        { id, sdkMessageId, source: "user", target: live.target, content },
-        { runId, memberId: live.target, target: "conversation" },
-      );
-      return sdkMessageId;
+      sdkMessageId = await live.session.send({ prompt: content, mode: "immediate" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.db.failMessage(id, message, retryOnFailure);
-      if (retryOnFailure) {
+      const released = this.db.failMessage(
+        claim.id,
+        claim.runId,
+        claim.target,
+        claim.leaseToken,
+        message,
+        retryOnFailure,
+      );
+      if (retryOnFailure && released) {
         this.scheduleMailboxRetry(live.target, 1);
       }
       throw error;
     }
+    if (!this.liveConnectionCurrent(live, true)) {
+      const released = this.db.releaseMessage(
+        claim.id,
+        claim.runId,
+        claim.target,
+        claim.leaseToken,
+        "The prompt was accepted by a superseded SDK session.",
+      );
+      if (released) {
+        this.scheduleMailboxDrain(live.target);
+      }
+      throw new Error(
+        `Prompt message "${id}" was accepted by an SDK session that is no longer current.`,
+      );
+    }
+    if (!this.db.completeMessage(claim.id, claim.runId, claim.target, claim.leaseToken)) {
+      throw new Error(`Prompt message "${id}" lost its delivery lease before completion.`);
+    }
+    this.emit(
+      "prompt.accepted",
+      { id, sdkMessageId, source: "user", target: live.target, content },
+      { runId, memberId: live.target, target: "conversation" },
+    );
+    return sdkMessageId;
   }
 
   private cancelMailboxRetry(target: string): void {
@@ -4304,6 +4937,10 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   private scheduleMailboxDrain(target: string): void {
     if (this.shuttingDown) {
+      return;
+    }
+    if (this.drainingMailboxes.has(target)) {
+      this.mailboxDrainRequested.add(target);
       return;
     }
     queueMicrotask(() => {
@@ -4351,6 +4988,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   /** Claims and transmits at most one message for one recipient idle cycle. */
   private async drainMailbox(target: string, retryWake: boolean): Promise<void> {
     if (this.drainingMailboxes.has(target)) {
+      this.mailboxDrainRequested.add(target);
       return;
     }
     this.drainingMailboxes.add(target);
@@ -4399,6 +5037,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       if (!retryWake && live.mailboxDrainCycle >= live.idleCycle) {
         return;
       }
+      if (!this.liveConnectionCurrent(live, false)) {
+        return;
+      }
       const [message] = this.db.claimMessages(live.runId, target, 1);
       if (!message) {
         if (retryWake) {
@@ -4419,7 +5060,26 @@ export class CopilotRuntime implements RuntimeAdapter {
             "appropriate, and use the relevant send tool if the sender needs a direct answer.";
       try {
         const sdkMessageId = await live.session.send({ prompt, mode: "immediate" });
-        this.db.completeMessage(message.id);
+        if (!this.liveConnectionCurrent(live, false)) {
+          this.db.releaseMessage(
+            message.id,
+            message.runId,
+            message.target,
+            message.leaseToken,
+            "Delivery returned from a superseded SDK session.",
+          );
+          return;
+        }
+        if (
+          !this.db.completeMessage(
+            message.id,
+            message.runId,
+            message.target,
+            message.leaseToken,
+          )
+        ) {
+          return;
+        }
         this.cancelMailboxRetry(target);
         if (message.kind === "user") {
           this.emit(
@@ -4440,7 +5100,15 @@ export class CopilotRuntime implements RuntimeAdapter {
         this.emit(
           "mailbox.delivered",
           {
-            ...message,
+            id: message.id,
+            runId: message.runId,
+            target: message.target,
+            kind: message.kind,
+            content: message.content,
+            sequence: message.sequence,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+            deliveryAttempts: message.deliveryAttempts,
             source: source?.alias ?? message.source,
             ...(source ? { sourceAgentId: source.agentId } : {}),
             status: "delivered",
@@ -4449,7 +5117,27 @@ export class CopilotRuntime implements RuntimeAdapter {
         );
       } catch (error) {
         const failure = error instanceof Error ? error.message : String(error);
-        this.db.failMessage(message.id, failure, true);
+        if (!this.liveConnectionCurrent(live, false)) {
+          this.db.releaseMessage(
+            message.id,
+            message.runId,
+            message.target,
+            message.leaseToken,
+            failure,
+          );
+          return;
+        }
+        const released = this.db.failMessage(
+          message.id,
+          message.runId,
+          message.target,
+          message.leaseToken,
+          failure,
+          true,
+        );
+        if (!released) {
+          return;
+        }
         const retryAttempt = this.scheduleMailboxRetry(
           target,
           message.deliveryAttempts,
@@ -4467,6 +5155,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
     } finally {
       this.drainingMailboxes.delete(target);
+      if (this.mailboxDrainRequested.delete(target) && !this.shuttingDown) {
+        this.scheduleMailboxDrain(target);
+      }
     }
   }
 
@@ -4541,6 +5232,10 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     this.mailboxRetryTimers.clear();
     this.mailboxRetryAttempts.clear();
+    for (const binding of [...this.sessionBindings.values()]) {
+      this.invalidateSessionBinding(binding, reason);
+    }
+    this.sessionBindings.clear();
     for (const pending of this.pendingPermissions.values()) {
       pending.respond(reject(`Permission request cancelled: ${reason}`));
     }
@@ -4561,8 +5256,10 @@ export class CopilotRuntime implements RuntimeAdapter {
     this.live.clear();
     this.agents.clear();
     this.aliasIndex.clear();
+    this.disqualifiedAgentIds.clear();
     this.transitions.clear();
     this.drainingMailboxes.clear();
+    this.mailboxDrainRequested.clear();
     this.pendingSpawns.length = 0;
     this.primaryAgentId = undefined;
     for (const runId of runIds) {

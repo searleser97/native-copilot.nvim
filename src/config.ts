@@ -70,7 +70,7 @@ export const dynamicAgentSchema = z.object({
     "Agent permission policy; omit to inherit the main session policy.",
   ),
   mcpServers: stringList.optional().describe(
-    "Subset of MCP server names loaded by the main session; omit to inherit all.",
+    "Subset of the MCP server ceiling captured from the primary session; omit to inherit that ceiling.",
   ),
   canTalkTo: z.array(z.string().min(1)).describe(
     `Directional outgoing recipients: peer aliases, durable agent:<uuid> targets, or the request-local selector ` +

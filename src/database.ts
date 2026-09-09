@@ -18,7 +18,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is one UUID-backed agent session; a
  * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 export interface StoredMessage {
   id: string;
@@ -35,6 +35,8 @@ export interface StoredMessage {
 
 export interface ClaimedMessage extends StoredMessage {
   deliveryAttempts: number;
+  leaseToken: string;
+  leaseUntil: string;
 }
 
 export interface StateSnapshot {
@@ -85,12 +87,6 @@ export interface AgentRunReservation {
   isPrimary?: boolean;
 }
 
-export interface AgentRunDefinitionUpdate {
-  id: string;
-  alias: string;
-  definition: string;
-}
-
 export class AgentAliasConflictError extends Error {
   readonly code = "AGENT_ALIAS_CONFLICT";
 
@@ -120,7 +116,7 @@ export class AgentDatabase {
 
   /**
    * Brings the database to {@link SCHEMA_VERSION}. Pre-v6 state is rebuilt as before;
-   * v6-v10 agent runs and mailboxes are migrated in place. A database written by a
+   * v6-v11 agent runs and mailboxes are migrated in place. A database written by a
    * newer host is never erased.
    */
   private migrate(): void {
@@ -213,7 +209,9 @@ export class AgentDatabase {
 
         CREATE TABLE IF NOT EXISTS delivery_leases (
           message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL,
           target TEXT NOT NULL,
+          lease_token TEXT NOT NULL,
           lease_until TEXT NOT NULL,
           attempts INTEGER NOT NULL DEFAULT 0,
           last_error TEXT
@@ -229,6 +227,9 @@ export class AgentDatabase {
         );
       `);
       if (schema.version >= 6 && schema.version < SCHEMA_VERSION) {
+        if (schema.version < 12) {
+          this.migrateDeliveryLeases();
+        }
         if (schema.version === 6 && !this.hasColumn("runs", "standard_can_observe")) {
           this.db.exec(
             "ALTER TABLE runs ADD COLUMN standard_can_observe INTEGER NOT NULL DEFAULT 0",
@@ -265,7 +266,7 @@ export class AgentDatabase {
           `);
         }
         if (schema.version < 11) {
-          this.classifyIncompleteStartups();
+          this.classifyLegacyStartups();
         }
         this.assertAgentAliasState();
         if (schema.version < 9) {
@@ -273,7 +274,7 @@ export class AgentDatabase {
         }
         if (schema.version < 11) {
           // Legacy Standard conversion can create one more no-session agent row.
-          this.classifyIncompleteStartups();
+          this.classifyLegacyStartups();
         }
       }
       this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
@@ -297,44 +298,281 @@ export class AgentDatabase {
     return rows.some((row) => row.name === column);
   }
 
-  private classifyIncompleteStartups(): void {
-    // Schema-v10 could persist a definition before SDK session creation.
-    // Preserve a live owner's reservation, but classify it as unfinished so
-    // stale-owner cleanup releases it. Inactive no-session rows are already
-    // failed startups and must stop reserving aliases immediately.
+  private migrateDeliveryLeases(): void {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET status = 'pending', updated_at = ?
+         WHERE status = 'delivering'`,
+      )
+      .run(timestamp);
     this.db.exec(`
-      UPDATE runs
-      SET startup_state = 'reserved', recovery_eligible = 0
-      WHERE mode = 'agent' AND status = 'active'
-        AND NOT EXISTS (
-          SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
-        );
-
-      UPDATE runs
-      SET definition = NULL,
-          startup_state = 'failed',
-          recovery_eligible = 0
-      WHERE mode = 'agent' AND status != 'active'
-        AND NOT EXISTS (
-          SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
-        );
-
-      UPDATE messages
-      SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-      WHERE status IN ('pending', 'delivering')
-        AND run_id IN (
-          SELECT id FROM runs
-          WHERE mode = 'agent' AND startup_state = 'failed'
-        );
-
-      DELETE FROM delivery_leases
-      WHERE message_id IN (
-        SELECT messages.id
-        FROM messages
-        JOIN runs ON runs.id = messages.run_id
-        WHERE runs.mode = 'agent' AND runs.startup_state = 'failed'
+      DROP TABLE IF EXISTS delivery_leases;
+      CREATE TABLE delivery_leases (
+        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        lease_token TEXT NOT NULL,
+        lease_until TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
       );
     `);
+  }
+
+  private rewriteWorkspaceAclsInTransaction(
+    workspace: string,
+    disqualified: ReadonlyMap<string, string>,
+  ): number {
+    if (disqualified.size === 0) {
+      return 0;
+    }
+    const disqualifiedIds = new Set(disqualified.keys());
+    const disqualifiedAliases = new Set(disqualified.values());
+    const rows = this.db
+      .prepare(
+        `SELECT id, definition
+         FROM runs
+         WHERE workspace = ? AND mode = 'agent' AND definition IS NOT NULL`,
+      )
+      .all(workspace) as unknown as Array<{ id: string; definition: string }>;
+    const update = this.db.prepare(
+      `UPDATE runs SET definition = ? WHERE id = ? AND definition = ?`,
+    );
+    let updated = 0;
+
+    const filteredStrings = (
+      value: unknown,
+      runId: string,
+      field: string,
+      remove: (entry: string) => boolean,
+    ): string[] | undefined => {
+      if (value === undefined) {
+        return undefined;
+      }
+      if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+        throw new Error(
+          `Stored agent run "${runId}" has an invalid ${field}; ACL cleanup was aborted.`,
+        );
+      }
+      return (value as string[]).filter((entry) => !remove(entry));
+    };
+    const removesAgentId = (entry: string): boolean =>
+      disqualifiedIds.has(entry) ||
+      (
+        entry.startsWith("agent:") &&
+        disqualifiedIds.has(entry.slice("agent:".length))
+      );
+    const removesSelector = (entry: string): boolean =>
+      removesAgentId(entry) || disqualifiedAliases.has(entry);
+
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.definition);
+      } catch (error) {
+        throw new Error(
+          `Stored agent run "${row.id}" contains invalid JSON; ACL cleanup was aborted.`,
+          { cause: error },
+        );
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error(
+          `Stored agent run "${row.id}" is not an object; ACL cleanup was aborted.`,
+        );
+      }
+      const record = parsed as Record<string, unknown>;
+      if (
+        typeof record.definition !== "object" ||
+        record.definition === null ||
+        Array.isArray(record.definition)
+      ) {
+        throw new Error(
+          `Stored agent run "${row.id}" has no valid definition; ACL cleanup was aborted.`,
+        );
+      }
+      const definition = record.definition as Record<string, unknown>;
+      const canTalkToAgentIds = filteredStrings(
+        record.canTalkToAgentIds,
+        row.id,
+        "canTalkToAgentIds",
+        removesAgentId,
+      );
+      const canObserveAgentIds = filteredStrings(
+        record.canObserveAgentIds,
+        row.id,
+        "canObserveAgentIds",
+        removesAgentId,
+      );
+      const canTalkTo = filteredStrings(
+        definition.canTalkTo,
+        row.id,
+        "definition.canTalkTo",
+        removesSelector,
+      );
+      const canObserve = filteredStrings(
+        definition.canObserve,
+        row.id,
+        "definition.canObserve",
+        removesSelector,
+      );
+      let changed = false;
+      if (
+        canTalkToAgentIds !== undefined &&
+        canTalkToAgentIds.length !== (record.canTalkToAgentIds as unknown[]).length
+      ) {
+        record.canTalkToAgentIds = canTalkToAgentIds;
+        changed = true;
+      }
+      if (
+        canObserveAgentIds !== undefined &&
+        canObserveAgentIds.length !== (record.canObserveAgentIds as unknown[]).length
+      ) {
+        record.canObserveAgentIds = canObserveAgentIds;
+        changed = true;
+      }
+      if (
+        canTalkTo !== undefined &&
+        canTalkTo.length !== (definition.canTalkTo as unknown[]).length
+      ) {
+        definition.canTalkTo = canTalkTo;
+        changed = true;
+      }
+      if (
+        canObserve !== undefined &&
+        canObserve.length !== (definition.canObserve as unknown[]).length
+      ) {
+        definition.canObserve = canObserve;
+        changed = true;
+      }
+      if (!changed) {
+        continue;
+      }
+      const result = update.run(JSON.stringify(record), row.id, row.definition);
+      if (result.changes !== 1) {
+        throw new Error(
+          `Stored agent run "${row.id}" changed during ACL cleanup; the transaction was aborted.`,
+        );
+      }
+      updated += 1;
+    }
+
+    const ids = [...disqualifiedIds];
+    const placeholders = ids.map(() => "?").join(", ");
+    this.db
+      .prepare(
+        `DELETE FROM activity_cursors
+         WHERE observer_id IN (${placeholders}) OR target_agent_id IN (${placeholders})`,
+      )
+      .run(...ids, ...ids);
+    return updated;
+  }
+
+  private identitySurvivesOutsideRuns(
+    workspace: string,
+    agentId: string,
+    excludedRunIds: ReadonlySet<string>,
+  ): boolean {
+    const rows = this.db
+      .prepare(
+        `SELECT id
+         FROM runs
+         WHERE workspace = ? AND mode = 'agent' AND agent_id = ?
+           AND definition IS NOT NULL`,
+      )
+      .all(workspace, agentId) as unknown as Array<{ id: string }>;
+    return rows.some((row) => !excludedRunIds.has(row.id));
+  }
+
+  private classifyLegacyStartups(): void {
+    type LegacyStartup = {
+      id: string;
+      workspace: string;
+      agentId: string;
+      alias: string | null;
+      isPrimary: number;
+      hasSession: number;
+      hasDeliveredTask: number;
+    };
+    const runs = this.db
+      .prepare(
+        `SELECT id, workspace, agent_id AS agentId, alias,
+                is_primary AS isPrimary,
+                EXISTS (
+                  SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+                ) AS hasSession,
+                EXISTS (
+                  SELECT 1 FROM messages
+                  WHERE messages.run_id = runs.id
+                    AND messages.kind = 'user'
+                    AND messages.status = 'delivered'
+                ) AS hasDeliveredTask
+         FROM runs
+         WHERE mode = 'agent' AND agent_id IS NOT NULL AND definition IS NOT NULL`,
+      )
+      .all() as unknown as LegacyStartup[];
+    const ready = runs.filter(
+      (run) =>
+        run.hasSession === 1 &&
+        (run.isPrimary === 1 || run.hasDeliveredTask === 1),
+    );
+    const failed = runs.filter((run) => !ready.includes(run));
+    const timestamp = now();
+
+    const markReady = this.db.prepare(
+      `UPDATE runs
+       SET startup_state = 'ready', recovery_eligible = 1
+       WHERE id = ? AND mode = 'agent'`,
+    );
+    for (const run of ready) {
+      markReady.run(run.id);
+    }
+
+    const failedIds = new Set(failed.map((run) => run.id));
+    const byWorkspace = new Map<string, Map<string, string>>();
+    for (const run of failed) {
+      if (
+        this.identitySurvivesOutsideRuns(run.workspace, run.agentId, failedIds)
+      ) {
+        continue;
+      }
+      const identities = byWorkspace.get(run.workspace) ?? new Map<string, string>();
+      identities.set(run.agentId, run.alias ?? run.agentId);
+      byWorkspace.set(run.workspace, identities);
+    }
+    for (const [workspace, identities] of byWorkspace) {
+      this.rewriteWorkspaceAclsInTransaction(workspace, identities);
+    }
+
+    const markFailed = this.db.prepare(
+      `UPDATE runs
+       SET definition = NULL,
+           startup_state = 'failed',
+           recovery_eligible = 0,
+           status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
+           ended_at = COALESCE(ended_at, ?),
+           interruption_reason = COALESCE(
+             interruption_reason,
+             'Incomplete agent startup found during schema migration'
+           ),
+           owner_pid = NULL
+       WHERE id = ? AND mode = 'agent'`,
+    );
+    const failMessages = this.db.prepare(
+      `UPDATE messages
+       SET status = 'failed', updated_at = ?
+       WHERE run_id = ? AND status IN ('pending', 'delivering')`,
+    );
+    const removeLeases = this.db.prepare(
+      `DELETE FROM delivery_leases
+       WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
+    );
+    for (const run of failed) {
+      markFailed.run(timestamp, run.id);
+      failMessages.run(timestamp, run.id);
+      removeLeases.run(run.id);
+    }
   }
 
   private assertAgentAliasState(): void {
@@ -724,11 +962,42 @@ export class AgentDatabase {
           canTalkToAgentIds?: unknown;
           canObserveAgentIds?: unknown;
         };
-        if (!parsed.definition || typeof parsed.definition !== "object") {
-          continue;
+        if (
+          !parsed.definition ||
+          typeof parsed.definition !== "object" ||
+          Array.isArray(parsed.definition)
+        ) {
+          throw new Error("stored definition is not an object");
         }
         const canTalkTo = parsed.definition.canTalkTo;
         const canObserve = parsed.definition.canObserve;
+        if (
+          !Array.isArray(canTalkTo) ||
+          canTalkTo.some((selector) => typeof selector !== "string") ||
+          (
+            canObserve !== undefined &&
+            (
+              !Array.isArray(canObserve) ||
+              canObserve.some((selector) => typeof selector !== "string")
+            )
+          ) ||
+          (
+            parsed.canTalkToAgentIds !== undefined &&
+            (
+              !Array.isArray(parsed.canTalkToAgentIds) ||
+              parsed.canTalkToAgentIds.some((agentId) => typeof agentId !== "string")
+            )
+          ) ||
+          (
+            parsed.canObserveAgentIds !== undefined &&
+            (
+              !Array.isArray(parsed.canObserveAgentIds) ||
+              parsed.canObserveAgentIds.some((agentId) => typeof agentId !== "string")
+            )
+          )
+        ) {
+          throw new Error("stored ACL fields are invalid");
+        }
         if (parsed.standardCanTalk === true) {
           const grants = legacyTalkByWorkspace.get(run.workspace) ?? new Set<string>();
           grants.add(agentId);
@@ -769,8 +1038,11 @@ export class AgentDatabase {
           }),
           run.id,
         );
-      } catch {
-        // Preserve an unreadable record verbatim so migration never destroys state.
+      } catch (error) {
+        throw new Error(
+          `Stored agent run "${run.id}" could not be migrated because its definition is invalid.`,
+          { cause: error },
+        );
       }
     }
 
@@ -793,6 +1065,7 @@ export class AgentDatabase {
             run.workspace === workspace &&
             run.mode === "agent" &&
             run.agentId !== null &&
+            run.definition !== null &&
             run.legacyPrimaryCanTalk === 1,
         )
         .map((run) => run.agentId!));
@@ -805,6 +1078,7 @@ export class AgentDatabase {
             run.workspace === workspace &&
             run.mode === "agent" &&
             run.agentId !== null &&
+            run.definition !== null &&
             run.legacyPrimaryCanObserve === 1,
         )
         .map((run) => run.agentId!));
@@ -963,11 +1237,16 @@ export class AgentDatabase {
       const timestamp = now();
       const active = this.db
         .prepare(
-          `SELECT id, owner_pid AS ownerPid, startup_state AS startupState
+          `SELECT id, workspace, agent_id AS agentId, alias,
+                  owner_pid AS ownerPid,
+                  startup_state AS startupState
            FROM runs WHERE status = 'active'`,
         )
         .all() as unknown as Array<{
           id: string;
+          workspace: string;
+          agentId: string | null;
+          alias: string | null;
           ownerPid: number | null;
           startupState: RunStartupState;
         }>;
@@ -983,6 +1262,24 @@ export class AgentDatabase {
       const startupIds = stale
         .filter((run) => run.startupState !== "ready")
         .map((run) => run.id);
+      const startupIdSet = new Set(startupIds);
+      const disqualifiedByWorkspace = new Map<string, Map<string, string>>();
+      for (const run of stale) {
+        if (
+          run.startupState === "ready" ||
+          run.agentId === null ||
+          this.identitySurvivesOutsideRuns(run.workspace, run.agentId, startupIdSet)
+        ) {
+          continue;
+        }
+        const identities =
+          disqualifiedByWorkspace.get(run.workspace) ?? new Map<string, string>();
+        identities.set(run.agentId, run.alias ?? run.agentId);
+        disqualifiedByWorkspace.set(run.workspace, identities);
+      }
+      for (const [workspace, identities] of disqualifiedByWorkspace) {
+        this.rewriteWorkspaceAclsInTransaction(workspace, identities);
+      }
       const interrupt = this.db.prepare(
         `UPDATE runs
          SET status = 'interrupted', ended_at = ?, interruption_reason = ?, owner_pid = NULL
@@ -1120,6 +1417,90 @@ export class AgentDatabase {
   }
 
   /**
+   * Makes a connected primary run recoverable in the same transaction that adopts
+   * mail from inactive predecessors. A crash before this transaction leaves that
+   * mail on the previous run.
+   */
+  completePrimaryStartup(
+    runId: string,
+    workspace: string,
+    agentId: string,
+    target: string,
+  ): number {
+    return this.transaction(() => {
+      const adoptedMessages = this.adoptAgentMessagesInTransaction(
+        runId,
+        workspace,
+        agentId,
+        target,
+        LEGACY_PRIMARY_IDENTITY,
+      );
+      this.completeRunStartupInTransaction(runId);
+      return adoptedMessages;
+    });
+  }
+
+  /**
+   * Atomically retires the previous primary run, adopts its undelivered mail, and
+   * makes the already-connected replacement recoverable.
+   */
+  completePrimaryReplacementStartup(
+    runId: string,
+    previousRunId: string,
+    workspace: string,
+    agentId: string,
+    target: string,
+    reason: string,
+  ): number {
+    if (runId === previousRunId) {
+      throw new Error("A primary replacement must use a new run.");
+    }
+    return this.transaction(() => {
+      const replacement = this.db
+        .prepare(
+          `SELECT startup_state AS startupState
+           FROM runs
+           WHERE id = ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ? AND status = 'active'
+             AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+        )
+        .get(runId, workspace, agentId) as { startupState: RunStartupState } | undefined;
+      if (
+        !replacement ||
+        (replacement.startupState !== "reserved" &&
+          replacement.startupState !== "session_created")
+      ) {
+        throw new Error(
+          `Primary replacement run "${runId}" is not connected and ready for activation.`,
+        );
+      }
+      const timestamp = now();
+      const stopped = this.db
+        .prepare(
+          `UPDATE runs
+           SET status = 'stopped', ended_at = ?, interruption_reason = ?, owner_pid = NULL
+           WHERE id = ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ? AND status = 'active'
+             AND startup_state = 'ready'`,
+        )
+        .run(timestamp, reason, previousRunId, workspace, agentId);
+      if (stopped.changes !== 1) {
+        throw new Error(
+          `Previous primary agent run "${previousRunId}" could not be retired atomically.`,
+        );
+      }
+      const adoptedMessages = this.adoptAgentMessagesInTransaction(
+        runId,
+        workspace,
+        agentId,
+        target,
+      );
+      this.completeRunStartupInTransaction(runId);
+      return adoptedMessages;
+    });
+  }
+
+  /**
    * Makes a failed primary replacement permanently ineligible for startup recovery
    * while retaining its run, session, and diagnostic details.
    */
@@ -1129,22 +1510,38 @@ export class AgentDatabase {
     agentId: string,
     reason: string,
   ): void {
-    const result = this.db
-      .prepare(
-        `UPDATE runs
-         SET recovery_eligible = 0,
-             startup_state = 'failed',
-             status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
-             ended_at = COALESCE(ended_at, ?),
-             interruption_reason = ?,
-             owner_pid = NULL
-         WHERE id = ? AND workspace = ? AND mode = 'agent'
-           AND is_primary = 1 AND agent_id = ?`,
-      )
-      .run(now(), reason, id, workspace, agentId);
-    if (result.changes !== 1) {
-      throw new Error(`Primary agent run "${id}" could not be disqualified from recovery.`);
-    }
+    this.transaction(() => {
+      const timestamp = now();
+      const result = this.db
+        .prepare(
+          `UPDATE runs
+           SET recovery_eligible = 0,
+               startup_state = 'failed',
+               status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
+               ended_at = COALESCE(ended_at, ?),
+               interruption_reason = ?,
+               owner_pid = NULL
+           WHERE id = ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ?`,
+        )
+        .run(timestamp, reason, id, workspace, agentId);
+      if (result.changes !== 1) {
+        throw new Error(`Primary agent run "${id}" could not be disqualified from recovery.`);
+      }
+      this.db
+        .prepare(
+          `UPDATE messages
+           SET status = 'failed', updated_at = ?
+           WHERE run_id = ? AND status IN ('pending', 'delivering')`,
+        )
+        .run(timestamp, id);
+      this.db
+        .prepare(
+          `DELETE FROM delivery_leases
+           WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
+        )
+        .run(id);
+    });
   }
 
   /**
@@ -1175,7 +1572,8 @@ export class AgentDatabase {
                interruption_reason = ?,
                owner_pid = NULL
            WHERE id = ? AND workspace = ? AND mode = 'agent'
-             AND is_primary = 1 AND agent_id = ?`,
+             AND is_primary = 1 AND agent_id = ?
+             AND startup_state = 'ready' AND status = 'active'`,
         )
         .run(timestamp, reason, failedRunId, workspace, agentId);
       if (result.changes !== 1) {
@@ -1316,17 +1714,39 @@ export class AgentDatabase {
 
   /**
    * Atomically releases a run whose SDK startup never completed and removes that
-   * failed UUID from every related caller/peer ACL persisted by the same batch.
+   * permanently failed UUID from every persisted ACL in the workspace.
    */
   failAgentStartup(
     id: string,
     workspace: string,
     agentId: string,
     reason: string,
-    relatedRuns: readonly AgentRunDefinitionUpdate[],
-  ): void {
-    this.transaction(() => {
+  ): boolean {
+    return this.transaction(() => {
       const timestamp = now();
+      const run = this.db
+        .prepare(
+          `SELECT alias, startup_state AS startupState
+           FROM runs
+           WHERE id = ? AND workspace = ? AND mode = 'agent' AND agent_id = ?`,
+        )
+        .get(id, workspace, agentId) as {
+          alias: string | null;
+          startupState: RunStartupState;
+        } | undefined;
+      if (!run || run.startupState === "ready") {
+        throw new Error(
+          `Agent run "${id}" could not be released after its startup failed.`,
+        );
+      }
+      const permanentlyDisqualified =
+        !this.identitySurvivesOutsideRuns(workspace, agentId, new Set([id]));
+      if (permanentlyDisqualified) {
+        this.rewriteWorkspaceAclsInTransaction(
+          workspace,
+          new Map([[agentId, run.alias ?? agentId]]),
+        );
+      }
       const failed = this.db
         .prepare(
           `UPDATE runs
@@ -1359,28 +1779,7 @@ export class AgentDatabase {
            WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
         )
         .run(id);
-
-      const updateDefinition = this.db.prepare(
-        `UPDATE runs
-         SET alias = ?, definition = ?
-         WHERE id = ? AND workspace = ? AND mode = 'agent' AND definition IS NOT NULL`,
-      );
-      for (const related of relatedRuns) {
-        if (related.id === id) {
-          throw new Error("A failed startup run cannot update its own released definition.");
-        }
-        const updated = updateDefinition.run(
-          related.alias,
-          related.definition,
-          related.id,
-          workspace,
-        );
-        if (updated.changes !== 1) {
-          throw new Error(
-            `Related agent run "${related.id}" could not remove failed startup ACL "${agentId}".`,
-          );
-        }
-      }
+      return permanentlyDisqualified;
     });
   }
 
@@ -1537,13 +1936,30 @@ export class AgentDatabase {
       const timestamp = now();
       const row = this.db
         .prepare(
-          "SELECT startup_state AS startupState FROM runs WHERE id = ? AND status = 'active'",
+          `SELECT workspace, agent_id AS agentId, alias,
+                  startup_state AS startupState
+           FROM runs WHERE id = ? AND status = 'active'`,
         )
-        .get(id) as { startupState: RunStartupState } | undefined;
+        .get(id) as {
+          workspace: string;
+          agentId: string | null;
+          alias: string | null;
+          startupState: RunStartupState;
+        } | undefined;
       if (!row) {
         return;
       }
       const startupFailed = row.startupState !== "ready";
+      if (
+        startupFailed &&
+        row.agentId !== null &&
+        !this.identitySurvivesOutsideRuns(row.workspace, row.agentId, new Set([id]))
+      ) {
+        this.rewriteWorkspaceAclsInTransaction(
+          row.workspace,
+          new Map([[row.agentId, row.alias ?? row.agentId]]),
+        );
+      }
       this.db
         .prepare(
           `UPDATE runs
@@ -1608,6 +2024,10 @@ export class AgentDatabase {
 
   /** Makes a run recoverable only after its SDK session and initial task are accepted. */
   completeRunStartup(runId: string): void {
+    this.transaction(() => this.completeRunStartupInTransaction(runId));
+  }
+
+  private completeRunStartupInTransaction(runId: string): void {
     const result = this.db
       .prepare(
         `UPDATE runs
@@ -1699,20 +2119,113 @@ export class AgentDatabase {
     });
   }
 
+  private resetExpiredDeliveriesInTransaction(timestamp: string): void {
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET status = 'pending', updated_at = ?
+         WHERE status = 'delivering'
+           AND (
+             NOT EXISTS (
+               SELECT 1 FROM delivery_leases
+               WHERE delivery_leases.message_id = messages.id
+                 AND delivery_leases.run_id = messages.run_id
+                 AND delivery_leases.target = messages.target
+             )
+             OR EXISTS (
+               SELECT 1 FROM delivery_leases
+               WHERE delivery_leases.message_id = messages.id
+                 AND delivery_leases.run_id = messages.run_id
+                 AND delivery_leases.target = messages.target
+                 AND delivery_leases.lease_until <= ?
+             )
+           )`,
+      )
+      .run(timestamp, timestamp);
+  }
+
+  private claimRowsInTransaction(
+    rows: StoredMessage[],
+    runId: string,
+    target: string,
+    timestamp: string,
+    leaseUntil: string,
+  ): ClaimedMessage[] {
+    const update = this.db.prepare(
+      `UPDATE messages
+       SET status = 'delivering', updated_at = ?
+       WHERE id = ? AND run_id = ? AND target = ? AND status = 'pending'`,
+    );
+    const lease = this.db.prepare(
+      `INSERT INTO delivery_leases(
+         message_id, run_id, target, lease_token, lease_until, attempts, last_error
+       ) VALUES (?, ?, ?, ?, ?, 1, NULL)
+       ON CONFLICT(message_id) DO UPDATE SET
+         run_id = excluded.run_id,
+         target = excluded.target,
+         lease_token = excluded.lease_token,
+         lease_until = excluded.lease_until,
+         attempts = delivery_leases.attempts + 1,
+         last_error = NULL`,
+    );
+    const attempts = this.db.prepare(
+      "SELECT attempts FROM delivery_leases WHERE message_id = ?",
+    );
+    return rows.map((row): ClaimedMessage => {
+      const leaseToken = randomUUID();
+      const claimed = update.run(timestamp, row.id, runId, target);
+      if (claimed.changes !== 1) {
+        throw new Error(`Message "${row.id}" could not be claimed from its current mailbox.`);
+      }
+      lease.run(row.id, runId, target, leaseToken, leaseUntil);
+      return {
+        ...row,
+        status: "delivering",
+        updatedAt: timestamp,
+        leaseToken,
+        leaseUntil,
+        deliveryAttempts:
+          (attempts.get(row.id) as { attempts: number } | undefined)?.attempts ?? 1,
+      };
+    });
+  }
+
+  claimMessage(
+    id: string,
+    runId: string,
+    target: string,
+    leaseMs = 60_000,
+  ): ClaimedMessage | undefined {
+    return this.transaction(() => {
+      const timestamp = now();
+      this.resetExpiredDeliveriesInTransaction(timestamp);
+      const row = this.db
+        .prepare(
+          `SELECT
+             id, run_id AS runId, source, target, kind, content, status, sequence,
+             created_at AS createdAt, updated_at AS updatedAt
+           FROM messages
+           WHERE id = ? AND run_id = ? AND target = ? AND status = 'pending'`,
+        )
+        .get(id, runId, target) as unknown as StoredMessage | undefined;
+      if (!row) {
+        return undefined;
+      }
+      const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+      return this.claimRowsInTransaction(
+        [row],
+        runId,
+        target,
+        timestamp,
+        leaseUntil,
+      )[0];
+    });
+  }
+
   claimMessages(runId: string, target: string, limit = 1, leaseMs = 60_000): ClaimedMessage[] {
     return this.transaction(() => {
       const timestamp = now();
-      const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
-      this.db
-        .prepare(
-          `UPDATE messages
-           SET status = 'pending', updated_at = ?
-           WHERE status = 'delivering'
-             AND id IN (SELECT message_id FROM delivery_leases WHERE lease_until <= ?)`,
-        )
-        .run(timestamp, timestamp);
-      this.db.prepare("DELETE FROM delivery_leases WHERE lease_until <= ?").run(timestamp);
-
+      this.resetExpiredDeliveriesInTransaction(timestamp);
       const rows = this.db
         .prepare(
           `SELECT
@@ -1724,63 +2237,90 @@ export class AgentDatabase {
            LIMIT ?`,
         )
         .all(runId, target, limit) as unknown as StoredMessage[];
-
-      const update = this.db.prepare(
-        `UPDATE messages SET status = 'delivering', updated_at = ? WHERE id = ?`,
-      );
-      const lease = this.db.prepare(
-        `INSERT INTO delivery_leases(message_id, target, lease_until, attempts)
-         VALUES (?, ?, ?, 1)
-         ON CONFLICT(message_id) DO UPDATE SET
-           lease_until = excluded.lease_until,
-           attempts = delivery_leases.attempts + 1`,
-      );
-      for (const row of rows) {
-        update.run(timestamp, row.id);
-        lease.run(row.id, target, leaseUntil);
-        row.status = "delivering";
-        row.updatedAt = timestamp;
-      }
-      const attempts = this.db.prepare(
-        "SELECT attempts FROM delivery_leases WHERE message_id = ?",
-      );
-      return rows.map((row) => ({
-        ...row,
-        deliveryAttempts:
-          (attempts.get(row.id) as { attempts: number } | undefined)?.attempts ?? 1,
-      }));
+      const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+      return this.claimRowsInTransaction(rows, runId, target, timestamp, leaseUntil);
     });
   }
 
-  completeMessage(id: string): void {
-    this.transaction(() => {
+  completeMessage(id: string, runId: string, target: string, leaseToken: string): boolean {
+    return this.transaction(() => {
+      const timestamp = now();
+      const completed = this.db
+        .prepare(
+          `UPDATE messages
+           SET status = 'delivered', updated_at = ?
+           WHERE id = ? AND run_id = ? AND target = ? AND status = 'delivering'
+             AND EXISTS (
+               SELECT 1 FROM delivery_leases
+               WHERE delivery_leases.message_id = messages.id
+                 AND delivery_leases.run_id = messages.run_id
+                 AND delivery_leases.target = messages.target
+                 AND delivery_leases.lease_token = ?
+                 AND delivery_leases.lease_until > ?
+             )`,
+        )
+        .run(timestamp, id, runId, target, leaseToken, timestamp);
+      if (completed.changes !== 1) {
+        return false;
+      }
       this.db
         .prepare(
-          `UPDATE messages SET status = 'delivered', updated_at = ?
-           WHERE id = ? AND status IN ('pending', 'delivering')`,
+          `DELETE FROM delivery_leases
+           WHERE message_id = ? AND run_id = ? AND target = ? AND lease_token = ?`,
         )
-        .run(now(), id);
-      this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?").run(id);
+        .run(id, runId, target, leaseToken);
+      return true;
     });
   }
 
-  failMessage(id: string, error: string, retry: boolean): void {
-    this.transaction(() => {
+  failMessage(
+    id: string,
+    runId: string,
+    target: string,
+    leaseToken: string,
+    error: string,
+    retry: boolean,
+  ): boolean {
+    return this.transaction(() => {
+      const timestamp = now();
       const status: MessageStatus = retry ? "pending" : "failed";
+      const failed = this.db
+        .prepare(
+          `UPDATE messages
+           SET status = ?, updated_at = ?
+           WHERE id = ? AND run_id = ? AND target = ? AND status = 'delivering'
+             AND EXISTS (
+               SELECT 1 FROM delivery_leases
+               WHERE delivery_leases.message_id = messages.id
+                 AND delivery_leases.run_id = messages.run_id
+                 AND delivery_leases.target = messages.target
+                 AND delivery_leases.lease_token = ?
+                 AND delivery_leases.lease_until > ?
+             )`,
+        )
+        .run(status, timestamp, id, runId, target, leaseToken, timestamp);
+      if (failed.changes !== 1) {
+        return false;
+      }
       this.db
         .prepare(
-          `UPDATE messages SET status = ?, updated_at = ?
-           WHERE id = ? AND status IN ('pending', 'delivering')`,
+          `UPDATE delivery_leases
+           SET lease_token = ?, lease_until = ?, last_error = ?
+           WHERE message_id = ? AND run_id = ? AND target = ? AND lease_token = ?`,
         )
-        .run(status, now(), id);
-      if (retry) {
-        this.db.prepare("DELETE FROM delivery_leases WHERE message_id = ?").run(id);
-      } else {
-        this.db
-          .prepare("UPDATE delivery_leases SET last_error = ? WHERE message_id = ?")
-          .run(error, id);
-      }
+        .run(randomUUID(), timestamp, error, id, runId, target, leaseToken);
+      return true;
     });
+  }
+
+  releaseMessage(
+    id: string,
+    runId: string,
+    target: string,
+    leaseToken: string,
+    reason: string,
+  ): boolean {
+    return this.failMessage(id, runId, target, leaseToken, reason, true);
   }
 
   activityCursor(observerId: string, targetAgentId: string): ActivityCursor | undefined {

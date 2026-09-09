@@ -189,13 +189,16 @@ task, tool, environment, or schedule rows. Use `/tasks` or
 `:NativeCopilotTasks` to browse all tracked tasks and open one in the same floating detail pane.
 
 The resolved main Copilot command defines the primary session's initial permission policy.
-`--allow-all` installs the SDK's `approveAll` handler; otherwise permission requests are shown in
-Neovim. Dynamically generated agents may inherit that behavior, request interactive approval, or
+`--allow-all` uses the SDK's `approveAll` decision behind the lifecycle guard; otherwise
+permission requests are shown in Neovim. Dynamically generated agents may inherit that behavior,
+request interactive approval, or
 define a stricter path/tool/action ceiling. A child may request `approveAll` only when the main
 command grants it, preventing privilege escalation. While a busy long-lived session is silent, the
 host checks the SDK's durable event and pending-permission state. Missed lifecycle events are
-replayed once, interactive permissions are restored to the Neovim picker, and `approveAll` sessions
-reassert that policy before resolving a recovered request.
+replayed once, interactive permissions are restored to the Neovim picker, and `approveAll`
+requests are resolved through the same guarded handler. Permission and MCP-auth callbacks are
+bound to the exact agent generation and SDK session that created them; lifecycle transitions
+synchronously invalidate old callbacks and reject their pending requests before disconnect begins.
 
 Commands mirror the primary mappings:
 
@@ -252,9 +255,12 @@ one transaction before any child is announced; SDK session startup remains indep
 additional-agent run becomes recoverable only after its SDK session is persisted and its initial
 task is accepted.
 If one child fails before that point, its alias reservation is released and its UUID is removed
-from the caller/peer ACLs without preventing the other children from starting. If the primary agent
-needs to remember a conceptual team or workflow, it may keep that relationship in its conversation
-or a workspace file; the host does not interpret or own that grouping.
+from every persisted workspace ACL (and every active in-memory ACL) without preventing the other
+children from starting. Both the UUID arrays and the corresponding definition selectors are
+rewritten in one transaction; malformed persisted JSON aborts and surfaces the cleanup failure
+instead of silently retaining a ghost grant. If the primary agent needs to remember a conceptual
+team or workflow, it may keep that relationship in its conversation or a workspace file; the host
+does not interpret or own that grouping.
 
 Aliases cannot collide between the primary and any persisted additional-agent definition in the
 workspace. The primary prefers `copilot` and atomically falls back to `primary`, `primary_2`, and so
@@ -288,8 +294,9 @@ same native configuration as the main agent:
   config is derived.
 - **Model / reasoning effort** — `--model` and `--reasoning-effort` from the main command become the
   default for every session, including spawned agents.
-- **Permission policy** — `--allow-all` installs the SDK `approveAll` handler for the main session;
-  children inherit that behavior unless they narrow it.
+- **Permission policy** — `--allow-all` uses the SDK `approveAll` decision through a
+  generation/session-bound handler for the main session; children inherit that behavior unless
+  they narrow it.
 
 Agent settings only **narrow or deliberately override** this single source of truth; they never
 recreate a parallel definition:
@@ -300,12 +307,16 @@ recreate a parallel definition:
   expanded and matched). A member allowlist that requests tools outside the native ceiling is
   **rejected** when the agent is spawned or updated rather than silently intersected. Native
   `excludedTools`/`disabledMcpServers` still merge as a ceiling.
-- An agent's `mcpServers` subset disables every other inherited MCP server for that agent.
+- An agent's captured MCP ceiling is the primary server set visible when it is created. Its
+  `mcpServers` field may only narrow that set; when omitted, the captured set is the effective
+  allowlist. Every child connection also explicitly disables currently visible primary servers
+  outside that effective allowlist, so reconnecting cannot acquire servers added later.
 - An agent's `model` / `reasoningEffort` / `reasoningSummary` override the inherited defaults.
 - An MCP server an agent defines itself takes precedence over an inherited native server of the same
   name.
 
-Omitting any of these fields inherits the main session's value.
+Omitting an override inherits the shared native default; omitting `mcpServers` specifically uses
+the agent's durable primary-server snapshot rather than servers added later.
 
 Neovim always starts one generic primary agent that stays connected for the host lifetime. Agents
 are created when that primary invokes `native_copilot_spawn_agents`, either from an ordinary prompt
@@ -315,9 +326,11 @@ idle. Each requested agent then starts independently and receives its own `task`
 `native_copilot_update_agent` replaces one complete definition and may change its operating prompt,
 model, reasoning, permissions, MCP subset, task, communication ACL, or observation ACL.
 Configuration changes reconnect the SDK session while preserving its session ID and conversation
-history. While a stop, replacement, recovery, or reconnect is in progress, that agent is explicitly
-transitioning: passive activity reads return a temporary-unavailable error, and ordinary activation
-or mailbox work cannot recreate or attach to the superseded run.
+history. Reconnects carry forward rendered SDK event IDs and incrementally replay only unseen
+durable history, so stale callbacks are dropped without losing messages or tool completions emitted
+during the transition. While a stop, replacement, recovery, or reconnect is in progress, that agent
+is explicitly transitioning: passive activity reads return a temporary-unavailable error, and
+ordinary activation or mailbox work cannot recreate or attach to the superseded run.
 `native_copilot_remove_agent` stops only the selected agent. `/fleet` without an objective opens
 per-agent stop and recovery actions.
 
@@ -329,8 +342,11 @@ The primary agent is reclaimed through the same stored context/session path on h
 `/resume` keeps its durable agent UUID and dynamic UI target while creating a coherent replacement
 run for the selected SDK conversation. If a managed SDK session is missing, the host reports the
 failure instead of silently creating an empty conversation and losing schedules or state.
-If replacement fails, pending mail is adopted back into the restored run atomically; the failed
-replacement remains available for diagnostics but is excluded from future startup recovery.
+The old primary run retains its pending mail until the selected SDK session is connected; retiring
+the old run, adopting its mail, and making the replacement recoverable then happen in one SQLite
+transaction. If replacement fails after activation, pending mail is adopted back into the restored
+run atomically; the failed replacement remains available for diagnostics but is excluded from
+future startup recovery.
 
 ### Validation
 
@@ -407,17 +423,22 @@ Messages store UUID-backed source/target identities and are written transactiona
 before delivery. Busy recipients are not interrupted; each idle cycle claims and submits at most one
 message in SDK `immediate` mode. A transmission failure releases the claim to `pending` and schedules
 a bounded-backoff wakeup, while a message is marked delivered only after the SDK accepts it.
-Delivery uses leases and idempotent message IDs, so interrupted delivery returns to `pending` after
-restart.
+Every claim has a random attempt token bound to its exact run and target. Completion, failure, and
+release require that current unexpired token while the row is still `delivering`, so a late SDK
+send from a superseded generation cannot complete mail that was reset or adopted elsewhere.
+Interrupted delivery returns to `pending` after restart.
 
 Copilot’s session store remains authoritative for full conversation history. SQLite stores
 UUID/session mappings, all agent runs (including the primary), UUID-backed communication and
 observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v11 adds
-explicit startup durability to v10 state. Migrations take the SQLite write lock before reading the
-schema version, migrate v8 worker definitions and mailboxes in place, adopt legacy primary-session
-state into the new primary agent idempotently, enforce primary/non-primary alias reservations
-atomically, and keep failed or taskless startups out of recovery selection. It does not duplicate
-conversation or SDK event history.
+explicit startup durability to v10 state; schema v12 adds generation-safe delivery lease tokens.
+Migrations take the SQLite write lock before reading the schema version, migrate v8 worker
+definitions and mailboxes in place, adopt legacy primary-session state into the new primary agent
+idempotently, enforce primary/non-primary alias reservations atomically, and keep failed or
+taskless startups out of recovery selection. A v10 non-primary run is recoverable only when it has
+both a persisted SDK session and a delivered user task; session-only rows are failed, release their
+aliases, and are removed from related ACLs. Primary rows require their persisted session but do not
+require a user task. The migration does not duplicate conversation or SDK event history.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.
