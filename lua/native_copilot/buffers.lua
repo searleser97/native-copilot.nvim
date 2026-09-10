@@ -1373,12 +1373,12 @@ local function flush_deferred_timeline(member_id, view)
       M.upsert_timeline(member_id, item_id, queued.item)
     end
   end
+end
 
-  function M.finish_history_turn(member_id)
-    local view = M.ensure_member(member_id).views.conversation
-    view.history_turn_active = false
-    flush_deferred_timeline(member_id, view)
-  end
+function M.finish_history_turn(member_id)
+  local view = M.ensure_member(member_id).views.conversation
+  view.history_turn_active = false
+  flush_deferred_timeline(member_id, view)
 end
 
 function M.remove_timeline(member_id, item_id)

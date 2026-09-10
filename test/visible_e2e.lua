@@ -49,6 +49,7 @@ end
 
 local native = require('native_copilot')
 local buffers = require('native_copilot.buffers')
+assert(type(buffers.finish_history_turn) == 'function', 'history turn cleanup must be exported')
 local on_event = native._on_event
 native._on_event = function(message)
   append_trace({ 'event=' .. tostring(message.type) })
