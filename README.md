@@ -333,7 +333,10 @@ recreate a parallel definition:
 Omitting an override inherits the shared native default; omitting `mcpServers` specifically uses
 the agent's durable primary-server snapshot rather than servers added later.
 
-Neovim always starts one generic primary agent that stays connected for the host lifetime. Agents
+Neovim always starts one generic primary agent that stays connected for the host lifetime. Opening
+Native Copilot starts a fresh SDK conversation; previous primary conversations are never resumed
+automatically and remain available only through explicit `/resume`. The durable primary UUID,
+alias, ACLs, mailbox, and monitor relationships carry forward to the fresh conversation. Agents
 are created when that primary invokes `native_copilot_spawn_agents`, either from an ordinary prompt
 or from `/fleet <objective>`. Requests made while the primary is busy queue until that turn becomes
 idle. Each requested agent then starts independently and receives its own `task`.
@@ -503,6 +506,8 @@ session, adopts the predecessor mailbox, and leaves that successor resumable.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.
+The loading buffer is displayed before the Node host starts, so command resolution, database
+migration, and SDK initialization always have immediate visible feedback.
 
 ## Rendering and observability
 

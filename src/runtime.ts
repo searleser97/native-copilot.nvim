@@ -4372,21 +4372,27 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
     }
 
-    const claimed = this.claimPrimaryContext(true)!;
-    const { context, recovered, sessionId } = claimed;
+    const context = this.createFreshPrimaryContext();
+    this.primaryAgentId = context.agentId;
+    try {
+      this.registerAgent(context);
+    } catch (error) {
+      this.primaryAgentId = undefined;
+      this.db.failAgentStartup(
+        context.runId,
+        this.workspace,
+        context.agentId,
+        "Fresh primary context failed before SDK startup",
+      );
+      throw error;
+    }
     const transition = this.beginAgentTransition(
       context,
-      recovered ? "recovering its SDK session" : "starting its SDK session",
+      "starting a fresh SDK session",
     );
     let resumeMailbox = false;
     try {
-      this.emitAgentLifecycle("agent.loading", context, { recovered });
-      if (recovered && sessionId === undefined) {
-        throw new Error(
-          `Primary agent run "${context.runId}" has no managed SDK session and cannot resume ` +
-            "safely. Use /resume to select an existing Copilot session.",
-        );
-      }
+      this.emitAgentLifecycle("agent.loading", context, { recovered: false });
       const live = await this.ensureAgentSession(context.agentId, transition);
       const adoptedMessages = this.db.completePrimaryStartup(
         context.runId,
@@ -4397,7 +4403,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       );
       delete context.primaryClaim;
       this.emitAgentLifecycle("agent.ready", context, {
-        recovered,
+        recovered: false,
         sessionId: live.session.sessionId,
       });
       this.emit(
@@ -4405,7 +4411,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         {
           ...this.agentPayload(context),
           mode: "primary",
-          recovered,
+          recovered: false,
           adoptedMessages,
           sessionId: live.session.sessionId,
           runId: context.runId,
@@ -4418,20 +4424,12 @@ export class CopilotRuntime implements RuntimeAdapter {
       const message = error instanceof Error ? error.message : String(error);
       this.unregisterAgent(context);
       this.primaryAgentId = undefined;
-      if (recovered) {
-        this.db.finishRun(
-          context.runId,
-          "interrupted",
-          "Primary Copilot agent recovery failed",
-        );
-      } else {
-        this.db.failAgentStartup(
-          context.runId,
-          this.workspace,
-          context.agentId,
-          "Primary Copilot agent failed to start",
-        );
-      }
+      this.db.failAgentStartup(
+        context.runId,
+        this.workspace,
+        context.agentId,
+        "Primary Copilot agent failed to start",
+      );
       this.emit(
         "agent.error",
         {

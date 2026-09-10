@@ -2730,6 +2730,80 @@ export class AgentDatabase {
     },
     reason: string,
   ): void {
+    const predecessor = this.db
+      .prepare(
+        `SELECT startup_state AS startupState,
+                recovery_eligible AS recoveryEligible,
+                EXISTS (
+                  SELECT 1 FROM agent_sessions
+                  WHERE agent_sessions.run_id = runs.id
+                ) AS hasSession
+         FROM runs
+         WHERE id = ? AND workspace = ? AND mode = 'agent'
+           AND is_primary = 1 AND agent_id = ?
+           AND primary_predecessor_run_id IS NULL
+           AND primary_claim_token = ? AND owner_pid = ?
+           AND status != 'active' AND definition IS NOT NULL`,
+      )
+      .get(
+        successor.predecessorRunId,
+        successor.workspace,
+        successor.agentId,
+        successor.claimToken,
+        successor.ownerPid,
+      ) as {
+        startupState: RunStartupState;
+        recoveryEligible: number;
+        hasSession: number;
+      } | undefined;
+    if (!predecessor) {
+      throw new Error(
+        `Primary startup run "${successor.id}" no longer owns predecessor ` +
+          `"${successor.predecessorRunId}".`,
+      );
+    }
+    if (
+      predecessor.startupState === "ready" &&
+      predecessor.recoveryEligible === 1 &&
+      predecessor.hasSession === 1
+    ) {
+      const retired = this.db
+        .prepare(
+          `UPDATE runs
+           SET recovery_eligible = 0,
+               status = 'stopped',
+               ended_at = COALESCE(ended_at, ?),
+               interruption_reason = ?,
+               owner_pid = NULL,
+               primary_claim_token = NULL
+           WHERE id = ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ?
+             AND primary_predecessor_run_id IS NULL
+             AND primary_claim_token = ? AND owner_pid = ?
+             AND status != 'active'
+             AND startup_state = 'ready' AND recovery_eligible = 1
+             AND EXISTS (
+               SELECT 1 FROM agent_sessions
+               WHERE agent_sessions.run_id = runs.id
+             )`,
+        )
+        .run(
+          now(),
+          reason,
+          successor.predecessorRunId,
+          successor.workspace,
+          successor.agentId,
+          successor.claimToken,
+          successor.ownerPid,
+        );
+      if (retired.changes !== 1) {
+        throw new Error(
+          `Primary startup run "${successor.id}" could not retire previous conversation ` +
+            `"${successor.predecessorRunId}".`,
+        );
+      }
+      return;
+    }
     const retired = this.db
       .prepare(
         `UPDATE runs
@@ -3560,9 +3634,10 @@ export class AgentDatabase {
   }
 
   /**
-   * Atomically selects an unclaimed staged primary identity, reserves its alias,
-   * marks the predecessor with a PID-owned token, and creates the successor run.
-   * If no staged identity exists, a new UUID is used without a predecessor link.
+   * Atomically selects the latest unclaimed primary identity, reserves its alias,
+   * marks the predecessor with a PID-owned token, and creates a fresh successor run.
+   * A staged identity is completed in place; a ready predecessor keeps its SDK
+   * conversation as history while the successor starts a new conversation.
    */
   claimPrimaryRun(
     id: string,
@@ -3619,29 +3694,46 @@ export class AgentDatabase {
           );
         }
 
-        const stagedRuns = this.agentRunRows(
+        const predecessorRuns = this.agentRunRows(
           `workspace = ?
              AND is_primary = 1
-             AND recovery_eligible = 0
-             AND startup_state = 'reserved'
              AND status != 'active'
              AND definition IS NOT NULL
              AND primary_predecessor_run_id IS NULL
              AND primary_claim_token IS NULL
-             AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+             AND (
+               (
+                 recovery_eligible = 0
+                 AND startup_state = 'reserved'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM agent_sessions WHERE run_id = runs.id
+                 )
+               )
+               OR
+               (
+                 recovery_eligible = 1
+                 AND startup_state = 'ready'
+                 AND EXISTS (
+                   SELECT 1 FROM agent_sessions WHERE run_id = runs.id
+                 )
+               )
+             )
            ORDER BY started_at DESC, id DESC`,
           workspace,
         );
-        if (stagedRuns.length > 1) {
-          const details = stagedRuns
+        const predecessorAgentIds = new Set(
+          predecessorRuns.map((run) => run.agentId),
+        );
+        if (predecessorAgentIds.size > 1) {
+          const details = predecessorRuns
             .map((run) => `"${run.id}" / agent "${run.agentId}"`)
             .join(", ");
           throw new Error(
-            `Workspace "${workspace}" has multiple staged primary identities (${details}); ` +
+            `Workspace "${workspace}" has multiple claimable primary identities (${details}); ` +
               "the claim is ambiguous.",
           );
         }
-        const staged = stagedRuns[0];
+        const predecessor = predecessorRuns[0];
         const reservedWorkerAliases = new Set(
           (
             this.db
@@ -3656,13 +3748,13 @@ export class AgentDatabase {
           ).map((row) => row.alias),
         );
         if (
-          staged &&
-          staged.alias !== LEGACY_PRIMARY_IDENTITY &&
-          staged.alias !== CALLER_ALIAS &&
-          AGENT_ALIAS_PATTERN.test(staged.alias) &&
-          !reservedWorkerAliases.has(staged.alias)
+          predecessor &&
+          predecessor.alias !== LEGACY_PRIMARY_IDENTITY &&
+          predecessor.alias !== CALLER_ALIAS &&
+          AGENT_ALIAS_PATTERN.test(predecessor.alias) &&
+          !reservedWorkerAliases.has(predecessor.alias)
         ) {
-          selectedAlias = staged.alias;
+          selectedAlias = predecessor.alias;
         } else {
           let attempt = 0;
           do {
@@ -3676,10 +3768,10 @@ export class AgentDatabase {
         }
 
         const startedAt = now();
-        const claimToken = staged ? randomUUID() : null;
-        const agentId = staged?.agentId ?? freshAgentId;
+        const claimToken = predecessor ? randomUUID() : null;
+        const agentId = predecessor?.agentId ?? freshAgentId;
         const definition = definitionFactory(
-          staged?.definition ?? undefined,
+          predecessor?.definition ?? undefined,
           selectedAlias,
           agentId,
         );
@@ -3730,34 +3822,55 @@ export class AgentDatabase {
             workspace,
             startedAt,
             ownerPid,
-            staged?.id ?? null,
+            predecessor?.id ?? null,
             claimToken,
           );
 
         let claim: PrimaryStartupClaim | undefined;
-        if (staged && claimToken) {
+        if (predecessor && claimToken) {
           const claimed = this.db
             .prepare(
               `UPDATE runs
                SET primary_claim_token = ?, owner_pid = ?
                WHERE id = ? AND workspace = ? AND mode = 'agent'
                  AND is_primary = 1 AND agent_id = ?
-                 AND recovery_eligible = 0 AND startup_state = 'reserved'
                  AND status != 'active' AND definition IS NOT NULL
                  AND primary_predecessor_run_id IS NULL
                  AND primary_claim_token IS NULL
-                 AND NOT EXISTS (
-                   SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+                 AND (
+                   (
+                     recovery_eligible = 0
+                     AND startup_state = 'reserved'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM agent_sessions
+                       WHERE agent_sessions.run_id = runs.id
+                     )
+                   )
+                   OR
+                   (
+                     recovery_eligible = 1
+                     AND startup_state = 'ready'
+                     AND EXISTS (
+                       SELECT 1 FROM agent_sessions
+                       WHERE agent_sessions.run_id = runs.id
+                     )
+                   )
                  )`,
             )
-            .run(claimToken, ownerPid, staged.id, workspace, staged.agentId);
+            .run(
+              claimToken,
+              ownerPid,
+              predecessor.id,
+              workspace,
+              predecessor.agentId,
+            );
           if (claimed.changes !== 1) {
             throw new Error(
-              `Staged primary predecessor "${staged.id}" could not be claimed atomically.`,
+              `Primary predecessor "${predecessor.id}" could not be claimed atomically.`,
             );
           }
           claim = {
-            predecessorRunId: staged.id,
+            predecessorRunId: predecessor.id,
             token: claimToken,
           };
         }
@@ -3772,7 +3885,7 @@ export class AgentDatabase {
           status: "active",
           startedAt,
           endedAt: null,
-          primaryPredecessorRunId: staged?.id ?? null,
+          primaryPredecessorRunId: predecessor?.id ?? null,
           primaryClaimToken: claimToken,
           session: undefined,
         };

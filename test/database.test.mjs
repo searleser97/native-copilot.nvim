@@ -285,3 +285,84 @@ test("dead staged-primary claims are retryable or resumable", (t) => {
   assert.equal(resumable.primaryPredecessorRunId, "primary-failed");
   db.close();
 });
+
+test("ready primary identity starts a fresh successor conversation", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, () => false);
+
+  const first = db.claimPrimaryRun(
+    "first-primary",
+    "durable-primary-agent",
+    "workspace",
+    7001,
+    claimedDefinition,
+  );
+  db.upsertSession(first.run.id, "previous-primary-session", "connected");
+  db.completePrimaryStartup(
+    first.run.id,
+    "workspace",
+    first.run.agentId,
+    `agent:${first.run.agentId}`,
+    first.claim,
+  );
+  db.enqueueMessage(
+    "pending-primary-mail",
+    first.run.id,
+    "monitor",
+    `agent:${first.run.agentId}`,
+    "agent",
+    "status update",
+  );
+  db.finishRun(first.run.id, "interrupted", "Host exited");
+
+  const second = db.claimPrimaryRun(
+    "fresh-primary",
+    randomUUID(),
+    "workspace",
+    7002,
+    claimedDefinition,
+  );
+  assert.equal(second.run.agentId, first.run.agentId);
+  assert.equal(second.run.alias, first.run.alias);
+  assert.deepEqual(second.claim, {
+    predecessorRunId: first.run.id,
+    token: second.run.primaryClaimToken,
+  });
+  assert.equal(second.run.session, undefined);
+
+  db.upsertSession(second.run.id, "fresh-primary-session", "connected");
+  assert.equal(
+    db.completePrimaryStartup(
+      second.run.id,
+      "workspace",
+      second.run.agentId,
+      `agent:${second.run.agentId}`,
+      second.claim,
+    ),
+    1,
+  );
+
+  const previous = db.agentRun(first.run.id, "workspace");
+  const fresh = db.agentRun(second.run.id, "workspace");
+  assert.ok(previous);
+  assert.ok(fresh);
+  assert.equal(previous.status, "stopped");
+  assert.equal(previous.startupState, "ready");
+  assert.equal(previous.session?.sessionId, "previous-primary-session");
+  assert.equal(fresh.status, "active");
+  assert.equal(fresh.startupState, "ready");
+  assert.equal(fresh.session?.sessionId, "fresh-primary-session");
+  assert.deepEqual(db.ownedSessionIds("workspace"), ["fresh-primary-session"]);
+
+  const adopted = db.db
+    .prepare(
+      `SELECT run_id AS runId, status
+       FROM messages WHERE id = 'pending-primary-mail'`,
+    )
+    .get();
+  assert.deepEqual({ ...adopted }, {
+    runId: second.run.id,
+    status: "pending",
+  });
+  db.close();
+});

@@ -1651,6 +1651,12 @@ local function ensure_loading_buffer()
   return state.loading_buf
 end
 
+local function set_loading_message(message)
+  local buf = ensure_loading_buffer()
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { message })
+  return buf
+end
+
 local function ensure_ui(reuse_current_tab)
   if is_ui_open() then
     vim.api.nvim_set_current_tabpage(state.tab)
@@ -1716,8 +1722,16 @@ local function start_host()
 end
 
 function M.open(open_options)
-  if not start_host() then return end
   ensure_ui(type(open_options) == 'table' and open_options.reuse_current_tab == true)
+  set_loading_message('Starting the primary Copilot agent…')
+  if state.main_win and vim.api.nvim_win_is_valid(state.main_win) then
+    vim.api.nvim_win_set_buf(state.main_win, state.loading_buf)
+    vim.cmd('redraw')
+  end
+  if not start_host() then
+    set_loading_message('Native Copilot host failed to start. Check notifications and logs.')
+    return
+  end
   send('hello')
   send('mode.primary')
 end
