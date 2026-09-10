@@ -64,6 +64,20 @@ export interface StoredAgentRun {
   session: StoredAgentSession | undefined;
 }
 
+export interface StoredSessionOwner {
+  sessionId: string;
+  agentId: string;
+  workspace: string;
+  runIds: string[];
+}
+
+interface SessionOwnershipRow {
+  sessionId: string;
+  agentId: string;
+  workspace: string;
+  runId: string;
+}
+
 export interface ActivityCursor {
   sessionId: string;
   cursor: string;
@@ -85,6 +99,12 @@ export interface AgentRunReservation {
   workspace: string;
   ownerPid: number;
   isPrimary?: boolean;
+}
+
+export interface AgentRunDefinitionUpdate {
+  id: string;
+  alias: string;
+  definition: string;
 }
 
 export class AgentAliasConflictError extends Error {
@@ -192,6 +212,8 @@ export class AgentDatabase {
           state TEXT NOT NULL,
           last_active_at TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS agent_sessions_session_idx
+          ON agent_sessions(session_id);
 
         CREATE TABLE IF NOT EXISTS messages (
           id TEXT PRIMARY KEY,
@@ -265,7 +287,9 @@ export class AgentDatabase {
             );
           `);
         }
-        if (schema.version < 11) {
+        if (schema.version < 12) {
+          // Schema 11 already had startup columns, but taskless worker rows still
+          // need the same conservative classification and ACL scrub on the v12 path.
           this.classifyLegacyStartups();
         }
         this.assertAgentAliasState();
@@ -277,6 +301,7 @@ export class AgentDatabase {
           this.classifyLegacyStartups();
         }
       }
+      this.assertSessionOwnershipState();
       this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
       this.db.exec("COMMIT");
       transactionStarted = false;
@@ -509,7 +534,8 @@ export class AgentDatabase {
                     AND messages.status = 'delivered'
                 ) AS hasDeliveredTask
          FROM runs
-         WHERE mode = 'agent' AND agent_id IS NOT NULL AND definition IS NOT NULL`,
+         WHERE mode = 'agent' AND agent_id IS NOT NULL AND definition IS NOT NULL
+           AND startup_state != 'failed'`,
       )
       .all() as unknown as LegacyStartup[];
     const ready = runs.filter(
@@ -1232,6 +1258,115 @@ export class AgentDatabase {
     }
   }
 
+  private sessionOwnershipRows(
+    sessionId?: string,
+    workspace?: string,
+  ): SessionOwnershipRow[] {
+    const filters = [
+      "runs.mode = 'agent'",
+      "runs.agent_id IS NOT NULL",
+      "runs.definition IS NOT NULL",
+      `(
+          (runs.startup_state = 'ready' AND runs.recovery_eligible = 1)
+          OR (runs.status = 'active' AND runs.startup_state = 'session_created')
+        )`,
+    ];
+    const parameters: string[] = [];
+    if (sessionId !== undefined) {
+      filters.push("agent_sessions.session_id = ?");
+      parameters.push(sessionId);
+    }
+    if (workspace !== undefined) {
+      filters.push("runs.workspace = ?");
+      parameters.push(workspace);
+    }
+    return this.db
+      .prepare(
+        `SELECT agent_sessions.session_id AS sessionId,
+                  runs.agent_id AS agentId,
+                  runs.workspace AS workspace,
+                  runs.id AS runId
+           FROM agent_sessions
+           JOIN runs ON runs.id = agent_sessions.run_id
+           WHERE ${filters.join(" AND ")}
+           ORDER BY agent_sessions.session_id, runs.started_at, runs.id`,
+      )
+      .all(...parameters) as unknown as SessionOwnershipRow[];
+  }
+
+  private sessionOwnerFromRows(
+    sessionId: string,
+    rows: SessionOwnershipRow[],
+  ): StoredSessionOwner | undefined {
+    if (rows.length === 0) {
+      return undefined;
+    }
+    const identities = new Map<string, { agentId: string; workspace: string; runIds: string[] }>();
+    for (const row of rows) {
+      const key = `${row.workspace}\u0000${row.agentId}`;
+      const identity = identities.get(key) ?? {
+        agentId: row.agentId,
+        workspace: row.workspace,
+        runIds: [],
+      };
+      identity.runIds.push(row.runId);
+      identities.set(key, identity);
+    }
+    if (identities.size !== 1) {
+      const details = [...identities.values()]
+        .map(
+          (identity) =>
+            `agent "${identity.agentId}" in workspace "${identity.workspace}" ` +
+            `(runs ${identity.runIds.map((runId) => `"${runId}"`).join(", ")})`,
+        )
+        .join("; ");
+      throw new Error(
+        `SDK session "${sessionId}" is durably owned by multiple agent identities: ${details}. ` +
+          "Resolve the duplicate persisted ownership before starting or recovering an agent.",
+      );
+    }
+    const owner = identities.values().next().value!;
+    return {
+      sessionId,
+      agentId: owner.agentId,
+      workspace: owner.workspace,
+      runIds: owner.runIds,
+    };
+  }
+
+  private assertSessionOwnershipState(): void {
+    const rows = this.sessionOwnershipRows();
+    const bySession = new Map<string, SessionOwnershipRow[]>();
+    for (const row of rows) {
+      const sessionRows = bySession.get(row.sessionId) ?? [];
+      sessionRows.push(row);
+      bySession.set(row.sessionId, sessionRows);
+    }
+    for (const [sessionId, sessionRows] of bySession) {
+      this.sessionOwnerFromRows(sessionId, sessionRows);
+    }
+  }
+
+  /** Durable owner of one SDK session, allowing historical runs of the same UUID. */
+  sessionOwner(sessionId: string): StoredSessionOwner | undefined {
+    return this.sessionOwnerFromRows(sessionId, this.sessionOwnershipRows(sessionId));
+  }
+
+  /** SDK sessions reserved by recoverable or currently-starting durable agents. */
+  ownedSessionIds(workspace?: string): string[] {
+    const rows = this.sessionOwnershipRows(undefined, workspace);
+    const bySession = new Map<string, SessionOwnershipRow[]>();
+    for (const row of rows) {
+      const sessionRows = bySession.get(row.sessionId) ?? [];
+      sessionRows.push(row);
+      bySession.set(row.sessionId, sessionRows);
+    }
+    for (const [sessionId, sessionRows] of bySession) {
+      this.sessionOwnerFromRows(sessionId, sessionRows);
+    }
+    return [...bySession.keys()];
+  }
+
   markInterruptedWork(reason: string, ownerIsAlive: (pid: number) => boolean): number {
     return this.transaction(() => {
       const timestamp = now();
@@ -1646,6 +1781,62 @@ export class AgentDatabase {
     }
   }
 
+  /**
+   * Atomically reserves a new worker batch and persists the spawning caller's
+   * resulting ACL definition. A caller-update failure leaves no reserved aliases.
+   */
+  createAgentRunsWithCallerUpdate(
+    runs: readonly AgentRunReservation[],
+    caller: AgentRunDefinitionUpdate,
+  ): void {
+    if (runs.length === 0) {
+      throw new Error("An atomic agent batch must contain at least one run.");
+    }
+    let current: AgentRunReservation | AgentRunDefinitionUpdate | undefined;
+    try {
+      this.transaction(() => {
+        const insert = this.db.prepare(
+          `INSERT INTO runs(
+             id, mode, agent_id, alias, definition, is_primary, startup_state,
+             recovery_eligible, workspace, status, started_at, owner_pid
+           ) VALUES (?, 'agent', ?, ?, ?, ?, 'reserved', 0, ?, 'active', ?, ?)`,
+        );
+        for (const run of runs) {
+          current = run;
+          insert.run(
+            run.id,
+            run.agentId,
+            run.alias,
+            run.definition,
+            run.isPrimary === true ? 1 : 0,
+            run.workspace,
+            now(),
+            run.ownerPid,
+          );
+        }
+        current = caller;
+        const updated = this.db
+          .prepare(
+            `UPDATE runs
+             SET alias = ?, definition = ?
+             WHERE id = ? AND mode = 'agent' AND status = 'active'`,
+          )
+          .run(caller.alias, caller.definition, caller.id);
+        if (updated.changes !== 1) {
+          throw new Error(
+            `Spawning caller run "${caller.id}" could not be updated atomically.`,
+          );
+        }
+      });
+    } catch (error) {
+      if (current) {
+        const workspace = "workspace" in current ? current.workspace : undefined;
+        this.aliasConflict(error, current.alias, workspace);
+      }
+      throw error;
+    }
+  }
+
   /** Creates one durable run owned by one UUID-backed agent. */
   createAgentRun(
     id: string,
@@ -1896,18 +2087,48 @@ export class AgentDatabase {
   }
 
   resumeRun(id: string, ownerPid: number): void {
-    const result = this.db
-      .prepare(
-        `UPDATE runs
-         SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
-         WHERE id = ? AND mode = 'agent' AND status != 'active'
-           AND recovery_eligible = 1 AND startup_state = 'ready'
-           AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
-      )
-      .run(ownerPid, id);
-    if (result.changes !== 1) {
-      throw new Error(`Agent run "${id}" could not be resumed.`);
-    }
+    this.transaction(() => {
+      const run = this.db
+        .prepare(
+          `SELECT runs.agent_id AS agentId, runs.workspace,
+                  agent_sessions.session_id AS sessionId
+           FROM runs
+           JOIN agent_sessions ON agent_sessions.run_id = runs.id
+           WHERE runs.id = ? AND runs.mode = 'agent'
+             AND runs.agent_id IS NOT NULL AND runs.definition IS NOT NULL`,
+        )
+        .get(id) as {
+          agentId: string;
+          workspace: string;
+          sessionId: string;
+        } | undefined;
+      if (!run) {
+        throw new Error(`Agent run "${id}" could not be resumed.`);
+      }
+      const owner = this.sessionOwner(run.sessionId);
+      if (
+        !owner ||
+        owner.agentId !== run.agentId ||
+        owner.workspace !== run.workspace
+      ) {
+        throw new Error(
+          `Agent run "${id}" cannot resume SDK session "${run.sessionId}" because its durable ` +
+            "ownership is missing or belongs to another agent.",
+        );
+      }
+      const result = this.db
+        .prepare(
+          `UPDATE runs
+           SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
+           WHERE id = ? AND mode = 'agent' AND status != 'active'
+             AND recovery_eligible = 1 AND startup_state = 'ready'
+             AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+        )
+        .run(ownerPid, id);
+      if (result.changes !== 1) {
+        throw new Error(`Agent run "${id}" could not be resumed.`);
+      }
+    });
   }
 
   updateAgentRun(
@@ -1915,19 +2136,38 @@ export class AgentDatabase {
     alias: string,
     definition: string,
   ): void {
+    this.updateAgentRuns([{ id, alias, definition }]);
+  }
+
+  /** Atomically replaces one or more persisted agent definitions. */
+  updateAgentRuns(updates: readonly AgentRunDefinitionUpdate[]): void {
+    const ids = new Set<string>();
+    for (const update of updates) {
+      if (ids.has(update.id)) {
+        throw new Error(`Agent run "${update.id}" was included more than once in one update.`);
+      }
+      ids.add(update.id);
+    }
+    let current: AgentRunDefinitionUpdate | undefined;
     try {
-      const result = this.db
-        .prepare(
+      this.transaction(() => {
+        const updateRun = this.db.prepare(
           `UPDATE runs
            SET alias = ?, definition = ?
            WHERE id = ? AND mode = 'agent'`,
-        )
-        .run(alias, definition, id);
-      if (result.changes !== 1) {
-        throw new Error(`Agent run "${id}" could not be updated with a new definition.`);
-      }
+        );
+        for (const update of updates) {
+          current = update;
+          const result = updateRun.run(update.alias, update.definition, update.id);
+          if (result.changes !== 1) {
+            throw new Error(
+              `Agent run "${update.id}" could not be updated with a new definition.`,
+            );
+          }
+        }
+      });
     } catch (error) {
-      this.aliasConflict(error, alias);
+      this.aliasConflict(error, current?.alias ?? "unknown");
     }
   }
 
@@ -2003,6 +2243,30 @@ export class AgentDatabase {
   /** Persists the single SDK session owned by a run. */
   upsertSession(runId: string, sessionId: string, state: string): void {
     this.transaction(() => {
+      const run = this.db
+        .prepare(
+          `SELECT agent_id AS agentId, workspace
+           FROM runs
+           WHERE id = ? AND mode = 'agent'
+             AND agent_id IS NOT NULL AND definition IS NOT NULL`,
+        )
+        .get(runId) as { agentId: string; workspace: string } | undefined;
+      if (!run) {
+        throw new Error(
+          `Agent run "${runId}" cannot claim SDK session "${sessionId}".`,
+        );
+      }
+      const owner = this.sessionOwner(sessionId);
+      if (
+        owner &&
+        (owner.agentId !== run.agentId || owner.workspace !== run.workspace)
+      ) {
+        throw new Error(
+          `SDK session "${sessionId}" is already durably owned by agent ` +
+            `"${owner.agentId}" in workspace "${owner.workspace}" and cannot be assigned to ` +
+            `agent "${run.agentId}" in workspace "${run.workspace}".`,
+        );
+      }
       this.db
         .prepare(
           `INSERT INTO agent_sessions(run_id, session_id, state, last_active_at)

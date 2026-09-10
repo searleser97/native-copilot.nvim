@@ -1367,7 +1367,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
     for (const definition of request.agents) {
       batchAliases.set(definition.id, randomUUID());
     }
-    const failedAgentIds = new Set<string>();
     const resolveSelectors = (selectors: string[], sourceAgentId: string): string[] => {
       const resolved: string[] = [];
       for (const selector of selectors) {
@@ -1377,9 +1376,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         }
         const batch = batchAliases.get(selector);
         if (batch) {
-          if (!failedAgentIds.has(batch)) {
-            resolved.push(batch);
-          }
+          resolved.push(batch);
           continue;
         }
         if (selector.startsWith("agent:")) {
@@ -1397,10 +1394,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
       }
       return resolved;
     };
-    const results: Array<Record<string, unknown>> = [];
-    for (const definition of request.agents) {
+    const agents = request.agents.map((definition) => {
       const agentId = batchAliases.get(definition.id)!;
-      const agent: ScriptedAgent = {
+      return {
         agentId,
         target: `agent:${agentId}`,
         alias: definition.id,
@@ -1411,20 +1407,46 @@ export class ScriptedRuntime implements RuntimeAdapter {
         observes: resolveSelectors(definition.canObserve, agentId),
         runId: randomUUID(),
         sessionId: `e2e-agent-session-${definition.id}`,
-      };
-      this.agents.set(agentId, agent);
+      } satisfies ScriptedAgent;
+    });
+    const nextCaller: ScriptedAgent = {
+      ...caller,
+      recipients: [
+        ...new Set([
+          ...caller.recipients,
+          ...request.callerCanTalkTo.map((alias) => batchAliases.get(alias)!),
+        ]),
+      ],
+      observes: [
+        ...new Set([
+          ...caller.observes,
+          ...request.callerCanObserve.map((alias) => batchAliases.get(alias)!),
+        ]),
+      ],
+    };
+    this.db.createAgentRunsWithCallerUpdate(
+      agents.map((agent) => ({
+        id: agent.runId,
+        agentId: agent.agentId,
+        alias: agent.alias,
+        definition: this.storedAgentJson(agent),
+        workspace: this.workspace,
+        ownerPid: process.pid,
+      })),
+      {
+        id: caller.runId,
+        alias: caller.alias,
+        definition: this.storedAgentJson(nextCaller),
+      },
+    );
+    caller.recipients = nextCaller.recipients;
+    caller.observes = nextCaller.observes;
+
+    const results: Array<Record<string, unknown>> = [];
+    for (const agent of agents) {
+      this.agents.set(agent.agentId, agent);
       const transition = this.beginTransition(agent, "starting its scripted task");
-      let runCreated = false;
       try {
-        this.db.createAgentRun(
-          agent.runId,
-          agent.agentId,
-          agent.alias,
-          this.storedAgentJson(agent),
-          this.workspace,
-          process.pid,
-        );
-        runCreated = true;
         this.db.upsertSession(agent.runId, agent.sessionId, "connected");
         this.emit("agent.loading", { ...this.agentPayload(agent), recovered: false }, {
           runId: agent.runId,
@@ -1473,24 +1495,21 @@ export class ScriptedRuntime implements RuntimeAdapter {
         results.push({ ...this.agentPayload(agent), sessionId: agent.sessionId, started: true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        failedAgentIds.add(agent.agentId);
         this.agents.delete(agent.agentId);
-        if (runCreated) {
-          const permanentlyDisqualified = this.db.failAgentStartup(
-            agent.runId,
-            this.workspace,
-            agent.agentId,
-            message,
-          );
-          if (permanentlyDisqualified) {
-            for (const related of this.agents.values()) {
-              related.recipients = related.recipients.filter(
-                (agentId) => agentId !== agent.agentId,
-              );
-              related.observes = related.observes.filter(
-                (agentId) => agentId !== agent.agentId,
-              );
-            }
+        const permanentlyDisqualified = this.db.failAgentStartup(
+          agent.runId,
+          this.workspace,
+          agent.agentId,
+          message,
+        );
+        if (permanentlyDisqualified) {
+          for (const related of [caller, ...agents]) {
+            related.recipients = related.recipients.filter(
+              (agentId) => agentId !== agent.agentId,
+            );
+            related.observes = related.observes.filter(
+              (agentId) => agentId !== agent.agentId,
+            );
           }
         }
         results.push({
@@ -1502,21 +1521,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
         this.endTransition(agent, transition);
       }
     }
-    for (const alias of request.callerCanTalkTo) {
-      const agentId = batchAliases.get(alias)!;
-      if (!failedAgentIds.has(agentId)) {
-        caller.recipients.push(agentId);
-      }
-    }
-    for (const alias of request.callerCanObserve) {
-      const agentId = batchAliases.get(alias)!;
-      if (!failedAgentIds.has(agentId)) {
-        caller.observes.push(agentId);
-      }
-    }
-    caller.recipients = [...new Set(caller.recipients)];
-    caller.observes = [...new Set(caller.observes)];
-    this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
     return results;
   }
 
@@ -1601,46 +1605,73 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }
     const transition = this.beginTransition(agent, "updating its definition");
     try {
-    const resolveSelectors = (selectors: string[]): string[] =>
-      selectors.map((selector) => {
-        if (selector === "caller") return caller.agentId;
-        if (selector.startsWith("agent:")) {
-          const agentId = selector.slice("agent:".length);
-          if (agentId !== agent.agentId && this.agents.has(agentId)) return agentId;
-        }
-        const recipient = [...this.agents.values()].find(
-          (candidate) => candidate.alias === selector && candidate.agentId !== agent.agentId,
+      const resolveSelectors = (selectors: string[]): string[] =>
+        selectors.map((selector) => {
+          if (selector === "caller") return caller.agentId;
+          if (selector.startsWith("agent:")) {
+            const agentId = selector.slice("agent:".length);
+            if (agentId !== agent.agentId && this.agents.has(agentId)) return agentId;
+          }
+          const recipient = [...this.agents.values()].find(
+            (candidate) => candidate.alias === selector && candidate.agentId !== agent.agentId,
+          );
+          if (!recipient) {
+            throw new Error(`Scripted agent selector "${selector}" does not resolve.`);
+          }
+          return recipient.agentId;
+        });
+      const nextAgent: ScriptedAgent = {
+        ...agent,
+        alias: update.definition.id,
+        displayName: update.definition.displayName,
+        description: update.definition.description,
+        task: update.definition.task,
+        recipients: resolveSelectors(update.definition.canTalkTo),
+        observes: resolveSelectors(update.definition.canObserve),
+      };
+      let nextCallerRecipients = [...caller.recipients];
+      let nextCallerObserves = [...caller.observes];
+      if (update.callerCanTalk === true) {
+        nextCallerRecipients = [...new Set([...nextCallerRecipients, agent.agentId])];
+      } else if (update.callerCanTalk === false) {
+        nextCallerRecipients = nextCallerRecipients.filter(
+          (agentId) => agentId !== agent.agentId,
         );
-        if (!recipient) {
-          throw new Error(`Scripted agent selector "${selector}" does not resolve.`);
-        }
-        return recipient.agentId;
+      }
+      if (update.callerCanObserve === true) {
+        nextCallerObserves = [...new Set([...nextCallerObserves, agent.agentId])];
+      } else if (update.callerCanObserve === false) {
+        nextCallerObserves = nextCallerObserves.filter(
+          (agentId) => agentId !== agent.agentId,
+        );
+      }
+      const nextCaller: ScriptedAgent = {
+        ...caller,
+        recipients: nextCallerRecipients,
+        observes: nextCallerObserves,
+      };
+      this.db.updateAgentRuns([
+        {
+          id: nextAgent.runId,
+          alias: nextAgent.alias,
+          definition: this.storedAgentJson(nextAgent),
+        },
+        {
+          id: nextCaller.runId,
+          alias: nextCaller.alias,
+          definition: this.storedAgentJson(nextCaller),
+        },
+      ]);
+      Object.assign(agent, nextAgent);
+      caller.recipients = nextCallerRecipients;
+      caller.observes = nextCallerObserves;
+      this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: true }, {
+        runId: agent.runId,
+        memberId: agent.target,
+        target: "status",
+        done: true,
       });
-    agent.alias = update.definition.id;
-    agent.displayName = update.definition.displayName;
-    agent.description = update.definition.description;
-    agent.task = update.definition.task;
-    agent.recipients = resolveSelectors(update.definition.canTalkTo);
-    agent.observes = resolveSelectors(update.definition.canObserve);
-    if (update.callerCanTalk === true) {
-      caller.recipients = [...new Set([...caller.recipients, agent.agentId])];
-    } else if (update.callerCanTalk === false) {
-      caller.recipients = caller.recipients.filter((agentId) => agentId !== agent.agentId);
-    }
-    if (update.callerCanObserve === true) {
-      caller.observes = [...new Set([...caller.observes, agent.agentId])];
-    } else if (update.callerCanObserve === false) {
-      caller.observes = caller.observes.filter((agentId) => agentId !== agent.agentId);
-    }
-    this.db.updateAgentRun(agent.runId, agent.alias, this.storedAgentJson(agent));
-    this.db.updateAgentRun(caller.runId, caller.alias, this.storedAgentJson(caller));
-    this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: true }, {
-      runId: agent.runId,
-      memberId: agent.target,
-      target: "status",
-      done: true,
-    });
-    return { action: "updated", ...this.agentPayload(agent), reconnected: true };
+      return { action: "updated", ...this.agentPayload(agent), reconnected: true };
     } finally {
       this.endTransition(agent, transition);
     }

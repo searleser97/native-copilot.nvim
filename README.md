@@ -195,10 +195,12 @@ request interactive approval, or
 define a stricter path/tool/action ceiling. A child may request `approveAll` only when the main
 command grants it, preventing privilege escalation. While a busy long-lived session is silent, the
 host checks the SDK's durable event and pending-permission state. Missed lifecycle events are
-replayed once, interactive permissions are restored to the Neovim picker, and `approveAll`
-requests are resolved through the same guarded handler. Permission and MCP-auth callbacks are
-bound to the exact agent generation and SDK session that created them; lifecycle transitions
-synchronously invalidate old callbacks and reject their pending requests before disconnect begins.
+replayed once, and each pending permission is matched back to its original full request before the
+same generation/session-bound evaluator applies MCP, path, tool, managed-approval, and
+`approveAll` rules. Requests whose original policy inputs cannot be reconstructed are denied
+closed. Permission and MCP-auth callbacks are bound to the exact agent generation and SDK session
+that created them; lifecycle transitions synchronously invalidate old callbacks and reject their
+pending requests before disconnect begins.
 
 Commands mirror the primary mappings:
 
@@ -251,9 +253,9 @@ Every participant receives:
 A call to `native_copilot_spawn_agents` may create several agents, but the request is not persisted
 as a group and does not become a lifecycle or routing boundary. Agents remain independently
 stoppable, recoverable, configurable, and addressable. Their run rows and aliases are reserved in
-one transaction before any child is announced; SDK session startup remains independent. A reserved
-additional-agent run becomes recoverable only after its SDK session is persisted and its initial
-task is accepted.
+one transaction with the primary caller's requested ACL grants before any child is announced; SDK
+session startup remains independent. A reserved additional-agent run becomes recoverable only
+after its SDK session is persisted and its initial task is accepted.
 If one child fails before that point, its alias reservation is released and its UUID is removed
 from every persisted workspace ACL (and every active in-memory ACL) without preventing the other
 children from starting. Both the UUID arrays and the corresponding definition selectors are
@@ -287,7 +289,10 @@ same native configuration as the main agent:
 - **MCP configuration** — servers discovered from the workspace plus every `--additional-mcp-config`
   source (parsed once into a single native MCP-server record) are inherited by all sessions. A
   user-provided `--additional-mcp-config` that is missing, unreadable, invalid JSON, or the wrong
-  shape surfaces a clear error rather than being silently dropped.
+  shape surfaces a clear error rather than being silently dropped. The reserved
+  `github-mcp-server` name receives a `gh auth token` only when SDK discovery identifies the unique
+  built-in server and its requested HTTPS URL exactly matches an allowlisted GitHub Copilot MCP
+  endpoint. User, workspace, plugin, and launch-provided overrides fail closed.
 - **Native tool / MCP policy** — `--available-tools`, `--excluded-tools`, and `--disable-mcp-server`
   from the main command apply to every session as a shared ceiling. A bare `*` pattern is normalized
   into SDK-valid source-qualified patterns (`builtin:*`, `custom:*`, `mcp:*`) before any session
@@ -325,6 +330,9 @@ idle. Each requested agent then starts independently and receives its own `task`
 
 `native_copilot_update_agent` replaces one complete definition and may change its operating prompt,
 model, reasoning, permissions, MCP subset, task, communication ACL, or observation ACL.
+Management changes that can alter the primary caller's outgoing ACL take the primary and target
+locks in deterministic UUID order. The target definition and caller ACL are committed in one
+SQLite transaction; reconnect rollback reverses only that operation's caller grant delta.
 Configuration changes reconnect the SDK session while preserving its session ID and conversation
 history. Reconnects carry forward rendered SDK event IDs and incrementally replay only unseen
 durable history, so stale callbacks are dropped without losing messages or tool completions emitted
@@ -336,7 +344,10 @@ per-agent stop and recovery actions.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
 mailbox, communication and observation ACLs, and original MCP ceiling. Active runs owned by another
-Neovim instance are never offered.
+Neovim instance are never offered. A persisted SDK session may be owned by historical runs of only
+one durable agent UUID. Session pickers hide every recoverable or currently-starting owned session;
+primary replacement accepts only an unowned session or one already owned by that same primary UUID,
+and worker recovery rejects live, externally in-use, or differently owned sessions.
 
 The primary agent is reclaimed through the same stored context/session path on host restart.
 `/resume` keeps its durable agent UUID and dynamic UI target while creating a coherent replacement
@@ -431,14 +442,18 @@ Interrupted delivery returns to `pending` after restart.
 Copilot’s session store remains authoritative for full conversation history. SQLite stores
 UUID/session mappings, all agent runs (including the primary), UUID-backed communication and
 observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v11 adds
-explicit startup durability to v10 state; schema v12 adds generation-safe delivery lease tokens.
+explicit startup durability to v10 state; schema v12 adds generation-safe delivery lease tokens
+and indexed durable SDK-session ownership checks.
 Migrations take the SQLite write lock before reading the schema version, migrate v8 worker
 definitions and mailboxes in place, adopt legacy primary-session state into the new primary agent
 idempotently, enforce primary/non-primary alias reservations atomically, and keep failed or
-taskless startups out of recovery selection. A v10 non-primary run is recoverable only when it has
+taskless startups out of recovery selection. The v11-to-v12 upgrade reruns the conservative startup
+classifier and ACL scrub: a non-primary run is recoverable only when it has
 both a persisted SDK session and a delivered user task; session-only rows are failed, release their
 aliases, and are removed from related ACLs. Primary rows require their persisted session but do not
-require a user task. The migration does not duplicate conversation or SDK event history.
+require a user task. A session-id index and startup consistency check reject persisted ownership by
+multiple agent UUIDs while allowing historical runs of the same UUID. The migration is idempotent
+and does not duplicate conversation or SDK event history.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.
