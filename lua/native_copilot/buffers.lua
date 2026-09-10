@@ -208,6 +208,7 @@ local function follow_bottom(view, move_cursor, force)
 end
 
 local function finalize_render(view)
+  if view.history_replaying then return end
   follow_bottom(view)
 end
 
@@ -229,7 +230,7 @@ local function configure_folds(view)
 end
 
 local function refresh_folds(view)
-  if view.id ~= 'conversation' then return end
+  if view.id ~= 'conversation' or view.history_replaying then return end
   for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
     if vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_call(win, function()
@@ -404,6 +405,7 @@ function M.prepare_history(member_id, event_time)
   view.last_block_kind = nil
   view.history_prepared = true
   view.history_environment_started = false
+  view.history_replaying = true
   view.session_id = nil
 end
 
@@ -462,7 +464,19 @@ local function flush(view)
       )
     end
   end
-  follow_bottom(view)
+  if not view.history_replaying then follow_bottom(view) end
+end
+
+function M.begin_history_replay(member_id)
+  M.ensure_member(member_id).views.conversation.history_replaying = true
+end
+
+function M.finish_history_replay(member_id)
+  local view = M.ensure_member(member_id).views.conversation
+  flush(view)
+  view.history_replaying = false
+  refresh_folds(view)
+  follow_bottom(view, true, true)
 end
 
 local function schedule_flush(view)
@@ -475,13 +489,24 @@ end
 
 local function ensure_trailing_empty_rows(view, count)
   flush(view)
-  local lines = vim.api.nvim_buf_get_lines(view.buf, 0, -1, false)
+  local line_count = vim.api.nvim_buf_line_count(view.buf)
   local trailing = 0
-  for index = #lines, 1, -1 do
-    if lines[index]:match('^%s*$') then
-      trailing = trailing + 1
-    else
-      break
+  local end_row = line_count
+  while end_row > 0 do
+    local start_row = math.max(0, end_row - 64)
+    local lines = vim.api.nvim_buf_get_lines(view.buf, start_row, end_row, false)
+    for index = #lines, 1, -1 do
+      if lines[index]:match('^%s*$') then
+        trailing = trailing + 1
+      else
+        end_row = 0
+        break
+      end
+    end
+    if end_row > 0 then end_row = start_row end
+    if trailing > count and end_row > 0 then
+      local previous = vim.api.nvim_buf_get_lines(view.buf, end_row - 1, end_row, false)[1] or ''
+      if not previous:match('^%s*$') then break end
     end
   end
   if trailing == count then return end
@@ -489,15 +514,15 @@ local function ensure_trailing_empty_rows(view, count)
     if trailing > count then
       vim.api.nvim_buf_set_lines(
         view.buf,
-        #lines - (trailing - count),
-        #lines,
+        line_count - (trailing - count),
+        line_count,
         false,
         {}
       )
     else
       local additions = {}
       for _ = 1, count - trailing do table.insert(additions, '') end
-      vim.api.nvim_buf_set_lines(view.buf, #lines, #lines, false, additions)
+      vim.api.nvim_buf_set_lines(view.buf, line_count, line_count, false, additions)
     end
   end)
 end

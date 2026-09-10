@@ -137,6 +137,7 @@ local state = {
   session_metrics = {},
   member_activity = {},
   schedules = {},
+  history_replays = {},
   resume_request_id = nil,
   resume_cursor_animation_restore = nil,
 }
@@ -940,7 +941,7 @@ local function render_shell_tool_call(member_id, item)
   })
 end
 
-local function update_tool_call(member_id, call_id, tool_name, status, details)
+local function update_tool_call(member_id, call_id, tool_name, status, details, history_replay)
   local activity = state.tool_calls[member_id]
   if not activity then
     activity = { order = {}, items = {} }
@@ -1001,12 +1002,12 @@ local function update_tool_call(member_id, call_id, tool_name, status, details)
   local terminal = status ~= 'running'
   item.timeline_id = item.timeline_id or ('tool:' .. call_id)
   if item.is_shell then
-    if not item.async and status == 'running' then
+    if not history_replay and not item.async and status == 'running' then
       buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
     end
     render_shell_tool_call(member_id, item)
   else
-    if not item.async then
+    if not history_replay and not item.async then
       buffers.begin_response(member_id, 'tool:' .. tostring(call_id), item.created_at)
     end
     buffers.upsert_timeline(member_id, item.timeline_id, {
@@ -2361,13 +2362,13 @@ local function history_event(member_id, event, context)
       arguments = data.arguments,
       shellToolInfo = data.shellToolInfo,
       created_at = event_time,
-    })
+    }, true)
   elseif event.type == 'tool.execution_complete' then
     update_tool_call(member_id, data.toolCallId or event.id, data.toolName, data.success == false and 'failed' or 'completed', {
       result = data.result,
       error = data.error,
       created_at = event_time,
-    })
+    }, true)
   elseif event.type == 'subagent.started' then
     local arguments = context.tool_arguments[tostring(data.toolCallId or '')]
     history_task(member_id, {
@@ -3146,19 +3147,43 @@ function M._on_event(message)
   if message.type == 'session.history' then
     local first_event = type(payload.events) == 'table' and payload.events[1] or nil
     local first_timestamp = first_event and tonumber(json_value(first_event.replayTimestamp))
-    if json_value(payload.incremental) ~= true then
+    local replay_id = json_value(payload.replayId)
+    local chunked = replay_id ~= nil
+    local first_chunk = not chunked or json_value(payload.first) == true
+    local last_chunk = not chunked or json_value(payload.last) == true
+    if first_chunk and json_value(payload.incremental) ~= true then
       buffers.prepare_history(
         member_id,
         first_timestamp and math.floor(first_timestamp / 1000) or nil
       )
+    elseif first_chunk then
+      buffers.begin_history_replay(member_id)
     end
-    local context = {
-      agent_messages = {},
-      agent_tool_prompts = {},
-      tool_arguments = {},
-    }
+    local context = chunked and state.history_replays[replay_id] or nil
+    if not context then
+      context = {
+        agent_messages = {},
+        agent_tool_prompts = {},
+        tool_arguments = {},
+      }
+      if chunked then state.history_replays[replay_id] = context end
+    end
     for _, event in ipairs(payload.events or {}) do history_event(member_id, event, context) end
-    finish_history_context(member_id, context)
+    local loaded = tonumber(json_value(payload.loadedEvents))
+    local total = tonumber(json_value(payload.totalEvents))
+    if loaded and total and total > 0 then
+      set_member_activity(
+        member_id,
+        ('Loading history — %d / %d'):format(loaded, total),
+        false
+      )
+    end
+    if last_chunk then
+      finish_history_context(member_id, context)
+      buffers.finish_history_replay(member_id)
+      if chunked then state.history_replays[replay_id] = nil end
+      set_member_activity(member_id, 'Loading environment', false)
+    end
   elseif message.type == 'scheduled.prompt' then
     local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
     local schedule_id = json_value(payload.scheduleId)

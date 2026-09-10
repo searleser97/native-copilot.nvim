@@ -453,12 +453,122 @@ function primaryAgentDefinition(alias: string): DynamicAgentDefinition {
 const ACTIVITY_MAX_BYTES = 30 * 1024;
 const ACTIVITY_MAX_EVENTS = 100;
 const ACTIVITY_MAX_READS = 32;
+const HISTORY_CHUNK_MAX_BYTES = 512 * 1024;
+const HISTORY_CHUNK_MAX_EVENTS = 500;
 const MAILBOX_RETRY_BASE_MS = 250;
 const MAILBOX_RETRY_MAX_MS = 5_000;
 const omittedActivityEventTypes = new Set<SessionEvent["type"]>([
   "assistant.message_delta",
   "assistant.reasoning_delta",
 ]);
+
+interface HistoryReplayEvent {
+  id: string;
+  type: string;
+  timestamp: string;
+  replayTimestamp: number;
+  agentId?: string;
+  data: Record<string, unknown>;
+}
+
+function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefined {
+  if (event.ephemeral === true) {
+    return undefined;
+  }
+  const data = event.data as unknown as Record<string, unknown>;
+  let compactData: Record<string, unknown>;
+  switch (event.type) {
+    case "user.message":
+      if (!data.content && !data.prompt) return undefined;
+      compactData = {
+        content: data.content,
+        prompt: data.prompt,
+        source: data.source,
+      };
+      break;
+    case "assistant.message":
+      if (event.agentId !== undefined || !data.content) return undefined;
+      compactData = {
+        content: data.content,
+        messageId: data.messageId,
+      };
+      break;
+    case "assistant.reasoning":
+      if (event.agentId !== undefined || !data.content) return undefined;
+      compactData = {
+        content: data.content,
+        reasoningId: data.reasoningId,
+      };
+      break;
+    case "tool.execution_start":
+      if (event.agentId !== undefined) return undefined;
+      compactData = {
+        toolCallId: data.toolCallId,
+        toolName: data.toolName,
+        arguments: data.arguments,
+        shellToolInfo: data.shellToolInfo,
+      };
+      break;
+    case "tool.execution_complete":
+      if (event.agentId !== undefined) return undefined;
+      compactData = {
+        toolCallId: data.toolCallId,
+        toolName: data.toolName,
+        success: data.success,
+        result: data.result,
+        error: data.error,
+      };
+      break;
+    case "subagent.started":
+    case "subagent.completed":
+    case "subagent.failed":
+    case "system.notification":
+    case "session.schedule_created":
+    case "session.schedule_cancelled":
+    case "session.schedule_rearmed":
+    case "session.error":
+    case "session.warning":
+    case "session.info":
+      compactData = data;
+      break;
+    default:
+      return undefined;
+  }
+  return {
+    id: event.id,
+    type: event.type,
+    timestamp: event.timestamp,
+    replayTimestamp: Date.parse(event.timestamp),
+    ...(event.agentId === undefined ? {} : { agentId: event.agentId }),
+    data: compactData,
+  };
+}
+
+function historyChunks(events: HistoryReplayEvent[]): HistoryReplayEvent[][] {
+  const chunks: HistoryReplayEvent[][] = [];
+  let current: HistoryReplayEvent[] = [];
+  let currentBytes = 2;
+  for (const event of events) {
+    const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8") + 1;
+    if (
+      current.length > 0 &&
+      (
+        current.length >= HISTORY_CHUNK_MAX_EVENTS ||
+        currentBytes + eventBytes > HISTORY_CHUNK_MAX_BYTES
+      )
+    ) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 2;
+    }
+    current.push(event);
+    currentBytes += eventBytes;
+  }
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+}
 
 const environmentProbes: EnvironmentProbe[] = [
   {
@@ -3695,17 +3805,31 @@ export class CopilotRuntime implements RuntimeAdapter {
         live.seenEventIds.add(event.id);
       }
       if (continuity === undefined || replayEvents.length > 0) {
-        this.emit(
-          "session.history",
-          {
-            events: replayEvents.map((event) => ({
-              ...event,
-              replayTimestamp: Date.parse(event.timestamp),
-            })),
-            incremental: continuity !== undefined,
-          },
-          { runId, memberId: target, target: "conversation", done: true },
-        );
+        const compactEvents = replayEvents
+          .map(compactHistoryEvent)
+          .filter((event): event is HistoryReplayEvent => event !== undefined);
+        const chunks = historyChunks(compactEvents);
+        const replayId = randomUUID();
+        const replayChunks = chunks.length > 0 ? chunks : [[]];
+        let loadedEvents = 0;
+        for (const [chunkIndex, events] of replayChunks.entries()) {
+          loadedEvents += events.length;
+          this.emit(
+            "session.history",
+            {
+              events,
+              incremental: continuity !== undefined,
+              replayId,
+              chunkIndex,
+              chunkCount: replayChunks.length,
+              loadedEvents,
+              totalEvents: compactEvents.length,
+              first: chunkIndex === 0,
+              last: chunkIndex === replayChunks.length - 1,
+            },
+            { runId, memberId: target, target: "conversation", done: true },
+          );
+        }
       }
       if (continuity === undefined) {
         this.emit(

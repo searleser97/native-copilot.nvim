@@ -884,8 +884,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       target,
       agentId: primary.agentId,
       }, { runId: primary.runId, memberId: target, target: "status", done: false });
-      this.emit("session.history", {
-      events: [
+      const historyEvents = [
         {
           id: "cli-user-1",
           parentId: null,
@@ -1248,8 +1247,28 @@ export class ScriptedRuntime implements RuntimeAdapter {
       ].map((event) => ({
         ...event,
         replayTimestamp: Date.parse(event.timestamp),
-      })),
-    }, { runId: primary.runId, memberId: target, target: "conversation", done: true });
+      }));
+      const replayId = "e2e-cli-history-replay";
+      const chunkSize = Math.ceil(historyEvents.length / 3);
+      const historyChunks = [
+        historyEvents.slice(0, chunkSize),
+        historyEvents.slice(chunkSize, chunkSize * 2),
+        historyEvents.slice(chunkSize * 2),
+      ];
+      let loadedEvents = 0;
+      for (const [chunkIndex, events] of historyChunks.entries()) {
+        loadedEvents += events.length;
+        this.emit("session.history", {
+          events,
+          replayId,
+          chunkIndex,
+          chunkCount: historyChunks.length,
+          loadedEvents,
+          totalEvents: historyEvents.length,
+          first: chunkIndex === 0,
+          last: chunkIndex === historyChunks.length - 1,
+        }, { runId: primary.runId, memberId: target, target: "conversation", done: true });
+      }
     this.emit("session.identity", {
       sessionId,
     }, { runId: primary.runId, memberId: target, target: "activity", done: true });
