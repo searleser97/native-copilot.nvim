@@ -2344,8 +2344,10 @@ local function history_event(member_id, event, context)
   then
     -- Sub-agent internals belong to the Task lifecycle, not the root Copilot transcript.
     return
+  elseif event.type == 'assistant.turn_start' then
+    buffers.begin_history_turn(member_id)
   elseif event.type == 'assistant.turn_end' or event.type == 'session.idle' then
-    buffers.finish_response(member_id, event_time)
+    buffers.finish_history_turn(member_id)
   elseif event.type == 'assistant.message' and data.content then
     buffers.complete_conversation(member_id, data.messageId or event.id, data.content, event_time)
   elseif event.type == 'assistant.reasoning' and data.content then
@@ -2407,6 +2409,7 @@ local function history_event(member_id, event, context)
 end
 
 local function finish_history_context(member_id, context)
+  buffers.finish_history_turn(member_id)
   buffers.finish_response(member_id)
   for _, message in ipairs(context.agent_messages) do
     local key = tostring(message.content):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')

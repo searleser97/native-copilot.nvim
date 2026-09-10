@@ -1285,10 +1285,8 @@ tick = function()
     end
     resume_cli_session()
   elseif phase == 'resume' then
-    if not check(
-      not content:find('\nwriting', 1, true),
-      'CLI session replay did not show a live writing indicator'
-    ) then
+    if content:find('\nwriting', 1, true) then
+      check(false, 'CLI session replay did not show a live writing indicator')
       return
     end
     local user_message =
@@ -1442,6 +1440,7 @@ tick = function()
     ) then
       return
     end
+    pass('CLI session replay did not show a live writing indicator')
     if not check(
       not has_quoted_instruction(content),
       'CLI session replay rendered instruction discovery without blockquote markers'

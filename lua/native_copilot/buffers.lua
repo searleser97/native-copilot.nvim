@@ -406,6 +406,7 @@ function M.prepare_history(member_id, event_time)
   view.history_prepared = true
   view.history_environment_started = false
   view.history_replaying = true
+  view.history_turn_active = false
   view.session_id = nil
 end
 
@@ -469,6 +470,10 @@ end
 
 function M.begin_history_replay(member_id)
   M.ensure_member(member_id).views.conversation.history_replaying = true
+end
+
+function M.begin_history_turn(member_id)
+  M.ensure_member(member_id).views.conversation.history_turn_active = true
 end
 
 function M.finish_history_replay(member_id)
@@ -1263,7 +1268,12 @@ function M.upsert_timeline(member_id, item_id, item)
   flush(view)
   if (item.defer_until_idle or (item.actor_message and not item.status_notice))
     and (item.kind == 'task' or item.kind == 'tool' or item.status_notice)
-    and (view.streaming or view.active_message or view.awaiting_response)
+    and (
+      view.streaming
+      or view.active_message
+      or view.awaiting_response
+      or view.history_turn_active
+    )
   then
     local deferred = view.deferred_timeline
     local queued = deferred.items[item_id]
@@ -1362,6 +1372,12 @@ local function flush_deferred_timeline(member_id, view)
       view.timeline_time_overrides[item_id] = queued.created_at
       M.upsert_timeline(member_id, item_id, queued.item)
     end
+  end
+
+  function M.finish_history_turn(member_id)
+    local view = M.ensure_member(member_id).views.conversation
+    view.history_turn_active = false
+    flush_deferred_timeline(member_id, view)
   end
 end
 

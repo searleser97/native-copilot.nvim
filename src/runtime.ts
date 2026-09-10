@@ -500,6 +500,14 @@ function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefine
         reasoningId: data.reasoningId,
       };
       break;
+    case "assistant.turn_start":
+    case "assistant.turn_end":
+      if (event.agentId !== undefined) return undefined;
+      compactData = { turnId: data.turnId };
+      break;
+    case "session.idle":
+      compactData = {};
+      break;
     case "tool.execution_start":
       if (event.agentId !== undefined) return undefined;
       compactData = {
