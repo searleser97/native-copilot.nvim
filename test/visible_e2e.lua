@@ -31,6 +31,7 @@ local completed = false
 local primary_target
 local primary_ready_count = 0
 local resume_ready_count
+local history_tool_result_count = 0
 local tick
 
 vim.opt.runtimepath:prepend(root)
@@ -55,6 +56,9 @@ native._on_event = function(message)
     primary_target = payload.target or message.memberId or primary_target
   end
   if message.type == 'primary.ready' then primary_ready_count = primary_ready_count + 1 end
+  if message.type == 'history.tool_result' then
+    history_tool_result_count = history_tool_result_count + 1
+  end
   local ok, failure = xpcall(on_event, debug.traceback, message)
   if not ok then
     append_trace({ 'event_error=' .. tostring(failure):gsub('\n', '\\n') })
@@ -1512,6 +1516,16 @@ tick = function()
     local detail_content = text(detail_buf)
     if detail_content:find('Historical Tool result is unavailable', 1, true) then
       check(false, 'historical Tool result loaded lazily in the details window')
+      return
+    end
+    if history_tool_result_count > 0
+      and not detail_content:find('timestamp probe complete', 1, true)
+    then
+      check(
+        false,
+        'historical Tool result updated the open details window: '
+          .. detail_content:gsub('\n', '\\n')
+      )
       return
     end
     if not detail_content:find('timestamp probe complete', 1, true) then
