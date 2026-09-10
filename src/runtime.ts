@@ -829,6 +829,311 @@ function withinPermissionCeiling(): PermissionNoResult {
   return { kind: "no-result" };
 }
 
+type ShellPermissionRequest = Extract<PermissionRequest, { kind: "shell" }>;
+
+const RAW_READ_ONLY_GIT_COMMANDS = new Set([
+  "annotate",
+  "blame",
+  "cat-file",
+  "check-attr",
+  "check-ignore",
+  "check-mailmap",
+  "check-ref-format",
+  "count-objects",
+  "describe",
+  "diff",
+  "diff-files",
+  "diff-index",
+  "diff-tree",
+  "for-each-ref",
+  "fsck",
+  "grep",
+  "help",
+  "log",
+  "ls-files",
+  "ls-remote",
+  "ls-tree",
+  "merge-base",
+  "name-rev",
+  "rev-list",
+  "rev-parse",
+  "shortlog",
+  "show",
+  "show-branch",
+  "show-index",
+  "show-ref",
+  "status",
+  "verify-commit",
+  "verify-pack",
+  "verify-tag",
+  "version",
+  "whatchanged",
+]);
+
+function executableName(identifier: string): string {
+  let normalized = identifier.trim();
+  if (
+    normalized.length >= 2 &&
+    (
+      (normalized.startsWith('"') && normalized.endsWith('"')) ||
+      (normalized.startsWith("'") && normalized.endsWith("'"))
+    )
+  ) {
+    normalized = normalized.slice(1, -1);
+  }
+  const segments = normalized.replaceAll("\\", "/").split("/");
+  return segments[segments.length - 1]!.toLowerCase();
+}
+
+export function isGitExecutable(identifier: string): boolean {
+  const name = executableName(identifier);
+  return name === "git" || name === "git.exe" || name === "git.cmd" || name === "git.bat";
+}
+
+function tokenizeShellCommands(commandText: string): string[][] {
+  const commands: string[][] = [];
+  let tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  const pushToken = () => {
+    if (token.length > 0) {
+      tokens.push(token);
+      token = "";
+    }
+  };
+  const pushCommand = () => {
+    pushToken();
+    if (tokens.length > 0) {
+      commands.push(tokens);
+      tokens = [];
+    }
+  };
+
+  for (let index = 0; index < commandText.length; index += 1) {
+    const character = commandText[index]!;
+    const nextCharacter = commandText[index + 1];
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      } else if (
+        character === "\\" &&
+        quote === '"' &&
+        (nextCharacter === '"' || nextCharacter === "\\")
+      ) {
+        token += nextCharacter;
+        index += 1;
+      } else {
+        token += character;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      pushToken();
+      if (character === "\n" || character === "\r") {
+        pushCommand();
+      }
+      continue;
+    }
+    if (character === ";" || character === "|" || character === "&") {
+      pushCommand();
+      while (commandText[index + 1] === character) {
+        index += 1;
+      }
+      continue;
+    }
+    if (
+      character === "\\" &&
+      nextCharacter !== undefined &&
+      /[\s'"\\;&|]/.test(nextCharacter)
+    ) {
+      token += nextCharacter;
+      index += 1;
+      continue;
+    }
+    token += character;
+  }
+  pushCommand();
+  return commands;
+}
+
+function rawGitArguments(tokens: readonly string[]): string[] | undefined {
+  let index = 0;
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index] ?? "")) {
+    index += 1;
+  }
+  let executable = executableName(tokens[index] ?? "");
+  if (executable === "command" || executable === "exec" || executable === "nohup") {
+    index += 1;
+    while ((tokens[index] ?? "").startsWith("-")) {
+      index += 1;
+    }
+    executable = executableName(tokens[index] ?? "");
+  } else if (executable === "env" || executable === "env.exe") {
+    index += 1;
+    while (index < tokens.length) {
+      const token = tokens[index]!;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+        index += 1;
+        continue;
+      }
+      if (token === "-u" || token === "--unset" || token === "-C" || token === "--chdir") {
+        index += 2;
+        continue;
+      }
+      if (token.startsWith("-")) {
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    executable = executableName(tokens[index] ?? "");
+  }
+  return isGitExecutable(executable) ? [...tokens.slice(index + 1)] : undefined;
+}
+
+function rawGitInvocationIsWrite(arguments_: readonly string[]): boolean {
+  const optionsWithValues = new Set([
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+  ]);
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index]!;
+    if (argument === "--help" || argument === "-h" || argument === "--version") {
+      return false;
+    }
+    if (optionsWithValues.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (
+      /^-(?:C|c).+/.test(argument) ||
+      /^--(?:config-env|exec-path|git-dir|namespace|super-prefix|work-tree)=/.test(argument)
+    ) {
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      continue;
+    }
+    return !RAW_READ_ONLY_GIT_COMMANDS.has(argument.toLowerCase());
+  }
+  return false;
+}
+
+function rawTokensContainGitWrite(tokens: readonly string[]): boolean {
+  const arguments_ = rawGitArguments(tokens);
+  if (arguments_ !== undefined) {
+    return rawGitInvocationIsWrite(arguments_);
+  }
+
+  let index = 0;
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index] ?? "")) {
+    index += 1;
+  }
+  const executable = executableName(tokens[index] ?? "");
+  if (executable === "sudo" || executable === "sudo.exe") {
+    index += 1;
+    const optionsWithValues = new Set([
+      "-C",
+      "-D",
+      "-g",
+      "-h",
+      "-p",
+      "-R",
+      "-T",
+      "-u",
+      "--chdir",
+      "--close-from",
+      "--group",
+      "--host",
+      "--prompt",
+      "--role",
+      "--type",
+      "--user",
+    ]);
+    while (index < tokens.length && tokens[index]!.startsWith("-")) {
+      if (optionsWithValues.has(tokens[index]!)) {
+        index += 2;
+      } else {
+        index += 1;
+      }
+    }
+    return rawTokensContainGitWrite(tokens.slice(index));
+  }
+
+  let shellCommandOptions: ReadonlySet<string> | undefined;
+  if (executable === "cmd" || executable === "cmd.exe") {
+    shellCommandOptions = new Set(["/c", "/k"]);
+  } else if (
+    executable === "bash" ||
+    executable === "bash.exe" ||
+    executable === "dash" ||
+    executable === "ksh" ||
+    executable === "sh" ||
+    executable === "sh.exe" ||
+    executable === "zsh"
+  ) {
+    shellCommandOptions = new Set(["-c"]);
+  } else if (
+    executable === "powershell" ||
+    executable === "powershell.exe" ||
+    executable === "pwsh" ||
+    executable === "pwsh.exe"
+  ) {
+    shellCommandOptions = new Set(["-c", "-command"]);
+  }
+  if (shellCommandOptions) {
+    const commandOptions = shellCommandOptions;
+    const commandIndex = tokens.findIndex(
+      (token, tokenIndex) =>
+        tokenIndex > index && commandOptions.has(token.toLowerCase()),
+    );
+    if (commandIndex >= 0 && commandIndex + 1 < tokens.length) {
+      return rawCommandContainsGitWrite(tokens.slice(commandIndex + 1).join(" "));
+    }
+  }
+  return false;
+}
+
+function rawCommandContainsGitWrite(commandText: string): boolean {
+  return tokenizeShellCommands(commandText).some(rawTokensContainGitWrite);
+}
+
+/**
+ * Uses the SDK's parsed executable and side-effect classification whenever it
+ * is present. Raw command parsing is only a compatibility fallback.
+ */
+export function shellRequestContainsGitWrite(request: ShellPermissionRequest): boolean {
+  const commands = request.commands as
+    | Array<{ identifier?: unknown; readOnly?: unknown }>
+    | undefined;
+  if (
+    Array.isArray(commands) &&
+    commands.length > 0 &&
+    commands.every(
+      (command) =>
+        typeof command.identifier === "string" &&
+        typeof command.readOnly === "boolean",
+    )
+  ) {
+    return commands.some(
+      (command) =>
+        command.readOnly === false &&
+        isGitExecutable(command.identifier as string),
+    );
+  }
+  return rawCommandContainsGitWrite(request.fullCommandText);
+}
+
 /**
  * Applies a concrete agent profile only as a narrowing ceiling. `no-result`
  * means the request passed that ceiling and still needs the parent policy.
@@ -860,13 +1165,7 @@ export function permissionDecision(
         if (outside) {
           return reject(`Command path is outside the configured ceiling: ${outside}`);
         }
-        if (
-          !profile.gitWrite &&
-          request.commands.some((command) => command.identifier.toLowerCase() === "git") &&
-          /\bgit\s+(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|merge|mv|push|rebase|reset|restore|revert|rm|switch|tag)\b/i.test(
-            request.fullCommandText,
-          )
-        ) {
+        if (!profile.gitWrite && shellRequestContainsGitWrite(request)) {
           return reject("Git write operations are disabled for this agent.");
         }
         return withinPermissionCeiling();
@@ -3939,11 +4238,28 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private createFreshPrimaryContext(): AgentContext {
-    const agentId = randomUUID();
+    const staged = this.db.stagedPrimaryRun(this.workspace);
+    const stagedRecord =
+      staged?.definition === null || staged?.definition === undefined
+        ? undefined
+        : storedAgentRecord(staged.definition);
+    const agentId = staged?.agentId ?? randomUUID();
     const runId = randomUUID();
+    let defaultAliasAttempt = 0;
     for (let attempt = 0; ; attempt += 1) {
-      const alias = primaryAliasCandidate(attempt);
-      const definition = primaryAgentDefinition(alias);
+      let alias: string;
+      if (attempt === 0 && staged) {
+        alias = staged.alias;
+      } else {
+        do {
+          alias = primaryAliasCandidate(defaultAliasAttempt);
+          defaultAliasAttempt += 1;
+        } while (alias === staged?.alias);
+      }
+      const definition =
+        stagedRecord === undefined
+          ? primaryAgentDefinition(alias)
+          : { ...stagedRecord.definition, id: alias };
       const context: AgentContext = {
         agentId,
         target: agentTarget(agentId),
@@ -3951,9 +4267,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         runId,
         definition,
         agent: this.resolveStoredDefinition(definition),
-        canTalkTo: new Set(),
-        canObserve: new Set(),
-        mcpServers: new Set(),
+        canTalkTo: new Set(stagedRecord?.canTalkToAgentIds ?? []),
+        canObserve: new Set(stagedRecord?.canObserveAgentIds ?? []),
+        mcpServers: new Set(stagedRecord?.mcpServers ?? []),
       };
       try {
         this.db.createAgentRun(

@@ -306,7 +306,10 @@ same native configuration as the main agent:
 - **Permission policy** — `--allow-all` uses the SDK `approveAll` decision through a
   generation/session-bound handler for the main session. Child modes may inherit it or force
   prompting; a concrete child profile narrows what is eligible but does not independently approve
-  a request.
+  a request. When a profile disables `gitWrite`, shell decisions use the SDK's parsed executable
+  identity and `readOnly` classification, so Git writes remain blocked through `git.exe`, absolute
+  executable paths, and Git global options without confusing unrelated commands that merely
+  mention Git.
 
 Agent settings only **narrow or deliberately override** this single source of truth; they never
 recreate a parallel definition:
@@ -448,24 +451,29 @@ Copilot’s session store remains authoritative for full conversation history. S
 UUID/session mappings, all agent runs (including the primary), UUID-backed communication and
 observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v11 adds
 explicit startup durability to v10 state; schema v12 adds generation-safe delivery lease tokens
-and indexed durable SDK-session ownership checks.
+and indexed durable SDK-session ownership checks; schema v13 repairs startup and ACL state in
+databases already stamped as v12.
 Migrations take the SQLite write lock before reading the schema version, migrate v8 worker
-definitions and mailboxes in place, adopt legacy primary-session state into the new primary agent
-idempotently, enforce primary/non-primary alias reservations atomically, and keep failed or
-taskless startups out of recovery selection. Before upgrading an older schema, the host checks the
-owner PID of every active run while holding that lock. If any owner process is still live, startup
-fails with a restart-required error and the migration transaction rolls back without rebuilding
-leases, resetting deliveries, or classifying startup rows. Close every Neovim instance using the
-database and start again to perform the upgrade; after the schema version advances, newly started
-older hosts reject the newer database, while the v12 lease constraints make a concurrently started
-legacy writer fail closed instead of storing an incompatible lease. The v11-to-v12 upgrade then
-reruns the conservative startup classifier and ACL scrub: a non-primary run is recoverable only
-when it has
-both a persisted SDK session and a delivered user task; session-only rows are failed, release their
-aliases, and are removed from related ACLs. Primary rows require their persisted session but do not
-require a user task. A session-id index and startup consistency check reject persisted ownership by
-multiple agent UUIDs while allowing historical runs of the same UUID. The migration is idempotent
-and does not duplicate conversation or SDK event history.
+definitions and mailboxes in place, and choose the newest legacy Standard run that owns a persisted
+SDK session as the primary source. Undelivered Standard mail and Standard ACL mappings move to that
+UUID in the same migration transaction before startup classification. If no Standard session
+exists, the newest Standard run supplies a staged primary UUID whose pending mail and ACLs are
+retained until a fresh primary session adopts them. Migrations also enforce primary/non-primary
+alias reservations atomically and keep failed or taskless startups out of recovery selection.
+Before upgrading an older schema, the host checks the owner PID of every active run while holding
+that lock. If any owner process is still live, startup fails with a restart-required error and the
+migration transaction rolls back without rebuilding leases, resetting deliveries, or classifying
+startup rows. Close every Neovim instance using the database and start again to perform the
+upgrade; after the schema version advances, newly started older hosts reject the newer database,
+while the v12 lease constraints make a concurrently started legacy writer fail closed instead of
+storing an incompatible lease. The v12-to-v13 upgrade does not rebuild v12 delivery leases; it
+reruns the conservative startup classifier and transactionally removes ghost UUIDs and aliases
+from persisted ACLs. A non-primary run is recoverable only when it has both a persisted SDK session
+and a delivered user task; session-only rows are failed, release their aliases, and are removed
+from related ACLs. Primary rows require their persisted session but do not require a user task. A
+session-id index and startup consistency check reject persisted ownership by multiple agent UUIDs
+while allowing historical runs of the same UUID. The migration is idempotent and does not
+duplicate conversation or SDK event history.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.

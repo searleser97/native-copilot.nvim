@@ -19,7 +19,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is one UUID-backed agent session; a
  * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 export interface StoredMessage {
   id: string;
@@ -164,7 +164,7 @@ export class AgentDatabase {
 
   /**
    * Brings the database to {@link SCHEMA_VERSION}. Pre-v6 state is rebuilt as before;
-   * v6-v11 agent runs and mailboxes are migrated in place. A database written by a
+   * v6-v12 agent runs and mailboxes are migrated in place. A database written by a
    * newer host is never erased.
    */
   private migrate(ownerIsAlive: OwnerIsAlive): void {
@@ -321,19 +321,16 @@ export class AgentDatabase {
             );
           `);
         }
-        if (schema.version < 12) {
-          // Schema 11 already had startup columns, but taskless worker rows still
-          // need the same conservative classification and ACL scrub on the v12 path.
-          this.classifyLegacyStartups();
-        }
-        this.assertAgentAliasState();
+        let preservedLegacyPrimaryRunIds = new Set<string>();
         if (schema.version < 9) {
-          this.migrateLegacyAgentState();
+          preservedLegacyPrimaryRunIds = this.migrateLegacyAgentState();
         }
-        if (schema.version < 11) {
-          // Legacy Standard conversion can create one more no-session agent row.
-          this.classifyLegacyStartups();
-        }
+        // Schema 13 deliberately reruns this repair for databases already written
+        // as v12. Legacy Standard mail and ACLs must be adopted before classification
+        // so a newer sessionless Standard run cannot hide an older viable session.
+        this.classifyLegacyStartups(preservedLegacyPrimaryRunIds);
+        this.scrubGhostAclsInTransaction();
+        this.assertAgentAliasState();
       }
       this.assertSessionOwnershipState();
       this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
@@ -421,12 +418,16 @@ export class AgentDatabase {
   private rewriteWorkspaceAclsInTransaction(
     workspace: string,
     disqualified: ReadonlyMap<string, string>,
+    additionalAliases: ReadonlySet<string> = new Set(),
   ): number {
     if (disqualified.size === 0) {
       return 0;
     }
     const disqualifiedIds = new Set(disqualified.keys());
-    const disqualifiedAliases = new Set(disqualified.values());
+    const disqualifiedAliases = new Set([
+      ...disqualified.values(),
+      ...additionalAliases,
+    ]);
     const rows = this.db
       .prepare(
         `SELECT id, definition
@@ -576,13 +577,15 @@ export class AgentDatabase {
         `SELECT id
          FROM runs
          WHERE workspace = ? AND mode = 'agent' AND agent_id = ?
-           AND definition IS NOT NULL`,
+           AND definition IS NOT NULL AND startup_state != 'failed'`,
       )
       .all(workspace, agentId) as unknown as Array<{ id: string }>;
     return rows.some((row) => !excludedRunIds.has(row.id));
   }
 
-  private classifyLegacyStartups(): void {
+  private classifyLegacyStartups(
+    preservedPrimaryRunIds: ReadonlySet<string> = new Set(),
+  ): void {
     type LegacyStartup = {
       id: string;
       workspace: string;
@@ -615,7 +618,17 @@ export class AgentDatabase {
         run.hasSession === 1 &&
         (run.isPrimary === 1 || run.hasDeliveredTask === 1),
     );
-    const failed = runs.filter((run) => !ready.includes(run));
+    const readyIds = new Set(ready.map((run) => run.id));
+    const preserved = runs.filter(
+      (run) =>
+        !readyIds.has(run.id) &&
+        run.isPrimary === 1 &&
+        preservedPrimaryRunIds.has(run.id),
+    );
+    const preservedIds = new Set(preserved.map((run) => run.id));
+    const failed = runs.filter(
+      (run) => !readyIds.has(run.id) && !preservedIds.has(run.id),
+    );
     const timestamp = now();
 
     const markReady = this.db.prepare(
@@ -625,6 +638,40 @@ export class AgentDatabase {
     );
     for (const run of ready) {
       markReady.run(run.id);
+    }
+
+    const preservePrimary = this.db.prepare(
+      `UPDATE runs
+       SET startup_state = 'reserved',
+           recovery_eligible = 0,
+           status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
+           ended_at = COALESCE(ended_at, ?),
+           interruption_reason = COALESCE(
+             interruption_reason,
+             'Legacy primary session was unavailable; pending mail retained for adoption'
+           ),
+           owner_pid = NULL
+       WHERE id = ? AND mode = 'agent' AND is_primary = 1
+         AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+    );
+    const resetPreservedMessages = this.db.prepare(
+      `UPDATE messages
+       SET status = 'pending', updated_at = ?
+       WHERE run_id = ? AND status = 'delivering'`,
+    );
+    const removePreservedLeases = this.db.prepare(
+      `DELETE FROM delivery_leases
+       WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
+    );
+    for (const run of preserved) {
+      const result = preservePrimary.run(timestamp, run.id);
+      if (result.changes !== 1) {
+        throw new Error(
+          `Legacy primary run "${run.id}" could not retain its pending mailbox safely.`,
+        );
+      }
+      resetPreservedMessages.run(timestamp, run.id);
+      removePreservedLeases.run(run.id);
     }
 
     const failedIds = new Set(failed.map((run) => run.id));
@@ -670,6 +717,77 @@ export class AgentDatabase {
       markFailed.run(timestamp, run.id);
       failMessages.run(timestamp, run.id);
       removeLeases.run(run.id);
+    }
+  }
+
+  /**
+   * Removes durable references to agent identities that have no non-failed
+   * definition left. This repairs databases whose failed startup rows predate
+   * the transactional ACL cleanup.
+   */
+  private scrubGhostAclsInTransaction(): void {
+    type IdentityState = {
+      workspace: string;
+      agentId: string;
+      alias: string | null;
+      definition: string | null;
+      startupState: RunStartupState;
+    };
+    const rows = this.db
+      .prepare(
+        `SELECT workspace, agent_id AS agentId, alias, definition,
+                startup_state AS startupState
+         FROM runs
+         WHERE mode = 'agent' AND agent_id IS NOT NULL
+         ORDER BY workspace, started_at DESC, id DESC`,
+      )
+      .all() as unknown as IdentityState[];
+    const identityKey = (row: Pick<IdentityState, "workspace" | "agentId">): string =>
+      `${row.workspace}\u0000${row.agentId}`;
+    const surviving = new Set(
+      rows
+        .filter((row) => row.definition !== null && row.startupState !== "failed")
+        .map(identityKey),
+    );
+    const survivingAliases = new Set(
+      rows
+        .filter(
+          (row) =>
+            row.alias !== null &&
+            row.definition !== null &&
+            row.startupState !== "failed",
+        )
+        .map((row) => `${row.workspace}\u0000${row.alias}`),
+    );
+    const ghostsByWorkspace = new Map<
+      string,
+      { identities: Map<string, string>; aliases: Set<string> }
+    >();
+    for (const row of rows) {
+      if (surviving.has(identityKey(row))) {
+        continue;
+      }
+      const ghosts = ghostsByWorkspace.get(row.workspace) ?? {
+        identities: new Map<string, string>(),
+        aliases: new Set<string>(),
+      };
+      if (!ghosts.identities.has(row.agentId)) {
+        ghosts.identities.set(row.agentId, row.alias ?? row.agentId);
+      }
+      if (
+        row.alias &&
+        !survivingAliases.has(`${row.workspace}\u0000${row.alias}`)
+      ) {
+        ghosts.aliases.add(row.alias);
+      }
+      ghostsByWorkspace.set(row.workspace, ghosts);
+    }
+    for (const [workspace, ghosts] of ghostsByWorkspace) {
+      this.rewriteWorkspaceAclsInTransaction(
+        workspace,
+        ghosts.identities,
+        ghosts.aliases,
+      );
     }
   }
 
@@ -910,10 +1028,125 @@ export class AgentDatabase {
   }
 
   /**
-   * Adopts schema-v8 primary-session state into the same UUID-backed run/ACL model as
-   * every other agent. Existing worker definitions and pending mail are retained.
+   * Normalizes the selected legacy primary mailbox and appends every undelivered
+   * Standard message in the workspace to it without colliding with old sequences.
    */
-  private migrateLegacyAgentState(): void {
+  private migrateLegacyPrimaryMessages(
+    workspace: string,
+    primaryRunId: string,
+    primaryAgentId: string,
+  ): number {
+    const target = `agent:${primaryAgentId}`;
+    const timestamp = now();
+    let sequence = this.nextSequence(primaryRunId, target);
+    const retarget = this.db.prepare(
+      `UPDATE messages
+       SET target = ?,
+           sequence = ?,
+           source = CASE WHEN source = ? THEN ? ELSE source END,
+           status = CASE WHEN status = 'delivering' THEN 'pending' ELSE status END,
+           updated_at = CASE WHEN status = 'delivering' THEN ? ELSE updated_at END
+       WHERE id = ?`,
+    );
+    const releaseLease = this.db.prepare(
+      "DELETE FROM delivery_leases WHERE message_id = ?",
+    );
+    const selectedMessages = this.db
+      .prepare(
+        `SELECT id
+         FROM messages
+         WHERE run_id = ? AND target != ?
+         ORDER BY created_at, sequence, id`,
+      )
+      .all(primaryRunId, target) as unknown as Array<{ id: string }>;
+    for (const message of selectedMessages) {
+      retarget.run(
+        target,
+        sequence,
+        LEGACY_PRIMARY_IDENTITY,
+        target,
+        timestamp,
+        message.id,
+      );
+      releaseLease.run(message.id);
+      sequence += 1;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET source = CASE WHEN source = ? THEN ? ELSE source END,
+             status = CASE WHEN status = 'delivering' THEN 'pending' ELSE status END,
+             updated_at = CASE WHEN status = 'delivering' THEN ? ELSE updated_at END
+         WHERE run_id = ? AND target = ?`,
+      )
+      .run(
+        LEGACY_PRIMARY_IDENTITY,
+        target,
+        timestamp,
+        primaryRunId,
+        target,
+      );
+    this.db
+      .prepare(
+        `DELETE FROM delivery_leases
+         WHERE message_id IN (
+           SELECT id FROM messages
+           WHERE run_id = ? AND target = ? AND status = 'pending'
+         )`,
+      )
+      .run(primaryRunId, target);
+
+    const legacyMessages = this.db
+      .prepare(
+        `SELECT messages.id AS id
+         FROM messages
+         JOIN runs ON runs.id = messages.run_id
+         WHERE runs.workspace = ? AND runs.mode = 'standard'
+           AND messages.status IN ('pending', 'delivering')
+         ORDER BY messages.created_at, messages.sequence, messages.id`,
+      )
+      .all(workspace) as unknown as Array<{ id: string }>;
+    const adopt = this.db.prepare(
+      `UPDATE messages
+       SET run_id = ?,
+           target = ?,
+           sequence = ?,
+           source = CASE WHEN source = ? THEN ? ELSE source END,
+           status = 'pending',
+           updated_at = ?
+       WHERE id = ?`,
+    );
+    for (const message of legacyMessages) {
+      adopt.run(
+        primaryRunId,
+        target,
+        sequence,
+        LEGACY_PRIMARY_IDENTITY,
+        target,
+        timestamp,
+        message.id,
+      );
+      releaseLease.run(message.id);
+      sequence += 1;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE messages SET source = ?
+         WHERE source = ?
+           AND kind = 'agent'
+           AND run_id IN (SELECT id FROM runs WHERE workspace = ?)`,
+      )
+      .run(target, LEGACY_PRIMARY_IDENTITY, workspace);
+    return selectedMessages.length + legacyMessages.length;
+  }
+
+  /**
+   * Adopts legacy primary-session state into the same UUID-backed run/ACL model
+   * as every other agent. Existing worker definitions and pending mail are retained.
+   */
+  private migrateLegacyAgentState(): Set<string> {
     type LegacyRun = {
       id: string;
       mode: LegacyRunMode;
@@ -923,6 +1156,8 @@ export class AgentDatabase {
       workspace: string;
       startedAt: string;
       isPrimary: number;
+      hasSession: number;
+      hasDeliveredTask: number;
       legacyPrimaryCanTalk: number;
       legacyPrimaryCanObserve: number;
     };
@@ -930,10 +1165,19 @@ export class AgentDatabase {
       .prepare(
         `SELECT id, mode, agent_id AS agentId, alias, definition, workspace,
                 is_primary AS isPrimary,
+                EXISTS (
+                  SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+                ) AS hasSession,
+                EXISTS (
+                  SELECT 1 FROM messages
+                  WHERE messages.run_id = runs.id
+                    AND messages.kind = 'user'
+                    AND messages.status = 'delivered'
+                ) AS hasDeliveredTask,
                 started_at AS startedAt, standard_can_talk AS legacyPrimaryCanTalk,
                 standard_can_observe AS legacyPrimaryCanObserve
          FROM runs
-         ORDER BY workspace, started_at DESC`,
+         ORDER BY workspace, started_at DESC, id DESC`,
       )
       .all() as unknown as LegacyRun[];
     const primaryByWorkspace = new Map<
@@ -941,6 +1185,7 @@ export class AgentDatabase {
       { agentId: string; runId: string; alias: string }
     >();
     const primaryRunsToConvert = new Set<string>();
+    const sessionlessPrimaryRunIds = new Set<string>();
     // A partially completed or defensively repeated migration must adopt the
     // primary that already exists instead of promoting another legacy Standard
     // row in the same workspace.
@@ -959,16 +1204,32 @@ export class AgentDatabase {
         });
       }
     }
+    const standardsByWorkspace = new Map<string, LegacyRun[]>();
     for (const run of runs) {
-      if (run.mode !== "standard" || primaryByWorkspace.has(run.workspace)) {
+      if (run.mode !== "standard") {
         continue;
       }
-      primaryByWorkspace.set(run.workspace, {
+      const standards = standardsByWorkspace.get(run.workspace) ?? [];
+      standards.push(run);
+      standardsByWorkspace.set(run.workspace, standards);
+    }
+    for (const [workspace, standards] of standardsByWorkspace) {
+      if (primaryByWorkspace.has(workspace)) {
+        continue;
+      }
+      const selected = standards.find((run) => run.hasSession === 1) ?? standards[0];
+      if (!selected) {
+        continue;
+      }
+      primaryByWorkspace.set(workspace, {
         agentId: randomUUID(),
-        runId: run.id,
+        runId: selected.id,
         alias: PRIMARY_ALIAS,
       });
-      primaryRunsToConvert.add(run.id);
+      primaryRunsToConvert.add(selected.id);
+      if (selected.hasSession !== 1) {
+        sessionlessPrimaryRunIds.add(selected.id);
+      }
     }
 
     const aliasesByWorkspace = new Map<string, Map<string, string>>();
@@ -1048,7 +1309,13 @@ export class AgentDatabase {
     for (const run of runs) {
       const agentId = run.agentId;
       const storedDefinition = run.definition;
-      if (run.mode !== "agent" || !agentId || !storedDefinition) {
+      if (
+        run.mode !== "agent" ||
+        !agentId ||
+        !storedDefinition ||
+        run.hasSession !== 1 ||
+        (run.isPrimary !== 1 && run.hasDeliveredTask !== 1)
+      ) {
         continue;
       }
       try {
@@ -1149,12 +1416,13 @@ export class AgentDatabase {
        SET mode = 'agent', agent_id = ?, alias = ?, definition = ?, is_primary = 1
        WHERE id = ? AND mode = 'standard' AND is_primary = 0`,
     );
-    const updatePrimaryMessages = this.db.prepare(
-      `UPDATE messages SET target = ?, source = CASE WHEN source = ? THEN ? ELSE source END
-       WHERE run_id = ?`,
-    );
     for (const [workspace, primary] of primaryByWorkspace) {
       if (!primaryRunsToConvert.has(primary.runId)) {
+        this.migrateLegacyPrimaryMessages(
+          workspace,
+          primary.runId,
+          primary.agentId,
+        );
         continue;
       }
       const outgoingTalk = new Set(runs
@@ -1207,20 +1475,11 @@ export class AgentDatabase {
       if (converted.changes !== 1) {
         continue;
       }
-      updatePrimaryMessages.run(
-        `agent:${primary.agentId}`,
-        LEGACY_PRIMARY_IDENTITY,
-        `agent:${primary.agentId}`,
+      this.migrateLegacyPrimaryMessages(
+        workspace,
         primary.runId,
+        primary.agentId,
       );
-      this.db
-        .prepare(
-          `UPDATE messages SET source = ?
-           WHERE source = ?
-             AND kind = 'agent'
-             AND run_id IN (SELECT id FROM runs WHERE workspace = ?)`,
-        )
-        .run(`agent:${primary.agentId}`, LEGACY_PRIMARY_IDENTITY, workspace);
     }
     const updateLegacySourceAlias = this.db.prepare(
       `UPDATE messages SET source = ?
@@ -1316,6 +1575,7 @@ export class AgentDatabase {
         "DELETE FROM activity_cursors WHERE observer_id = ? OR target_agent_id = ?",
       )
       .run(LEGACY_PRIMARY_IDENTITY, LEGACY_PRIMARY_IDENTITY);
+    return sessionlessPrimaryRunIds;
   }
 
   private transaction<T>(operation: () => T): T {
@@ -1643,6 +1903,16 @@ export class AgentDatabase {
         LEGACY_PRIMARY_IDENTITY,
       );
       this.completeRunStartupInTransaction(runId);
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET definition = NULL, startup_state = 'failed'
+           WHERE id != ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ?
+             AND recovery_eligible = 0 AND startup_state = 'reserved'
+             AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+        )
+        .run(runId, workspace, agentId);
       return adoptedMessages;
     });
   }
@@ -2115,6 +2385,25 @@ export class AgentDatabase {
          AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
        LIMIT 1`,
       workspace,
+      workspace,
+    )[0];
+  }
+
+  /**
+   * Sessionless legacy primary identity retained only long enough for a fresh
+   * primary run to inherit its UUID, ACLs, and pending mailbox.
+   */
+  stagedPrimaryRun(workspace: string): StoredAgentRun | undefined {
+    return this.agentRunRows(
+      `workspace = ?
+         AND is_primary = 1
+         AND recovery_eligible = 0
+         AND startup_state = 'reserved'
+         AND status != 'active'
+         AND definition IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+       ORDER BY started_at DESC
+       LIMIT 1`,
       workspace,
     )[0];
   }
