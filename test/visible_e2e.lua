@@ -182,6 +182,22 @@ local function has_sign_on_empty_line(buf)
   return false
 end
 
+local function has_ranged_sign(buf)
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+    buf,
+    -1,
+    { 0, 0 },
+    { -1, -1 },
+    { details = true }
+  )) do
+    local details = mark[4] or {}
+    if details.sign_text and details.end_row and details.end_row > mark[2] + 1 then
+      return true
+    end
+  end
+  return false
+end
+
 local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
   buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
@@ -203,7 +219,7 @@ local function timeline_recovers_without_anchor_extmark(buf)
     { details = true }
   )) do
     local details = mark[4] or {}
-    if details.sign_text and details.end_row then
+    if details.end_row and not details.sign_text then
       deleted_anchor = mark[1]
       vim.api.nvim_buf_del_extmark(buf, namespace, mark[1])
       break
@@ -229,6 +245,8 @@ local function timeline_recovers_without_anchor_extmark(buf)
   end
   recovered_row = line_with(buf, 'duplicate-recovery-probe')
   if recovered_row then
+    local range_recovered = false
+    local sign_recovered = false
     for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
       buf,
       namespace,
@@ -237,13 +255,15 @@ local function timeline_recovers_without_anchor_extmark(buf)
       { details = true }
     )) do
       local details = mark[4] or {}
-      recovered_anchor = recovered_anchor
+      range_recovered = range_recovered
+        or (mark[1] == deleted_anchor and details.end_row == recovered_row)
+      sign_recovered = sign_recovered
         or (
-          mark[1] == deleted_anchor
-          and vim.trim(details.sign_text or '') == '✓'
-          and details.end_row == recovered_row
+          vim.trim(details.sign_text or '') == '✓'
+          and details.end_row == nil
         )
     end
+    recovered_anchor = range_recovered and sign_recovered
   end
   buffers.remove_timeline(primary_target, 'e2e-timeline-recovery')
   local anchor_removed = deleted_anchor
@@ -574,7 +594,7 @@ tick = function()
       return
     end
     if not check(
-      not has_sign_on_empty_line(buf),
+      not has_sign_on_empty_line(buf) and not has_ranged_sign(buf),
       'environment lifecycle signs remained on their owning rows'
     ) then
       return
@@ -1289,7 +1309,8 @@ tick = function()
     end
     if not check(
       not content:find('[permission]', 1, true)
-        and not has_sign_on_empty_line(buf),
+        and not has_sign_on_empty_line(buf)
+        and not has_ranged_sign(buf),
       'interactive permission row and sign are removed after the decision'
     ) then
       return

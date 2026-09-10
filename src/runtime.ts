@@ -4191,6 +4191,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
         break;
       case "session.idle":
+      case "session.shutdown":
         live.busy = false;
         live.foregroundBusy = false;
         live.foregroundTurnId = undefined;

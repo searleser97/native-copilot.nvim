@@ -1142,10 +1142,6 @@ local function set_timeline_anchor(view, record, row, lines, item)
     end_right_gravity = false,
     priority = 210,
   }
-  if style.sign_text then
-    anchor_options.sign_text = style.sign_text
-    anchor_options.sign_hl_group = style.sign_highlight
-  end
   record.anchor = vim.api.nvim_buf_set_extmark(
     view.buf,
     timeline_namespace,
@@ -1153,6 +1149,24 @@ local function set_timeline_anchor(view, record, row, lines, item)
     0,
     anchor_options
   )
+  if style.sign_text then
+    record.sign_anchor = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      timeline_namespace,
+      row,
+      0,
+      {
+        id = record.sign_anchor,
+        sign_text = style.sign_text,
+        sign_hl_group = style.sign_highlight,
+        right_gravity = false,
+        priority = 210,
+      }
+    )
+  elseif record.sign_anchor then
+    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_anchor)
+    record.sign_anchor = nil
+  end
 end
 
 local function timeline_block_matches(actual, row, lines)
@@ -1392,6 +1406,9 @@ function M.remove_timeline(member_id, item_id)
   local start_row, end_row = timeline_record_position(view, record)
   if record.anchor then
     pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.anchor)
+  end
+  if record.sign_anchor then
+    pcall(vim.api.nvim_buf_del_extmark, view.buf, timeline_namespace, record.sign_anchor)
   end
   if record.item and record.item.kind == 'environment' then
     local rows = {}
