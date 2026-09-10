@@ -1334,10 +1334,22 @@ tick = function()
       and content:find('[schedule][1] created', second_user, true)
     local schedule_cancelled = schedule_created
       and content:find('[schedule][1] cancelled', schedule_created, true)
-    local final_reply = schedule_cancelled
+    local block_reasoning = second_user
+      and content:find(
+        'I should create the temporary schedule and then cancel it.',
+        second_user,
+        true
+      )
+    local message_reasoning = schedule_cancelled
+      and content:find(
+        'I should summarize the completed validation after the temporary schedule is removed.',
+        schedule_cancelled,
+        true
+      )
+    local final_reply = message_reasoning
       and content:find(
         'Validation completed successfully, and the temporary recurring check was cancelled.',
-        schedule_cancelled,
+        message_reasoning,
         true
       )
     local agent_task = final_reply
@@ -1357,6 +1369,8 @@ tick = function()
       and second_user
       and schedule_created
       and schedule_cancelled
+      and block_reasoning
+      and message_reasoning
       and final_reply
       and agent_task
     ) then
@@ -1401,11 +1415,24 @@ tick = function()
         and first_reply < task_start
         and task_start < task_complete
         and task_complete < second_user
-        and second_user < schedule_created
+        and second_user < block_reasoning
+        and block_reasoning < schedule_created
         and schedule_created < schedule_cancelled
-        and schedule_cancelled < final_reply
+        and schedule_cancelled < message_reasoning
+        and message_reasoning < final_reply
         and final_reply < agent_task,
       'CLI session history preserved durable timeline order'
+    ) then
+      return
+    end
+    local _, standalone_reasoning_count = content:gsub(
+      'I should inspect the project structure first%.',
+      ''
+    )
+    if not check(
+      standalone_reasoning_count == 1
+        and not content:find('MUST NOT RENDER', 1, true),
+      'CLI session replay selected one safe readable reasoning representation'
     ) then
       return
     end

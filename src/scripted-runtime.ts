@@ -5,6 +5,7 @@ import type {
   StoredAgentRun,
 } from "./database.js";
 import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
+import { compactHistoryEvents } from "./runtime.js";
 import type { SpawnAgentsRequest } from "./types.js";
 
 interface RuntimeEmitter {
@@ -1012,6 +1013,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
           type: "assistant.message",
           data: {
             messageId: "cli-message-1",
+            reasoningText:
+              "I should inspect the project structure first.\n\n" +
+              "Then I can start validation in the background and continue explaining.",
             content: "The workspace contains both the TypeScript host and the Neovim Lua client.",
           },
         },
@@ -1088,8 +1092,33 @@ export class ScriptedRuntime implements RuntimeAdapter {
           data: { turnId: "cli-turn-2" },
         },
         {
-          id: "cli-schedule-created",
+          id: "cli-message-block-reasoning",
           parentId: "cli-turn-start-2",
+          timestamp: "2026-08-31T15:00:10.500Z",
+          type: "assistant.message",
+          data: {
+            messageId: "cli-message-block-reasoning",
+            reasoningBlocks: {
+              provider: "openai-responses",
+              blocks: [
+                {
+                  type: "reasoning",
+                  summary: [
+                    {
+                      type: "summary_text",
+                      text: "I should create the temporary schedule and then cancel it.",
+                    },
+                  ],
+                  content: [],
+                  encrypted_content: "MUST NOT RENDER",
+                },
+              ],
+            },
+          },
+        },
+        {
+          id: "cli-schedule-created",
+          parentId: "cli-message-block-reasoning",
           timestamp: "2026-08-31T15:00:11.000Z",
           type: "session.schedule_created",
           data: {
@@ -1228,6 +1257,25 @@ export class ScriptedRuntime implements RuntimeAdapter {
           type: "assistant.message",
           data: {
             messageId: "cli-message-2",
+            reasoningText:
+              "I should summarize the completed validation after the temporary schedule is removed.",
+            reasoningBlocks: {
+              provider: "openai-responses",
+              blocks: [
+                {
+                  type: "reasoning",
+                  summary: [
+                    {
+                      type: "summary_text",
+                      text:
+                        "I should summarize the completed validation after the temporary schedule is removed.",
+                    },
+                  ],
+                  content: [],
+                  encrypted_content: "MUST NOT RENDER",
+                },
+              ],
+            },
             content: "Validation completed successfully, and the temporary recurring check was cancelled.",
           },
         },
@@ -1258,19 +1306,20 @@ export class ScriptedRuntime implements RuntimeAdapter {
             toolCallId: "cli-history-timestamp",
             toolName: "view",
             success: true,
-            resultDeferred: true,
+            result: { content: "timestamp probe complete" },
           },
         },
       ].map((event) => ({
         ...event,
         replayTimestamp: Date.parse(event.timestamp),
       }));
+      const compactEvents = compactHistoryEvents(historyEvents);
       const replayId = "e2e-cli-history-replay";
-      const chunkSize = Math.ceil(historyEvents.length / 3);
+      const chunkSize = Math.ceil(compactEvents.length / 3);
       const historyChunks = [
-        historyEvents.slice(0, chunkSize),
-        historyEvents.slice(chunkSize, chunkSize * 2),
-        historyEvents.slice(chunkSize * 2),
+        compactEvents.slice(0, chunkSize),
+        compactEvents.slice(chunkSize, chunkSize * 2),
+        compactEvents.slice(chunkSize * 2),
       ];
       let loadedEvents = 0;
       for (const [chunkIndex, events] of historyChunks.entries()) {
@@ -1281,7 +1330,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
           chunkIndex,
           chunkCount: historyChunks.length,
           loadedEvents,
-          totalEvents: historyEvents.length,
+          totalEvents: compactEvents.length,
           first: chunkIndex === 0,
           last: chunkIndex === historyChunks.length - 1,
         }, { runId: primary.runId, memberId: target, target: "conversation", done: true });

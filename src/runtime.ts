@@ -468,7 +468,16 @@ const omittedActivityEventTypes = new Set<SessionEvent["type"]>([
   "assistant.reasoning_delta",
 ]);
 
-interface HistoryReplayEvent {
+export interface HistorySourceEvent {
+  id: string;
+  type: string;
+  timestamp: string;
+  ephemeral?: boolean;
+  agentId?: string;
+  data: unknown;
+}
+
+export interface HistoryReplayEvent {
   id: string;
   type: string;
   timestamp: string;
@@ -498,7 +507,7 @@ function historyShellId(value: unknown): string | undefined {
   return undefined;
 }
 
-function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefined {
+function compactHistoryEvent(event: HistorySourceEvent): HistoryReplayEvent | undefined {
   if (event.ephemeral === true) {
     return undefined;
   }
@@ -576,6 +585,96 @@ function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefine
     ...(event.agentId === undefined ? {} : { agentId: event.agentId }),
     data: compactData,
   };
+}
+
+function normalizedReasoningText(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized === "" ? undefined : normalized;
+}
+
+function reasoningBlockSummary(data: Record<string, unknown>): string | undefined {
+  const reasoningBlocks = data.reasoningBlocks;
+  if (!reasoningBlocks || typeof reasoningBlocks !== "object") {
+    return undefined;
+  }
+  const container = reasoningBlocks as Record<string, unknown>;
+  if (container.provider !== "openai-responses" || !Array.isArray(container.blocks)) {
+    return undefined;
+  }
+  const summaries: string[] = [];
+  for (const block of container.blocks) {
+    if (!block || typeof block !== "object") continue;
+    const summary = (block as Record<string, unknown>).summary;
+    if (!Array.isArray(summary)) continue;
+    for (const item of summary) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      if (record.type !== "summary_text") continue;
+      const text = normalizedReasoningText(record.text);
+      if (text !== undefined) summaries.push(text);
+    }
+  }
+  return summaries.length === 0 ? undefined : summaries.join("\n\n");
+}
+
+function readableMessageReasoning(data: Record<string, unknown>): string | undefined {
+  return normalizedReasoningText(data.reasoningText) ?? reasoningBlockSummary(data);
+}
+
+function reasoningFingerprint(content: string): string {
+  return content.replace(/\s+/g, " ").trim();
+}
+
+export function compactHistoryEvents(events: readonly HistorySourceEvent[]): HistoryReplayEvent[] {
+  const compact: HistoryReplayEvent[] = [];
+  let standaloneReasoningInTurn = false;
+  const embeddedReasoningInTurn = new Set<string>();
+  for (const event of events) {
+    if (event.agentId === undefined && event.type === "assistant.turn_start") {
+      standaloneReasoningInTurn = false;
+      embeddedReasoningInTurn.clear();
+    }
+    const data = event.data as unknown as Record<string, unknown>;
+    if (event.agentId === undefined && event.type === "assistant.reasoning") {
+      const content = normalizedReasoningText(data.content);
+      if (content !== undefined) {
+        standaloneReasoningInTurn = true;
+        embeddedReasoningInTurn.add(reasoningFingerprint(content));
+      }
+    } else if (
+      event.agentId === undefined &&
+      event.type === "assistant.message" &&
+      !standaloneReasoningInTurn
+    ) {
+      const content = readableMessageReasoning(data);
+      if (content !== undefined) {
+        const fingerprint = reasoningFingerprint(content);
+        if (!embeddedReasoningInTurn.has(fingerprint)) {
+          embeddedReasoningInTurn.add(fingerprint);
+          compact.push({
+            id: `${event.id}:reasoning`,
+            type: "assistant.reasoning",
+            timestamp: event.timestamp,
+            replayTimestamp: Date.parse(event.timestamp),
+            data: {
+              reasoningId: `${String(data.messageId ?? event.id)}:reasoning`,
+              content,
+            },
+          });
+        }
+      }
+    }
+    const projected = compactHistoryEvent(event);
+    if (projected !== undefined) compact.push(projected);
+    if (event.agentId === undefined && event.type === "assistant.turn_end") {
+      standaloneReasoningInTurn = false;
+      embeddedReasoningInTurn.clear();
+    }
+  }
+  return compact;
 }
 
 function historyChunks(events: HistoryReplayEvent[]): HistoryReplayEvent[][] {
@@ -3853,9 +3952,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         live.seenEventIds.add(event.id);
       }
       if (continuity === undefined || replayEvents.length > 0) {
-        const compactEvents = replayEvents
-          .map(compactHistoryEvent)
-          .filter((event): event is HistoryReplayEvent => event !== undefined);
+        const compactEvents = compactHistoryEvents(replayEvents);
         const chunks = historyChunks(compactEvents);
         const replayId = randomUUID();
         const replayChunks = chunks.length > 0 ? chunks : [[]];

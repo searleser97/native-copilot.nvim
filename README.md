@@ -370,6 +370,9 @@ Historical replay transfers only fields required to reconstruct the visible tran
 them in bounded ordered chunks. Neovim defers cursor following and fold refresh until the final
 chunk, leaving one complete continuously scrollable conversation buffer. Historical Tool rows load
 their potentially large result payload only when their details window is opened.
+Reasoning replay prefers standalone readable reasoning events, then normalized `reasoningText`,
+then explicitly typed provider summary blocks; opaque, encrypted, and signature fields never cross
+the UI boundary.
 The old primary run retains its pending mail until the selected SDK session is connected; retiring
 the old run, adopting its mail, and making the replacement recoverable then happen in one SQLite
 transaction. If replacement fails after activation, pending mail is adopted back into the restored
