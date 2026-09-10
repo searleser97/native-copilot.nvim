@@ -1478,6 +1478,15 @@ tick = function()
     end
     vim.api.nvim_set_current_win(conversation_windows[1])
     vim.api.nvim_win_set_cursor(conversation_windows[1], { historical_tool_row, 0 })
+    local historical_tool = buffers.timeline_item_at_cursor(buf, historical_tool_row)
+    local historical_details = historical_tool and historical_tool.details or {}
+    if not check(
+      historical_details.resultDeferred == true
+        and historical_details.toolCallId == 'cli-history-timestamp',
+      'historical Tool row retained its lazy result reference'
+    ) then
+      return
+    end
     local mapping = vim.api.nvim_buf_call(buf, function()
       return vim.fn.maparg('<CR>', 'n', false, true)
     end)
@@ -1501,6 +1510,10 @@ tick = function()
     end
     local detail_buf = vim.api.nvim_win_get_buf(lazy_detail_win)
     local detail_content = text(detail_buf)
+    if detail_content:find('Historical Tool result is unavailable', 1, true) then
+      check(false, 'historical Tool result loaded lazily in the details window')
+      return
+    end
     if not detail_content:find('timestamp probe complete', 1, true) then
       schedule_tick()
       return
