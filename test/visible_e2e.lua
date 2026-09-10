@@ -29,6 +29,8 @@ local timeline_recovery_checked = false
 local lazy_detail_win
 local completed = false
 local primary_target
+local primary_ready_count = 0
+local resume_ready_count
 local tick
 
 vim.opt.runtimepath:prepend(root)
@@ -52,6 +54,7 @@ native._on_event = function(message)
   if payload.primary or message.type == 'primary.ready' then
     primary_target = payload.target or message.memberId or primary_target
   end
+  if message.type == 'primary.ready' then primary_ready_count = primary_ready_count + 1 end
   local ok, failure = xpcall(on_event, debug.traceback, message)
   if not ok then
     append_trace({ 'event_error=' .. tostring(failure):gsub('\n', '\\n') })
@@ -524,6 +527,7 @@ local function prompt_mapping(lhs, mode)
 end
 
 local function resume_cli_session()
+  resume_ready_count = primary_ready_count + 1
   submit('/resume')
   phase = 'resume'
   schedule_tick()
@@ -1288,6 +1292,10 @@ tick = function()
   elseif phase == 'resume' then
     if content:find('\nwriting', 1, true) then
       check(false, 'CLI session replay did not show a live writing indicator')
+      return
+    end
+    if primary_ready_count < (resume_ready_count or 0) then
+      schedule_tick()
       return
     end
     local user_message =
