@@ -259,6 +259,8 @@ local function timeline_recovers_without_anchor_extmark(buf)
         or (mark[1] == deleted_anchor and details.end_row == recovered_row)
       sign_recovered = sign_recovered
         or (
+          mark[2] == recovered_row - 1
+          and
           vim.trim(details.sign_text or '') == '✓'
           and details.end_row == nil
         )
@@ -317,7 +319,7 @@ local function adjacent_tool_signs_survive_completion(buf)
     local completed_anchors = 0
     for _, mark in ipairs(signs) do
       local sign = mark[4].sign_text and vim.trim(mark[4].sign_text) or nil
-      if sign == '✓' and mark[4].end_row == nil then
+      if sign == '✓' and mark[2] == row - 1 and mark[4].end_row == nil then
         completed_anchors = completed_anchors + 1
         anchor_ids[mark[1]] = true
       end
@@ -466,7 +468,10 @@ local function timeline_anchors_follow_inserted_rows(buf)
       if details.end_row == anchor_row - 1 + entry.lines and not details.sign_text then
         range_matches = range_matches + 1
       end
-      if vim.trim(details.sign_text or '') == entry.sign and details.end_row == nil then
+      if mark[2] == anchor_row - 1
+        and vim.trim(details.sign_text or '') == entry.sign
+        and details.end_row == nil
+      then
         sign_matches = sign_matches + 1
       end
     end
