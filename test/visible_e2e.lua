@@ -31,6 +31,7 @@ local completed = false
 local primary_target
 local primary_ready_count = 0
 local resume_ready_count
+local resume_stable_at
 local history_tool_result_count = 0
 local tick
 
@@ -1299,6 +1300,11 @@ tick = function()
       return
     end
     if primary_ready_count < (resume_ready_count or 0) then
+      schedule_tick()
+      return
+    end
+    resume_stable_at = resume_stable_at or vim.uv.now()
+    if vim.uv.now() - resume_stable_at < 200 then
       schedule_tick()
       return
     end
