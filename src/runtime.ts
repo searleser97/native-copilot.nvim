@@ -629,31 +629,51 @@ function reasoningFingerprint(content: string): string {
 }
 
 export function compactHistoryEvents(events: readonly HistorySourceEvent[]): HistoryReplayEvent[] {
-  const compact: HistoryReplayEvent[] = [];
-  let standaloneReasoningInTurn = false;
-  const embeddedReasoningInTurn = new Set<string>();
+  const turnsWithStandaloneReasoning = new Set<number>();
+  let scannedTurn = 0;
+  let scannedTurnSequence = 0;
   for (const event of events) {
     if (event.agentId === undefined && event.type === "assistant.turn_start") {
-      standaloneReasoningInTurn = false;
-      embeddedReasoningInTurn.clear();
+      scannedTurnSequence += 1;
+      scannedTurn = scannedTurnSequence;
+    } else if (event.agentId === undefined && event.type === "assistant.reasoning") {
+      const data = event.data as unknown as Record<string, unknown>;
+      if (normalizedReasoningText(data.content) !== undefined) {
+        turnsWithStandaloneReasoning.add(scannedTurn);
+      }
+    } else if (event.agentId === undefined && event.type === "assistant.turn_end") {
+      scannedTurn = 0;
+    }
+  }
+
+  const compact: HistoryReplayEvent[] = [];
+  let currentTurn = 0;
+  let turnSequence = 0;
+  const reasoningInTurn = new Set<string>();
+  for (const event of events) {
+    if (event.agentId === undefined && event.type === "assistant.turn_start") {
+      turnSequence += 1;
+      currentTurn = turnSequence;
+      reasoningInTurn.clear();
     }
     const data = event.data as unknown as Record<string, unknown>;
     if (event.agentId === undefined && event.type === "assistant.reasoning") {
       const content = normalizedReasoningText(data.content);
       if (content !== undefined) {
-        standaloneReasoningInTurn = true;
-        embeddedReasoningInTurn.add(reasoningFingerprint(content));
+        const fingerprint = reasoningFingerprint(content);
+        if (reasoningInTurn.has(fingerprint)) continue;
+        reasoningInTurn.add(fingerprint);
       }
     } else if (
       event.agentId === undefined &&
       event.type === "assistant.message" &&
-      !standaloneReasoningInTurn
+      !turnsWithStandaloneReasoning.has(currentTurn)
     ) {
       const content = readableMessageReasoning(data);
       if (content !== undefined) {
         const fingerprint = reasoningFingerprint(content);
-        if (!embeddedReasoningInTurn.has(fingerprint)) {
-          embeddedReasoningInTurn.add(fingerprint);
+        if (!reasoningInTurn.has(fingerprint)) {
+          reasoningInTurn.add(fingerprint);
           compact.push({
             id: `${event.id}:reasoning`,
             type: "assistant.reasoning",
@@ -670,8 +690,8 @@ export function compactHistoryEvents(events: readonly HistorySourceEvent[]): His
     const projected = compactHistoryEvent(event);
     if (projected !== undefined) compact.push(projected);
     if (event.agentId === undefined && event.type === "assistant.turn_end") {
-      standaloneReasoningInTurn = false;
-      embeddedReasoningInTurn.clear();
+      currentTurn = 0;
+      reasoningInTurn.clear();
     }
   }
   return compact;
