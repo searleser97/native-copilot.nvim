@@ -505,9 +505,6 @@ function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefine
       if (event.agentId !== undefined) return undefined;
       compactData = { turnId: data.turnId };
       break;
-    case "session.idle":
-      compactData = {};
-      break;
     case "tool.execution_start":
       if (event.agentId !== undefined) return undefined;
       compactData = {
