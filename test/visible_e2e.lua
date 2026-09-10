@@ -1536,6 +1536,10 @@ tick = function()
     schedule_tick()
   elseif phase == 'resume-tool-result' then
     if not lazy_detail_win or not vim.api.nvim_win_is_valid(lazy_detail_win) then
+      if history_tool_result_count > 0 then
+        check(false, 'historical Tool result kept the details window open')
+        return
+      end
       schedule_tick()
       return
     end
