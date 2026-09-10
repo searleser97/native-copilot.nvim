@@ -13,6 +13,7 @@ export interface PathPolicy {
   write: string[];
 }
 
+/** A child-agent ceiling that narrows, but never grants beyond, the main policy. */
 export interface PermissionProfile {
   tools: ToolPolicy;
   paths: PathPolicy;

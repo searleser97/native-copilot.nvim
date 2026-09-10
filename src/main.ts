@@ -2,8 +2,8 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { argv, env, exit, kill, ppid, stderr } from "node:process";
-import { AgentDatabase } from "./database.js";
+import { argv, env, exit, ppid, stderr } from "node:process";
+import { AgentDatabase, processIsAlive } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
 import { CopilotRuntime, resolveRuntimeCommand } from "./runtime.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
@@ -71,17 +71,10 @@ async function main(): Promise<void> {
   const runtimeCommand = options.scriptedProfile
     ? undefined
     : await resolveRuntimeCommand(options.runtimeCommandResolver, options.workspace);
-  const db = new AgentDatabase(options.databasePath);
+  const db = new AgentDatabase(options.databasePath, processIsAlive);
   const interruptedRuns = db.markInterruptedWork(
     "Owning Neovim host is no longer running",
-    (ownerPid) => {
-      try {
-        kill(ownerPid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    processIsAlive,
   );
   let runtime: RuntimeAdapter;
   let protocol: Protocol;
@@ -473,9 +466,7 @@ async function main(): Promise<void> {
     : new CopilotRuntime(options.workspace, db, emit, runtimeCommand);
 
   const parentMonitor = setInterval(() => {
-    try {
-      process.kill(ppid, 0);
-    } catch {
+    if (!processIsAlive(ppid)) {
       void close("Parent Neovim process exited").finally(() => exit(0));
     }
   }, 2_000);

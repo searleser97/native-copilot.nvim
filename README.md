@@ -191,16 +191,20 @@ task, tool, environment, or schedule rows. Use `/tasks` or
 The resolved main Copilot command defines the primary session's initial permission policy.
 `--allow-all` uses the SDK's `approveAll` decision behind the lifecycle guard; otherwise
 permission requests are shown in Neovim. Dynamically generated agents may inherit that behavior,
-request interactive approval, or
-define a stricter path/tool/action ceiling. A child may request `approveAll` only when the main
-command grants it, preventing privilege escalation. While a busy long-lived session is silent, the
-host checks the SDK's durable event and pending-permission state. Missed lifecycle events are
-replayed once, and each pending permission is matched back to its original full request before the
-same generation/session-bound evaluator applies MCP, path, tool, managed-approval, and
-`approveAll` rules. Requests whose original policy inputs cannot be reconstructed are denied
-closed. Permission and MCP-auth callbacks are bound to the exact agent generation and SDK session
-that created them; lifecycle transitions synchronously invalidate old callbacks and reject their
-pending requests before disconnect begins.
+request interactive approval, or define a stricter path/tool/action ceiling. A concrete child
+profile is only a ceiling: disallowed requests are denied immediately, while matching requests
+still use the main policy's approval posture. They auto-approve only when the main command grants
+`--allow-all`; an interactive main policy continues through the normal Neovim prompt. Managed
+approval requests that pass those ceilings also remain interactive, and the captured MCP subset is
+checked before either prompting or approving. A child may request `approveAll` only when the main
+command grants it, so the permission-free agent management tools cannot elevate a spawned agent.
+While a busy long-lived session is silent, the host checks the SDK's durable event and
+pending-permission state. Missed lifecycle events are replayed once, and each pending permission is
+matched back to its original full request before the same generation/session-bound evaluator
+applies MCP, path, tool, managed-approval, and `approveAll` rules. Requests whose original policy
+inputs cannot be reconstructed are denied closed. Permission and MCP-auth callbacks are bound to
+the exact agent generation and SDK session that created them; lifecycle transitions synchronously
+invalidate old callbacks and reject their pending requests before disconnect begins.
 
 Commands mirror the primary mappings:
 
@@ -300,8 +304,9 @@ same native configuration as the main agent:
 - **Model / reasoning effort** — `--model` and `--reasoning-effort` from the main command become the
   default for every session, including spawned agents.
 - **Permission policy** — `--allow-all` uses the SDK `approveAll` decision through a
-  generation/session-bound handler for the main session; children inherit that behavior unless
-  they narrow it.
+  generation/session-bound handler for the main session. Child modes may inherit it or force
+  prompting; a concrete child profile narrows what is eligible but does not independently approve
+  a request.
 
 Agent settings only **narrow or deliberately override** this single source of truth; they never
 recreate a parallel definition:
@@ -447,8 +452,15 @@ and indexed durable SDK-session ownership checks.
 Migrations take the SQLite write lock before reading the schema version, migrate v8 worker
 definitions and mailboxes in place, adopt legacy primary-session state into the new primary agent
 idempotently, enforce primary/non-primary alias reservations atomically, and keep failed or
-taskless startups out of recovery selection. The v11-to-v12 upgrade reruns the conservative startup
-classifier and ACL scrub: a non-primary run is recoverable only when it has
+taskless startups out of recovery selection. Before upgrading an older schema, the host checks the
+owner PID of every active run while holding that lock. If any owner process is still live, startup
+fails with a restart-required error and the migration transaction rolls back without rebuilding
+leases, resetting deliveries, or classifying startup rows. Close every Neovim instance using the
+database and start again to perform the upgrade; after the schema version advances, newly started
+older hosts reject the newer database, while the v12 lease constraints make a concurrently started
+legacy writer fail closed instead of storing an incompatible lease. The v11-to-v12 upgrade then
+reruns the conservative startup classifier and ACL scrub: a non-primary run is recoverable only
+when it has
 both a persisted SDK session and a delivered user task; session-only rows are failed, release their
 aliases, and are removed from related ACLs. Primary rows require their persisted session but do not
 require a user task. A session-id index and startup consistency check reject persisted ownership by

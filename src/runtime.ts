@@ -301,8 +301,21 @@ type McpAuthHandler = NonNullable<SessionConfig["onMcpAuthRequest"]>;
 type McpAuthRequest = Parameters<McpAuthHandler>[0];
 type PermissionInvocation = Parameters<PermissionHandler>[1];
 type PermissionHandlerResult = Awaited<ReturnType<PermissionHandler>>;
+type PermissionDecision = Exclude<PermissionRequestResult, { kind: "no-result" }>;
+type PermissionRejection = Extract<PermissionDecision, { kind: "reject" }>;
+type PermissionNoResult = Extract<PermissionRequestResult, { kind: "no-result" }>;
+type PermissionCeilingResult = PermissionRejection | PermissionNoResult;
+type AttributedPermissionHandlerResult = Extract<
+  PermissionHandlerResult,
+  { kind: "attributed" }
+>;
+type ConcretePermissionHandlerResult =
+  | PermissionDecision
+  | (Omit<AttributedPermissionHandlerResult, "result"> & {
+      result: PermissionDecision;
+    });
 type PermissionPolicyEvaluation =
-  | { kind: "respond"; response: PermissionHandlerResult }
+  | { kind: "respond"; response: ConcretePermissionHandlerResult }
   | { kind: "prompt" };
 
 /**
@@ -808,29 +821,31 @@ function toolAllowed(profile: PermissionProfile, tool: string): boolean {
   );
 }
 
-function reject(feedback: string): PermissionRequestResult {
+function reject(feedback: string): PermissionRejection {
   return { kind: "reject", feedback };
 }
 
-function approve(request: PermissionRequest): PermissionRequestResult {
-  return "managedApprovalRequired" in request && request.managedApprovalRequired === true
-    ? { kind: "no-result" }
-    : { kind: "approve-once" };
+function withinPermissionCeiling(): PermissionNoResult {
+  return { kind: "no-result" };
 }
 
+/**
+ * Applies a concrete agent profile only as a narrowing ceiling. `no-result`
+ * means the request passed that ceiling and still needs the parent policy.
+ */
 export function permissionDecision(
   profile: PermissionProfile,
   workspace: string,
   request: PermissionRequest,
-): PermissionRequestResult {
+): PermissionCeilingResult {
   switch (request.kind) {
       case "read":
         return isWithin(request.path, profile.paths.read, workspace)
-          ? approve(request)
+          ? withinPermissionCeiling()
           : reject(`Read access is outside the configured path ceiling: ${request.path}`);
       case "write":
         return isWithin(request.fileName, profile.paths.write, workspace)
-          ? approve(request)
+          ? withinPermissionCeiling()
           : reject(`Write access is outside the configured path ceiling: ${request.fileName}`);
       case "shell": {
         if (!profile.commands) {
@@ -854,19 +869,19 @@ export function permissionDecision(
         ) {
           return reject("Git write operations are disabled for this agent.");
         }
-        return approve(request);
+        return withinPermissionCeiling();
       }
       case "url":
         return profile.network
-          ? approve(request)
+          ? withinPermissionCeiling()
           : reject("Network access is disabled for this agent.");
       case "mcp":
         return profile.externalActions && toolAllowed(profile, request.toolName)
-          ? approve(request)
+          ? withinPermissionCeiling()
           : reject(`MCP tool "${request.toolName}" is not permitted for this agent.`);
       case "custom-tool":
         return toolAllowed(profile, request.toolName)
-          ? approve(request)
+          ? withinPermissionCeiling()
           : reject(`Custom tool "${request.toolName}" is not permitted for this agent.`);
       case "memory":
       case "hook":
@@ -874,20 +889,39 @@ export function permissionDecision(
       case "extension-permission-access":
       case "factory":
         return profile.externalActions
-          ? approve(request)
+          ? withinPermissionCeiling()
           : reject(`${request.kind} operations are disabled for this agent.`);
   }
 }
 
+/** Whether the parent grants non-interactive authority under this child posture. */
 export function usesApproveAll(
   permission: DynamicPermission | undefined,
   mainAllowsAll: boolean,
 ): boolean {
-  if (permission && "mode" in permission) {
-    return permission.mode === "approveAll" ||
-      (permission.mode === "inherit" && mainAllowsAll);
+  if (!mainAllowsAll) {
+    return false;
   }
-  return permission === undefined && mainAllowsAll;
+  if (permission && "mode" in permission) {
+    return permission.mode !== "prompt";
+  }
+  return true;
+}
+
+function concretePermissionResponse(
+  response: PermissionHandlerResult,
+): ConcretePermissionHandlerResult | undefined {
+  if (response.kind === "attributed") {
+    if (response.result.kind === "no-result") {
+      return undefined;
+    }
+    return {
+      kind: "attributed",
+      result: response.result,
+      decisionContext: response.decisionContext,
+    };
+  }
+  return response.kind === "no-result" ? undefined : response;
 }
 
 export function sdkToolPatterns(patterns: string[]): string[] {
@@ -978,7 +1012,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       binding: SessionHandlerBinding;
       sessionId: string;
       requestKey: string;
-      respond: (result: PermissionRequestResult) => void;
+      respond: (result: PermissionDecision) => void;
     }
   >();
   // Serializes lifecycle operations per agent UUID so concurrent update/stop
@@ -1644,7 +1678,22 @@ export class CopilotRuntime implements RuntimeAdapter {
         ),
       };
     }
+    const ceiling = permission && !("mode" in permission) ? permission : undefined;
+    if (ceiling) {
+      // A concrete child profile can veto the request, but an allowed match does
+      // not itself grant authority; approval still follows the main policy below.
+      const response = permissionDecision(ceiling, this.workspace, request);
+      if (response.kind === "reject") {
+        return { kind: "respond", response };
+      }
+    }
     if (usesApproveAll(permission, this.policy.allowAll)) {
+      if (
+        binding.managedSettingsEnabled ||
+        request.managedApprovalRequired === true
+      ) {
+        return { kind: "prompt" };
+      }
       const response = await approveAll(request, invocation);
       if (!this.sessionBindingCurrent(binding, invocation.sessionId)) {
         return {
@@ -1654,17 +1703,10 @@ export class CopilotRuntime implements RuntimeAdapter {
           ),
         };
       }
-      const result = response.kind === "attributed" ? response.result : response;
-      return result.kind === "no-result"
+      const concreteResponse = concretePermissionResponse(response);
+      return concreteResponse === undefined
         ? { kind: "prompt" }
-        : { kind: "respond", response };
-    }
-    const ceiling = permission && !("mode" in permission) ? permission : undefined;
-    if (ceiling) {
-      const response = permissionDecision(ceiling, this.workspace, request);
-      if (response.kind !== "no-result") {
-        return { kind: "respond", response };
-      }
+        : { kind: "respond", response: concreteResponse };
     }
     return { kind: "prompt" };
   }
@@ -1674,7 +1716,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     request: PermissionRequest,
     binding: SessionHandlerBinding,
     sessionId: string,
-    respond: (result: PermissionRequestResult) => void,
+    respond: (result: PermissionDecision) => void,
   ): void {
     if (!this.sessionBindingCurrent(binding, sessionId)) {
       respond(
@@ -1719,7 +1761,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         return evaluation.response;
       }
       const requestId = randomUUID();
-      return new Promise<PermissionRequestResult>((resolve) => {
+      return new Promise<PermissionDecision>((resolve) => {
         this.promptPermission(
           requestId,
           request,
@@ -1840,7 +1882,7 @@ export class CopilotRuntime implements RuntimeAdapter {
               result: evaluation.response.result,
               decisionContext: evaluation.response.decisionContext,
             });
-          } else if (evaluation.response.kind !== "no-result") {
+          } else {
             await live.session.rpc.permissions.handlePendingPermissionRequest({
               requestId: pending.requestId,
               result: evaluation.response,
@@ -1854,9 +1896,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           live.binding,
           live.session.sessionId,
           (result) => {
-            if (result.kind === "no-result") {
-              return;
-            }
             void live.session.rpc.permissions
               .handlePendingPermissionRequest({ requestId: pending.requestId, result })
               .catch((error: unknown) => {
@@ -2583,8 +2622,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         continue;
       }
       // A concrete permission profile: its tool allowlist may only narrow the
-      // canonical native ceiling, never widen it. Rejecting (rather than silently
-      // intersecting) surfaces an invalid LLM-authored definition instead of hiding it.
+      // canonical native ceiling, never widen it. The profile grants no approval
+      // authority of its own, so skipPermission on the management tool cannot turn
+      // an interactive parent into an auto-approving child.
       if (!agentToolsWithinCeiling(this.policy.availableTools, permissions.tools.allow)) {
         throw new Error(
           `Agent "${definition.id}" requests tools outside the main session allowlist ` +

@@ -67,7 +67,9 @@ export const dynamicAgentSchema = z.object({
   reasoningEffort: reasoningEffort.optional().describe("Optional reasoning effort override."),
   reasoningSummary: reasoningSummary.optional().describe("Optional reasoning display level."),
   permissions: dynamicPermissionSchema.optional().describe(
-    "Agent permission policy; omit to inherit the main session policy.",
+    "Agent permission posture. A concrete profile is only a narrowing ceiling: allowed requests " +
+      "still inherit the main session's approval behavior and prompt unless the main command grants " +
+      "--allow-all. Omit to inherit the main session policy.",
   ),
   mcpServers: stringList.optional().describe(
     "Subset of the MCP server ceiling captured from the primary session; omit to inherit that ceiling.",

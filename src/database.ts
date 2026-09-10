@@ -10,6 +10,7 @@ const RESERVED_AGENT_ALIAS_INDEX = "runs_reserved_agent_alias_uq";
 const AGENT_ALIAS_CONFLICT_MARKER = "agent alias reservation conflict";
 
 type LegacyRunMode = "standard" | "agent";
+export type OwnerIsAlive = (pid: number) => boolean;
 export type RunStatus = "active" | "stopped" | "interrupted";
 export type RunStartupState = "reserved" | "session_created" | "ready" | "failed";
 export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
@@ -125,13 +126,40 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Probes a process without signalling it. Only an explicit "no such process"
+ * result is treated as dead; access-denied and unknown OS failures stay live so
+ * recovery and migration fail closed on Windows.
+ */
+export function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ESRCH"
+    );
+  }
+}
+
 export class AgentDatabase {
   readonly db: DatabaseSync;
 
-  constructor(path: string) {
+  constructor(path: string, ownerIsAlive: OwnerIsAlive = processIsAlive) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.migrate();
+    try {
+      this.migrate(ownerIsAlive);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   /**
@@ -139,7 +167,7 @@ export class AgentDatabase {
    * v6-v11 agent runs and mailboxes are migrated in place. A database written by a
    * newer host is never erased.
    */
-  private migrate(): void {
+  private migrate(ownerIsAlive: OwnerIsAlive): void {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
@@ -171,6 +199,12 @@ export class AgentDatabase {
             `this host understands (${SCHEMA_VERSION}). Update native-copilot.nvim instead of ` +
             "opening it with an older host; the newer state is left untouched.",
         );
+      }
+      if (schema.version < SCHEMA_VERSION) {
+        // Older hosts do not re-read schema_meta after startup. Refuse the version
+        // flip while one still owns active work; the v12 NOT NULL lease columns
+        // then make any startup race from an older writer fail closed.
+        this.assertNoLiveMigrationOwners(schema.version, ownerIsAlive);
       }
       if (schema.version < 6) {
         this.db.exec(`
@@ -314,6 +348,44 @@ export class AgentDatabase {
       this.db.exec("PRAGMA foreign_keys = ON");
     }
     this.ensureAgentAliasConstraints();
+  }
+
+  private assertNoLiveMigrationOwners(
+    schemaVersion: number,
+    ownerIsAlive: OwnerIsAlive,
+  ): void {
+    if (
+      !this.hasColumn("runs", "status") ||
+      !this.hasColumn("runs", "owner_pid")
+    ) {
+      return;
+    }
+    const active = this.db
+      .prepare(
+        `SELECT DISTINCT owner_pid AS ownerPid
+         FROM runs
+         WHERE status = 'active' AND owner_pid IS NOT NULL`,
+      )
+      .all() as unknown as Array<{ ownerPid: number }>;
+    const live = active.filter((run) => {
+      try {
+        return ownerIsAlive(run.ownerPid);
+      } catch {
+        return true;
+      }
+    });
+    if (live.length === 0) {
+      return;
+    }
+    const owners = [...new Set(live.map((run) => run.ownerPid))]
+      .sort((left, right) => left - right);
+    throw new Error(
+      `Restart required: cannot migrate the Copilot state database from schema version ` +
+        `${schemaVersion} to ${SCHEMA_VERSION} while active runs are owned by live host ` +
+        `process${owners.length === 1 ? "" : "es"} ${owners.join(", ")}. Close every Neovim ` +
+        "instance using this database, then start native-copilot.nvim again. The migration was " +
+        "deferred without changing run, message, or delivery-lease state.",
+    );
   }
 
   private hasColumn(table: string, column: string): boolean {
@@ -1367,7 +1439,7 @@ export class AgentDatabase {
     return [...bySession.keys()];
   }
 
-  markInterruptedWork(reason: string, ownerIsAlive: (pid: number) => boolean): number {
+  markInterruptedWork(reason: string, ownerIsAlive: OwnerIsAlive = processIsAlive): number {
     return this.transaction(() => {
       const timestamp = now();
       const active = this.db
