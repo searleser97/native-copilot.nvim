@@ -1479,7 +1479,20 @@ tick = function()
     phase = 'resume-tool-result'
     schedule_tick()
   elseif phase == 'resume-tool-result' then
-    local detail_buf = vim.api.nvim_get_current_buf()
+    local detail_win
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      local config = vim.api.nvim_win_get_config(win)
+      local title = type(config.title) == 'string' and config.title or ''
+      if config.relative ~= '' and title:find('Copilot activity details', 1, true) then
+        detail_win = win
+        break
+      end
+    end
+    if not detail_win then
+      schedule_tick()
+      return
+    end
+    local detail_buf = vim.api.nvim_win_get_buf(detail_win)
     local detail_content = text(detail_buf)
     if not detail_content:find('timestamp probe complete', 1, true) then
       schedule_tick()
@@ -1494,7 +1507,10 @@ tick = function()
     local close_mapping = vim.api.nvim_buf_call(detail_buf, function()
       return vim.fn.maparg('q', 'n', false, true)
     end)
-    if close_mapping.callback then close_mapping.callback() end
+    if close_mapping.callback then
+      vim.api.nvim_set_current_win(detail_win)
+      close_mapping.callback()
+    end
     finish()
   end
 end
