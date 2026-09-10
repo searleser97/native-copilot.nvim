@@ -4950,8 +4950,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       try {
         this.emitAgentLifecycle("agent.loading", context, { recovered: false });
         const live = await this.ensureAgentSession(context.agentId, transition);
-        await this.sendUserPromptOnLive(live, context.agent.task, false);
-        this.db.completeRunStartup(context.runId);
+        await this.sendUserPromptOnLive(live, context.agent.task, false, true);
         this.emitAgentLifecycle("agent.ready", context, {
           recovered: false,
           sessionId: live.session.sessionId,
@@ -5603,6 +5602,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     live: LiveSession,
     content: string,
     retryOnFailure: boolean,
+    initialTask = false,
   ): Promise<string> {
     if (!this.liveConnectionCurrent(live, true)) {
       throw new Error("The SDK session selected for this prompt is no longer current.");
@@ -5647,7 +5647,20 @@ export class CopilotRuntime implements RuntimeAdapter {
         `Prompt message "${id}" was accepted by an SDK session that is no longer current.`,
       );
     }
-    if (!this.db.completeMessage(claim.id, claim.runId, claim.target, claim.leaseToken)) {
+    const completed = initialTask
+      ? this.db.completeInitialTask(
+          claim.id,
+          claim.runId,
+          claim.target,
+          claim.leaseToken,
+        )
+      : this.db.completeMessage(
+          claim.id,
+          claim.runId,
+          claim.target,
+          claim.leaseToken,
+        );
+    if (!completed) {
       throw new Error(`Prompt message "${id}" lost its delivery lease before completion.`);
     }
     this.emit(

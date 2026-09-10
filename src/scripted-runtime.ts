@@ -1477,7 +1477,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         );
         if (
           !claimedTask ||
-          !this.db.completeMessage(
+          !this.db.completeInitialTask(
             claimedTask.id,
             claimedTask.runId,
             claimedTask.target,
@@ -1486,7 +1486,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
         ) {
           throw new Error("The scripted initial task lost its delivery lease.");
         }
-        this.db.completeRunStartup(agent.runId);
         this.emit(
           "agent.ready",
           { ...this.agentPayload(agent), recovered: false, sessionId: agent.sessionId },

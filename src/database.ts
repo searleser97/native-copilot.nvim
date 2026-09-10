@@ -324,10 +324,11 @@ export class AgentDatabase {
         let preservedLegacyPrimaryRunIds = new Set<string>();
         if (schema.version < 9) {
           preservedLegacyPrimaryRunIds = this.migrateLegacyAgentState();
+        } else {
+          preservedLegacyPrimaryRunIds = this.repairLegacyPrimaryStateV13();
         }
-        // Schema 13 deliberately reruns this repair for databases already written
-        // as v12. Legacy Standard mail and ACLs must be adopted before classification
-        // so a newer sessionless Standard run cannot hide an older viable session.
+        // Legacy Standard mail and ACLs must be adopted before classification so
+        // a failed/sessionless generic primary cannot hide an older viable session.
         this.classifyLegacyStartups(preservedLegacyPrimaryRunIds);
         this.scrubGhostAclsInTransaction();
         this.assertAgentAliasState();
@@ -413,6 +414,829 @@ export class AgentDatabase {
         last_error TEXT
       );
     `);
+  }
+
+  /**
+   * Repairs the schema-v9 migration failure mode where a sessionless Standard
+   * run was converted first and an older Standard run retained the usable SDK
+   * session. This runs only while upgrading v9-v12 and is safe to repeat inside
+   * the migration transaction.
+   */
+  private repairLegacyPrimaryStateV13(): Set<string> {
+    type RepairRun = {
+      id: string;
+      mode: LegacyRunMode;
+      agentId: string | null;
+      alias: string | null;
+      definition: string | null;
+      workspace: string;
+      status: RunStatus;
+      startedAt: string;
+      interruptionReason: string | null;
+      isPrimary: number;
+      startupState: RunStartupState;
+      recoveryEligible: number;
+      legacyPrimaryCanTalk: number;
+      legacyPrimaryCanObserve: number;
+      sessionId: string | null;
+    };
+    type ParsedDefinition = {
+      record: Record<string, unknown>;
+      definition: Record<string, unknown>;
+      mcpServers: string[];
+      canTalkTo: string[];
+      canObserve: string[];
+      canTalkToAgentIds: string[];
+      canObserveAgentIds: string[];
+      standardCanTalk: boolean;
+      standardCanObserve: boolean;
+    };
+
+    const runs = this.db
+      .prepare(
+        `SELECT runs.id, runs.mode, runs.agent_id AS agentId, runs.alias,
+                runs.definition, runs.workspace, runs.status,
+                runs.started_at AS startedAt,
+                runs.interruption_reason AS interruptionReason,
+                runs.is_primary AS isPrimary,
+                runs.startup_state AS startupState,
+                runs.recovery_eligible AS recoveryEligible,
+                runs.standard_can_talk AS legacyPrimaryCanTalk,
+                runs.standard_can_observe AS legacyPrimaryCanObserve,
+                agent_sessions.session_id AS sessionId
+         FROM runs
+         LEFT JOIN agent_sessions ON agent_sessions.run_id = runs.id
+         ORDER BY runs.workspace, runs.started_at DESC, runs.id DESC`,
+      )
+      .all() as unknown as RepairRun[];
+    const runsByWorkspace = new Map<string, RepairRun[]>();
+    for (const run of runs) {
+      const workspaceRuns = runsByWorkspace.get(run.workspace) ?? [];
+      workspaceRuns.push(run);
+      runsByWorkspace.set(run.workspace, workspaceRuns);
+    }
+
+    const parseDefinition = (run: RepairRun): ParsedDefinition | undefined => {
+      if (run.definition === null) {
+        return undefined;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(run.definition);
+      } catch (error) {
+        throw new Error(
+          `Stored agent run "${run.id}" contains invalid JSON during schema-v13 ` +
+            "legacy-primary repair.",
+          { cause: error },
+        );
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error(
+          `Stored agent run "${run.id}" is not an object during schema-v13 ` +
+            "legacy-primary repair.",
+        );
+      }
+      const record = { ...(parsed as Record<string, unknown>) };
+      if (
+        typeof record.definition !== "object" ||
+        record.definition === null ||
+        Array.isArray(record.definition)
+      ) {
+        throw new Error(
+          `Stored agent run "${run.id}" has no valid definition during schema-v13 ` +
+            "legacy-primary repair.",
+        );
+      }
+      const definition = {
+        ...(record.definition as Record<string, unknown>),
+      };
+      const stringArray = (
+        value: unknown,
+        field: string,
+        optional = false,
+      ): string[] => {
+        if (value === undefined && optional) {
+          return [];
+        }
+        if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+          throw new Error(
+            `Stored agent run "${run.id}" has an invalid ${field} during schema-v13 ` +
+              "legacy-primary repair.",
+          );
+        }
+        return [...value] as string[];
+      };
+      const booleanValue = (value: unknown, field: string): boolean => {
+        if (value === undefined) {
+          return false;
+        }
+        if (typeof value !== "boolean") {
+          throw new Error(
+            `Stored agent run "${run.id}" has an invalid ${field} during schema-v13 ` +
+              "legacy-primary repair.",
+          );
+        }
+        return value;
+      };
+      return {
+        record,
+        definition,
+        mcpServers: stringArray(record.mcpServers, "mcpServers", true),
+        canTalkTo: stringArray(definition.canTalkTo, "definition.canTalkTo"),
+        canObserve: stringArray(
+          definition.canObserve,
+          "definition.canObserve",
+          true,
+        ),
+        canTalkToAgentIds: stringArray(
+          record.canTalkToAgentIds,
+          "canTalkToAgentIds",
+          true,
+        ),
+        canObserveAgentIds: stringArray(
+          record.canObserveAgentIds,
+          "canObserveAgentIds",
+          true,
+        ),
+        standardCanTalk: booleanValue(record.standardCanTalk, "standardCanTalk"),
+        standardCanObserve: booleanValue(
+          record.standardCanObserve,
+          "standardCanObserve",
+        ),
+      };
+    };
+
+    const preservedPrimaryRunIds = new Set<string>();
+    const timestamp = now();
+    for (const [workspace, workspaceRuns] of runsByWorkspace) {
+      const standards = workspaceRuns.filter((run) => run.mode === "standard");
+      if (standards.length === 0) {
+        continue;
+      }
+      const primaryRuns = workspaceRuns.filter(
+        (run) => run.mode === "agent" && run.isPrimary === 1,
+      );
+      for (const run of primaryRuns) {
+        if (!run.agentId || !run.alias) {
+          throw new Error(
+            `Legacy primary run "${run.id}" in workspace "${workspace}" has no complete ` +
+              "durable agent identity; schema-v13 repair was aborted.",
+          );
+        }
+        if (run.alias === LEGACY_PRIMARY_IDENTITY) {
+          throw new Error(
+            `Legacy primary run "${run.id}" in workspace "${workspace}" uses the reserved ` +
+              `alias "${LEGACY_PRIMARY_IDENTITY}"; schema-v13 repair was aborted.`,
+          );
+        }
+      }
+
+      const viablePrimaries = primaryRuns.filter(
+        (run) =>
+          run.sessionId !== null &&
+          run.definition !== null &&
+          run.startupState !== "failed" &&
+          run.recoveryEligible === 1,
+      );
+      const viablePrimaryAgentIds = new Set(
+        viablePrimaries.map((run) => run.agentId!),
+      );
+      if (viablePrimaryAgentIds.size > 1) {
+        const details = viablePrimaries
+          .map(
+            (run) =>
+              `run "${run.id}" / agent "${run.agentId}" / session "${run.sessionId}"`,
+          )
+          .join(", ");
+        throw new Error(
+          `Workspace "${workspace}" has multiple session-backed generic primary identities ` +
+            `during schema-v13 repair (${details}). Resolve the ambiguous persisted state ` +
+            "before starting native-copilot.nvim.",
+        );
+      }
+
+      const viablePrimary = viablePrimaries[0];
+      const existingPrimary = viablePrimary ?? primaryRuns[0];
+      const sessionBackedStandard = standards.find(
+        (run) => run.sessionId !== null,
+      );
+      const targetRun =
+        existingPrimary ?? sessionBackedStandard ?? standards[0];
+      if (!targetRun) {
+        continue;
+      }
+      const sessionSource =
+        viablePrimary ??
+        sessionBackedStandard ??
+        (
+          existingPrimary?.sessionId !== null &&
+          existingPrimary?.sessionId !== undefined
+            ? existingPrimary
+            : undefined
+        );
+      const primaryAgentId = existingPrimary?.agentId ?? randomUUID();
+      const oldPrimaryAgentIds = new Set(
+        primaryRuns
+          .map((run) => run.agentId)
+          .filter((agentId): agentId is string => agentId !== null),
+      );
+      const oldPrimaryAliases = new Set(
+        primaryRuns
+          .map((run) => run.alias)
+          .filter((alias): alias is string => alias !== null),
+      );
+
+      const workerAliases = new Set(
+        workspaceRuns
+          .filter(
+            (run) =>
+              run.mode === "agent" &&
+              run.isPrimary === 0 &&
+              run.agentId !== null &&
+              run.alias !== null &&
+              run.definition !== null,
+          )
+          .map((run) => run.alias!),
+      );
+      const reusablePrimaryAliases = new Set(
+        [...oldPrimaryAliases].filter((alias) => !workerAliases.has(alias)),
+      );
+      let primaryAlias = existingPrimary?.alias ?? PRIMARY_ALIAS;
+      if (workerAliases.has(primaryAlias)) {
+        let attempt = 0;
+        do {
+          primaryAlias =
+            attempt === 0
+              ? PRIMARY_ALIAS
+              : attempt === 1
+                ? "primary"
+                : `primary_${attempt}`;
+          attempt += 1;
+        } while (
+          primaryAlias === LEGACY_PRIMARY_IDENTITY ||
+          workerAliases.has(primaryAlias)
+        );
+      }
+
+      const parsedByRunId = new Map<string, ParsedDefinition>();
+      const aliases = new Map<string, string>();
+      const knownAgentIds = new Set<string>();
+      for (const run of workspaceRuns) {
+        if (run.mode !== "agent") {
+          continue;
+        }
+        if (run.agentId) {
+          knownAgentIds.add(run.agentId);
+        }
+        const parsed = parseDefinition(run);
+        if (!parsed) {
+          continue;
+        }
+        if (!run.agentId || !run.alias) {
+          throw new Error(
+            `Stored agent run "${run.id}" has a definition but no complete durable identity ` +
+              "during schema-v13 legacy-primary repair.",
+          );
+        }
+        parsedByRunId.set(run.id, parsed);
+        const mappedAgentId = oldPrimaryAgentIds.has(run.agentId)
+          ? primaryAgentId
+          : run.agentId;
+        if (run.isPrimary === 0) {
+          const existingAlias = aliases.get(run.alias);
+          if (
+            existingAlias !== undefined &&
+            existingAlias !== mappedAgentId
+          ) {
+            throw new Error(
+              `Workspace "${workspace}" has ambiguous persisted alias "${run.alias}" during ` +
+                "schema-v13 legacy-primary repair.",
+            );
+          }
+          aliases.set(run.alias, mappedAgentId);
+        }
+      }
+      aliases.set(primaryAlias, primaryAgentId);
+      for (const alias of reusablePrimaryAliases) {
+        aliases.set(alias, primaryAgentId);
+      }
+      knownAgentIds.add(primaryAgentId);
+
+      const mapAgentId = (agentId: string): string =>
+        oldPrimaryAgentIds.has(agentId) ? primaryAgentId : agentId;
+      const resolveSelectors = (selectors: readonly string[]): string[] => {
+        const resolved = new Set<string>();
+        for (const selector of selectors) {
+          if (selector === LEGACY_PRIMARY_IDENTITY) {
+            resolved.add(primaryAgentId);
+            continue;
+          }
+          if (selector.startsWith("agent:") && selector.length > "agent:".length) {
+            resolved.add(mapAgentId(selector.slice("agent:".length)));
+            continue;
+          }
+          const byAlias = aliases.get(selector);
+          if (byAlias) {
+            resolved.add(byAlias);
+            continue;
+          }
+          if (knownAgentIds.has(selector)) {
+            resolved.add(mapAgentId(selector));
+          }
+        }
+        return [...resolved];
+      };
+      const normalizePersistedIds = (agentIds: readonly string[]): string[] =>
+        [...new Set(agentIds.map(mapAgentId))];
+
+      const primaryCanTalkTo = new Set<string>();
+      const primaryCanObserve = new Set<string>();
+      let primaryDefinitionSource: ParsedDefinition | undefined;
+      for (const run of primaryRuns) {
+        const parsed = parsedByRunId.get(run.id);
+        if (!parsed) {
+          continue;
+        }
+        if (!primaryDefinitionSource && run.agentId === primaryAgentId) {
+          primaryDefinitionSource = parsed;
+        }
+        for (const agentId of [
+          ...normalizePersistedIds(parsed.canTalkToAgentIds),
+          ...resolveSelectors(parsed.canTalkTo),
+        ]) {
+          if (agentId !== primaryAgentId) {
+            primaryCanTalkTo.add(agentId);
+          }
+        }
+        for (const agentId of [
+          ...normalizePersistedIds(parsed.canObserveAgentIds),
+          ...resolveSelectors(parsed.canObserve),
+        ]) {
+          if (agentId !== primaryAgentId) {
+            primaryCanObserve.add(agentId);
+          }
+        }
+      }
+      primaryDefinitionSource ??= primaryRuns
+        .map((run) => parsedByRunId.get(run.id))
+        .find((parsed): parsed is ParsedDefinition => parsed !== undefined);
+
+      const obsoletePrimaryRuns = primaryRuns.filter(
+        (run) => run.id !== targetRun.id,
+      );
+      const disqualify = this.db.prepare(
+        `UPDATE runs
+         SET definition = NULL,
+             startup_state = 'failed',
+             recovery_eligible = 0,
+             status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
+             ended_at = COALESCE(ended_at, ?),
+             interruption_reason = COALESCE(
+               interruption_reason,
+               'Obsolete legacy primary state repaired by schema v13'
+             ),
+             owner_pid = NULL
+         WHERE id = ?`,
+      );
+      for (const run of obsoletePrimaryRuns) {
+        disqualify.run(timestamp, run.id);
+      }
+      if (targetRun.mode === "agent") {
+        this.db
+          .prepare("UPDATE runs SET alias = ?, definition = NULL WHERE id = ?")
+          .run(primaryAlias, targetRun.id);
+      }
+
+      const updateDefinition = this.db.prepare(
+        "UPDATE runs SET definition = ? WHERE id = ?",
+      );
+      for (const run of workspaceRuns) {
+        if (
+          run.mode !== "agent" ||
+          run.isPrimary === 1 ||
+          !run.agentId
+        ) {
+          continue;
+        }
+        const parsed = parsedByRunId.get(run.id);
+        if (!parsed) {
+          continue;
+        }
+        const canTalkToAgentIds = new Set([
+          ...normalizePersistedIds(parsed.canTalkToAgentIds),
+          ...resolveSelectors(parsed.canTalkTo),
+        ]);
+        const canObserveAgentIds = new Set([
+          ...normalizePersistedIds(parsed.canObserveAgentIds),
+          ...resolveSelectors(parsed.canObserve),
+        ]);
+        if (
+          run.legacyPrimaryCanTalk === 1 ||
+          parsed.standardCanTalk
+        ) {
+          primaryCanTalkTo.add(run.agentId);
+        }
+        if (
+          run.legacyPrimaryCanObserve === 1 ||
+          parsed.standardCanObserve
+        ) {
+          primaryCanObserve.add(run.agentId);
+        }
+        parsed.definition.canTalkTo = [...canTalkToAgentIds].map(
+          (agentId) => `agent:${agentId}`,
+        );
+        parsed.definition.canObserve = [...canObserveAgentIds].map(
+          (agentId) => `agent:${agentId}`,
+        );
+        parsed.record.definition = parsed.definition;
+        parsed.record.mcpServers = parsed.mcpServers;
+        parsed.record.canTalkToAgentIds = [...canTalkToAgentIds];
+        parsed.record.canObserveAgentIds = [...canObserveAgentIds];
+        delete parsed.record.standardCanTalk;
+        delete parsed.record.standardCanObserve;
+        updateDefinition.run(JSON.stringify(parsed.record), run.id);
+      }
+
+      const primaryDefinition: Record<string, unknown> = primaryDefinitionSource
+        ? { ...primaryDefinitionSource.definition }
+        : {
+            id: primaryAlias,
+            displayName: "Copilot",
+            description: "Primary user-facing Copilot agent",
+            task: "Assist the user in the primary Neovim conversation.",
+            prompt:
+              "You are the Copilot agent attached to the primary user-facing Neovim buffer.",
+          };
+      primaryDefinition.id = primaryAlias;
+      primaryDefinition.canTalkTo = [...primaryCanTalkTo].map(
+        (agentId) => `agent:${agentId}`,
+      );
+      primaryDefinition.canObserve = [...primaryCanObserve].map(
+        (agentId) => `agent:${agentId}`,
+      );
+      const primaryRecord: Record<string, unknown> = primaryDefinitionSource
+        ? { ...primaryDefinitionSource.record }
+        : {};
+      primaryRecord.definition = primaryDefinition;
+      primaryRecord.mcpServers = primaryDefinitionSource?.mcpServers ?? [];
+      primaryRecord.canTalkToAgentIds = [...primaryCanTalkTo];
+      primaryRecord.canObserveAgentIds = [...primaryCanObserve];
+      delete primaryRecord.standardCanTalk;
+      delete primaryRecord.standardCanObserve;
+
+      if (sessionSource?.sessionId) {
+        const associations = this.db
+          .prepare(
+            `SELECT runs.id, runs.mode, runs.workspace,
+                    runs.is_primary AS isPrimary, runs.agent_id AS agentId
+             FROM agent_sessions
+             JOIN runs ON runs.id = agent_sessions.run_id
+             WHERE agent_sessions.session_id = ?`,
+          )
+          .all(sessionSource.sessionId) as unknown as Array<{
+            id: string;
+            mode: LegacyRunMode;
+            workspace: string;
+            isPrimary: number;
+            agentId: string | null;
+          }>;
+        for (const association of associations) {
+          const repairable =
+            association.workspace === workspace &&
+            (
+              association.mode === "standard" ||
+              (
+                association.mode === "agent" &&
+                association.isPrimary === 1 &&
+                association.agentId !== null &&
+                oldPrimaryAgentIds.has(association.agentId)
+              )
+            );
+          if (!repairable) {
+            throw new Error(
+              `SDK session "${sessionSource.sessionId}" selected for legacy primary repair in ` +
+                `workspace "${workspace}" is also attached to run "${association.id}". ` +
+                "The ambiguous durable ownership was left unchanged.",
+            );
+          }
+        }
+        this.db
+          .prepare(
+            `DELETE FROM agent_sessions
+             WHERE session_id = ? AND run_id != ?`,
+          )
+          .run(sessionSource.sessionId, sessionSource.id);
+        if (sessionSource.id !== targetRun.id) {
+          this.db
+            .prepare("DELETE FROM agent_sessions WHERE run_id = ?")
+            .run(targetRun.id);
+          const moved = this.db
+            .prepare(
+              `UPDATE agent_sessions SET run_id = ?
+               WHERE run_id = ? AND session_id = ?`,
+            )
+            .run(targetRun.id, sessionSource.id, sessionSource.sessionId);
+          if (moved.changes !== 1) {
+            throw new Error(
+              `SDK session "${sessionSource.sessionId}" could not be transferred from legacy ` +
+                `Standard run "${sessionSource.id}" to generic primary run "${targetRun.id}".`,
+            );
+          }
+        }
+      }
+
+      const recoverable = sessionSource?.sessionId !== null &&
+        sessionSource?.sessionId !== undefined;
+      const targetUpdated = this.db
+        .prepare(
+          `UPDATE runs
+           SET mode = 'agent',
+               agent_id = ?,
+               alias = ?,
+               definition = ?,
+               is_primary = 1,
+               startup_state = ?,
+               recovery_eligible = ?,
+               status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
+               ended_at = CASE
+                 WHEN status = 'active' THEN COALESCE(ended_at, ?)
+                 ELSE ended_at
+               END,
+               interruption_reason = CASE
+                 WHEN status = 'active' THEN COALESCE(
+                   interruption_reason,
+                   'Legacy primary ownership repaired by schema v13'
+                 )
+                 ELSE interruption_reason
+               END,
+               owner_pid = NULL
+           WHERE id = ?`,
+        )
+        .run(
+          primaryAgentId,
+          primaryAlias,
+          JSON.stringify(primaryRecord),
+          recoverable ? "ready" : "reserved",
+          recoverable ? 1 : 0,
+          timestamp,
+          targetRun.id,
+        );
+      if (targetUpdated.changes !== 1) {
+        throw new Error(
+          `Legacy primary run "${targetRun.id}" in workspace "${workspace}" could not be ` +
+            "repaired atomically.",
+        );
+      }
+      if (!recoverable) {
+        preservedPrimaryRunIds.add(targetRun.id);
+      }
+
+      const target = `agent:${primaryAgentId}`;
+      const migrationFailedPrimaryRunIds = primaryRuns
+        .filter(
+          (run) =>
+            run.startupState === "failed" &&
+            run.interruptionReason ===
+              "Incomplete agent startup found during schema migration",
+        )
+        .map((run) => run.id);
+      if (migrationFailedPrimaryRunIds.length > 0) {
+        const placeholders = migrationFailedPrimaryRunIds
+          .map(() => "?")
+          .join(", ");
+        this.db
+          .prepare(
+            `UPDATE messages
+             SET status = 'pending', updated_at = ?
+             WHERE status = 'failed' AND run_id IN (${placeholders})`,
+          )
+          .run(timestamp, ...migrationFailedPrimaryRunIds);
+      }
+      const sourceAliases = new Set<string>([
+        LEGACY_PRIMARY_IDENTITY,
+        ...reusablePrimaryAliases,
+        ...[...oldPrimaryAgentIds].flatMap((agentId) => [
+          agentId,
+          `agent:${agentId}`,
+        ]),
+      ]);
+      const normalizeSource = (source: string): string =>
+        sourceAliases.has(source) ? target : source;
+      let sequence = this.nextSequence(targetRun.id, target);
+      const retarget = this.db.prepare(
+        `UPDATE messages
+         SET target = ?,
+             sequence = ?,
+             source = ?,
+             status = CASE WHEN status = 'delivering' THEN 'pending' ELSE status END,
+             updated_at = CASE WHEN status = 'delivering' THEN ? ELSE updated_at END
+         WHERE id = ?`,
+      );
+      const releaseLease = this.db.prepare(
+        "DELETE FROM delivery_leases WHERE message_id = ?",
+      );
+      const targetMessages = this.db
+        .prepare(
+          `SELECT id, source
+           FROM messages
+           WHERE run_id = ? AND target != ?
+           ORDER BY created_at, sequence, id`,
+        )
+        .all(targetRun.id, target) as unknown as Array<{
+          id: string;
+          source: string;
+        }>;
+      for (const message of targetMessages) {
+        retarget.run(
+          target,
+          sequence,
+          normalizeSource(message.source),
+          timestamp,
+          message.id,
+        );
+        releaseLease.run(message.id);
+        sequence += 1;
+      }
+      this.db
+        .prepare(
+          `UPDATE messages
+           SET source = CASE
+                 WHEN source IN (${[...sourceAliases].map(() => "?").join(", ")})
+                   THEN ?
+                 ELSE source
+               END,
+               status = CASE WHEN status = 'delivering' THEN 'pending' ELSE status END,
+               updated_at = CASE WHEN status = 'delivering' THEN ? ELSE updated_at END
+           WHERE run_id = ? AND target = ?`,
+        )
+        .run(...sourceAliases, target, timestamp, targetRun.id, target);
+      this.db
+        .prepare(
+          `DELETE FROM delivery_leases
+           WHERE message_id IN (
+             SELECT id FROM messages
+             WHERE run_id = ? AND status = 'pending'
+           )`,
+        )
+        .run(targetRun.id);
+
+      const obsoleteRunIds = [
+        ...standards.map((run) => run.id),
+        ...obsoletePrimaryRuns.map((run) => run.id),
+      ].filter((runId) => runId !== targetRun.id);
+      if (obsoleteRunIds.length > 0) {
+        const placeholders = obsoleteRunIds.map(() => "?").join(", ");
+        const messages = this.db
+          .prepare(
+            `SELECT id, source
+             FROM messages
+             WHERE run_id IN (${placeholders})
+               AND status IN ('pending', 'delivering')
+             ORDER BY created_at, sequence, id`,
+          )
+          .all(...obsoleteRunIds) as unknown as Array<{
+            id: string;
+            source: string;
+          }>;
+        const adopt = this.db.prepare(
+          `UPDATE messages
+           SET run_id = ?,
+               target = ?,
+               sequence = ?,
+               source = ?,
+               status = 'pending',
+               updated_at = ?
+           WHERE id = ?`,
+        );
+        for (const message of messages) {
+          adopt.run(
+            targetRun.id,
+            target,
+            sequence,
+            normalizeSource(message.source),
+            timestamp,
+            message.id,
+          );
+          releaseLease.run(message.id);
+          sequence += 1;
+        }
+        for (const runId of obsoleteRunIds) {
+          disqualify.run(timestamp, runId);
+        }
+        this.db
+          .prepare(
+            `DELETE FROM delivery_leases
+             WHERE message_id IN (
+               SELECT id FROM messages WHERE run_id IN (${placeholders})
+             )`,
+          )
+          .run(...obsoleteRunIds);
+      }
+
+      for (const source of sourceAliases) {
+        this.db
+          .prepare(
+            `UPDATE messages SET source = ?
+             WHERE source = ? AND kind = 'agent'
+               AND run_id IN (SELECT id FROM runs WHERE workspace = ?)`,
+          )
+          .run(target, source, workspace);
+      }
+
+      const workspaceSessionIds = new Set(
+        workspaceRuns
+          .map((run) => run.sessionId)
+          .filter((sessionId): sessionId is string => sessionId !== null),
+      );
+      if (sessionSource?.sessionId) {
+        workspaceSessionIds.add(sessionSource.sessionId);
+      }
+      const cursors = this.db
+        .prepare(
+          `SELECT observer_id AS observerId, target_agent_id AS targetAgentId,
+                  session_id AS sessionId, event_cursor AS cursor,
+                  updated_at AS updatedAt
+           FROM activity_cursors
+           ORDER BY updated_at, observer_id, target_agent_id`,
+        )
+        .all() as unknown as Array<{
+          observerId: string;
+          targetAgentId: string;
+          sessionId: string;
+          cursor: string;
+          updatedAt: string;
+        }>;
+      const normalizeCursorIdentity = (identity: string): string => {
+        if (identity === LEGACY_PRIMARY_IDENTITY || oldPrimaryAliases.has(identity)) {
+          return primaryAgentId;
+        }
+        const unprefixed = identity.startsWith("agent:")
+          ? identity.slice("agent:".length)
+          : identity;
+        return oldPrimaryAgentIds.has(unprefixed)
+          ? primaryAgentId
+          : unprefixed;
+      };
+      const normalizedCursors = new Map<
+        string,
+        {
+          observerId: string;
+          targetAgentId: string;
+          sessionId: string;
+          cursor: string;
+          updatedAt: string;
+        }
+      >();
+      const changedCursorKeys: Array<{ observerId: string; targetAgentId: string }> = [];
+      for (const cursor of cursors) {
+        const mentionsPrimary =
+          sourceAliases.has(cursor.observerId) ||
+          sourceAliases.has(cursor.targetAgentId);
+        if (!mentionsPrimary && !workspaceSessionIds.has(cursor.sessionId)) {
+          continue;
+        }
+        const observerId = normalizeCursorIdentity(cursor.observerId);
+        const targetAgentId = normalizeCursorIdentity(cursor.targetAgentId);
+        if (
+          observerId !== cursor.observerId ||
+          targetAgentId !== cursor.targetAgentId
+        ) {
+          changedCursorKeys.push({
+            observerId: cursor.observerId,
+            targetAgentId: cursor.targetAgentId,
+          });
+        }
+        normalizedCursors.set(`${observerId}\u0000${targetAgentId}`, {
+          observerId,
+          targetAgentId,
+          sessionId: cursor.sessionId,
+          cursor: cursor.cursor,
+          updatedAt: cursor.updatedAt,
+        });
+      }
+      const deleteCursor = this.db.prepare(
+        `DELETE FROM activity_cursors
+         WHERE observer_id = ? AND target_agent_id = ?`,
+      );
+      for (const key of changedCursorKeys) {
+        deleteCursor.run(key.observerId, key.targetAgentId);
+      }
+      const upsertCursor = this.db.prepare(
+        `INSERT OR REPLACE INTO activity_cursors(
+           observer_id, target_agent_id, session_id, event_cursor, updated_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const cursor of normalizedCursors.values()) {
+        upsertCursor.run(
+          cursor.observerId,
+          cursor.targetAgentId,
+          cursor.sessionId,
+          cursor.cursor,
+          cursor.updatedAt,
+        );
+      }
+    }
+    return preservedPrimaryRunIds;
   }
 
   private rewriteWorkspaceAclsInTransaction(
@@ -602,12 +1426,14 @@ export class AgentDatabase {
                 EXISTS (
                   SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
                 ) AS hasSession,
-                EXISTS (
-                  SELECT 1 FROM messages
+                COALESCE((
+                  SELECT CASE WHEN messages.status = 'delivered' THEN 1 ELSE 0 END
+                  FROM messages
                   WHERE messages.run_id = runs.id
                     AND messages.kind = 'user'
-                    AND messages.status = 'delivered'
-                ) AS hasDeliveredTask
+                  ORDER BY messages.created_at, messages.sequence, messages.id
+                  LIMIT 1
+                ), 0) AS hasDeliveredTask
          FROM runs
          WHERE mode = 'agent' AND agent_id IS NOT NULL AND definition IS NOT NULL
            AND startup_state != 'failed'`,
@@ -1168,12 +1994,14 @@ export class AgentDatabase {
                 EXISTS (
                   SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
                 ) AS hasSession,
-                EXISTS (
-                  SELECT 1 FROM messages
+                COALESCE((
+                  SELECT CASE WHEN messages.status = 'delivered' THEN 1 ELSE 0 END
+                  FROM messages
                   WHERE messages.run_id = runs.id
                     AND messages.kind = 'user'
-                    AND messages.status = 'delivered'
-                ) AS hasDeliveredTask,
+                  ORDER BY messages.created_at, messages.sequence, messages.id
+                  LIMIT 1
+                ), 0) AS hasDeliveredTask,
                 started_at AS startedAt, standard_can_talk AS legacyPrimaryCanTalk,
                 standard_can_observe AS legacyPrimaryCanObserve
          FROM runs
@@ -1706,7 +2534,26 @@ export class AgentDatabase {
         .prepare(
           `SELECT id, workspace, agent_id AS agentId, alias,
                   owner_pid AS ownerPid,
-                  startup_state AS startupState
+                  startup_state AS startupState,
+                  is_primary AS isPrimary,
+                  EXISTS (
+                    SELECT 1 FROM agent_sessions
+                    WHERE agent_sessions.run_id = runs.id
+                  ) AS hasSession,
+                  COALESCE((
+                    SELECT CASE
+                      WHEN messages.status = 'delivered'
+                        AND messages.target = 'agent:' || runs.agent_id
+                        AND messages.source = 'user'
+                      THEN 1
+                      ELSE 0
+                    END
+                    FROM messages
+                    WHERE messages.run_id = runs.id
+                      AND messages.kind = 'user'
+                    ORDER BY messages.created_at, messages.sequence, messages.id
+                    LIMIT 1
+                  ), 0) AS hasDeliveredInitialTask
            FROM runs WHERE status = 'active'`,
         )
         .all() as unknown as Array<{
@@ -1716,12 +2563,39 @@ export class AgentDatabase {
           alias: string | null;
           ownerPid: number | null;
           startupState: RunStartupState;
+          isPrimary: number;
+          hasSession: number;
+          hasDeliveredInitialTask: number;
         }>;
       const stale = active.filter(
         (run) => run.ownerPid === null || !ownerIsAlive(run.ownerPid),
       );
       if (stale.length === 0) {
         return 0;
+      }
+      const promoteAcceptedStartup = this.db.prepare(
+        `UPDATE runs
+         SET startup_state = 'ready', recovery_eligible = 1
+         WHERE id = ? AND mode = 'agent' AND is_primary = 0
+           AND status = 'active' AND startup_state = 'session_created'`,
+      );
+      for (const run of stale) {
+        if (
+          run.isPrimary !== 0 ||
+          run.startupState !== "session_created" ||
+          run.hasSession !== 1 ||
+          run.hasDeliveredInitialTask !== 1
+        ) {
+          continue;
+        }
+        const promoted = promoteAcceptedStartup.run(run.id);
+        if (promoted.changes !== 1) {
+          throw new Error(
+            `Interrupted agent run "${run.id}" could not be promoted after its persisted ` +
+              "initial task was accepted.",
+          );
+        }
+        run.startupState = "ready";
       }
       const readyIds = stale
         .filter((run) => run.startupState === "ready")
@@ -2652,33 +3526,94 @@ export class AgentDatabase {
     this.transaction(() => this.completeRunStartupInTransaction(runId));
   }
 
-  private completeRunStartupInTransaction(runId: string): void {
+  private completeRunStartupInTransaction(
+    runId: string,
+    initialMessage?: { id: string; target: string },
+  ): void {
+    const current = this.db
+      .prepare(
+        `SELECT agent_id AS agentId, is_primary AS isPrimary,
+                startup_state AS startupState,
+                recovery_eligible AS recoveryEligible
+         FROM runs WHERE id = ? AND mode = 'agent'`,
+      )
+      .get(runId) as {
+        agentId: string | null;
+        isPrimary: number;
+        startupState: RunStartupState;
+        recoveryEligible: number;
+      } | undefined;
+    if (!current) {
+      throw new Error(`Agent run "${runId}" does not exist.`);
+    }
+    if (current.isPrimary === 1 && initialMessage !== undefined) {
+      throw new Error(
+        `Primary agent run "${runId}" does not use a user-message startup transition.`,
+      );
+    }
+    if (current.isPrimary !== 1) {
+      if (!current.agentId) {
+        throw new Error(
+          `Agent run "${runId}" has no durable identity for its initial task.`,
+        );
+      }
+      const target = `agent:${current.agentId}`;
+      if (initialMessage && initialMessage.target !== target) {
+        throw new Error(
+          `Initial task message "${initialMessage.id}" targets "${initialMessage.target}" ` +
+            `instead of agent run "${runId}".`,
+        );
+      }
+      const firstUserMessage = this.db
+        .prepare(
+          `SELECT id, source, target, status
+           FROM messages
+           WHERE run_id = ? AND kind = 'user'
+           ORDER BY created_at, sequence, id
+           LIMIT 1`,
+        )
+        .get(runId) as {
+          id: string;
+          source: string;
+          target: string;
+          status: MessageStatus;
+        } | undefined;
+      if (
+        !firstUserMessage ||
+        firstUserMessage.source !== "user" ||
+        firstUserMessage.target !== target ||
+        firstUserMessage.status !== "delivered" ||
+        (
+          initialMessage !== undefined &&
+          firstUserMessage.id !== initialMessage.id
+        )
+      ) {
+        throw new Error(
+          `Agent run "${runId}" cannot become recoverable because its first user task ` +
+            "was not durably accepted.",
+        );
+      }
+    }
+    if (current.startupState === "ready" && current.recoveryEligible === 1) {
+      return;
+    }
     const result = this.db
       .prepare(
         `UPDATE runs
          SET startup_state = 'ready', recovery_eligible = 1
          WHERE id = ? AND mode = 'agent' AND status = 'active'
            AND startup_state IN ('reserved', 'session_created')
-           AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
-           AND (
-             is_primary = 1
-             OR EXISTS (
-               SELECT 1 FROM messages
-               WHERE messages.run_id = runs.id
-                 AND messages.kind = 'user'
-                 AND messages.status = 'delivered'
-             )
-           )`,
+           AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
       )
       .run(runId);
     if (result.changes !== 1) {
-      const current = this.db
+      const latest = this.db
         .prepare(
           `SELECT startup_state AS startupState, recovery_eligible AS recoveryEligible
            FROM runs WHERE id = ? AND mode = 'agent'`,
         )
         .get(runId) as { startupState: RunStartupState; recoveryEligible: number } | undefined;
-      if (current?.startupState === "ready" && current.recoveryEligible === 1) {
+      if (latest?.startupState === "ready" && latest.recoveryEligible === 1) {
         return;
       }
       throw new Error(
@@ -2867,33 +3802,68 @@ export class AgentDatabase {
     });
   }
 
+  private completeMessageInTransaction(
+    id: string,
+    runId: string,
+    target: string,
+    leaseToken: string,
+    timestamp = now(),
+  ): boolean {
+    const completed = this.db
+      .prepare(
+        `UPDATE messages
+         SET status = 'delivered', updated_at = ?
+         WHERE id = ? AND run_id = ? AND target = ? AND status = 'delivering'
+           AND EXISTS (
+             SELECT 1 FROM delivery_leases
+             WHERE delivery_leases.message_id = messages.id
+               AND delivery_leases.run_id = messages.run_id
+               AND delivery_leases.target = messages.target
+               AND delivery_leases.lease_token = ?
+               AND delivery_leases.lease_until > ?
+           )`,
+      )
+      .run(timestamp, id, runId, target, leaseToken, timestamp);
+    if (completed.changes !== 1) {
+      return false;
+    }
+    this.db
+      .prepare(
+        `DELETE FROM delivery_leases
+         WHERE message_id = ? AND run_id = ? AND target = ? AND lease_token = ?`,
+      )
+      .run(id, runId, target, leaseToken);
+    return true;
+  }
+
   completeMessage(id: string, runId: string, target: string, leaseToken: string): boolean {
+    return this.transaction(() =>
+      this.completeMessageInTransaction(id, runId, target, leaseToken),
+    );
+  }
+
+  /**
+   * Commits SDK acceptance of the first user task and startup recoverability as
+   * one durable transition. A stale lease or a later user message changes nothing.
+   */
+  completeInitialTask(
+    id: string,
+    runId: string,
+    target: string,
+    leaseToken: string,
+  ): boolean {
     return this.transaction(() => {
-      const timestamp = now();
-      const completed = this.db
-        .prepare(
-          `UPDATE messages
-           SET status = 'delivered', updated_at = ?
-           WHERE id = ? AND run_id = ? AND target = ? AND status = 'delivering'
-             AND EXISTS (
-               SELECT 1 FROM delivery_leases
-               WHERE delivery_leases.message_id = messages.id
-                 AND delivery_leases.run_id = messages.run_id
-                 AND delivery_leases.target = messages.target
-                 AND delivery_leases.lease_token = ?
-                 AND delivery_leases.lease_until > ?
-             )`,
+      if (
+        !this.completeMessageInTransaction(
+          id,
+          runId,
+          target,
+          leaseToken,
         )
-        .run(timestamp, id, runId, target, leaseToken, timestamp);
-      if (completed.changes !== 1) {
+      ) {
         return false;
       }
-      this.db
-        .prepare(
-          `DELETE FROM delivery_leases
-           WHERE message_id = ? AND run_id = ? AND target = ? AND lease_token = ?`,
-        )
-        .run(id, runId, target, leaseToken);
+      this.completeRunStartupInTransaction(runId, { id, target });
       return true;
     });
   }
