@@ -2343,14 +2343,11 @@ local function history_event(member_id, event, context)
   then
     -- Sub-agent internals belong to the Task lifecycle, not the root Copilot transcript.
     return
-  elseif event.type == 'assistant.turn_start' then
-    buffers.begin_response(member_id, data.turnId or event.id, event_time)
   elseif event.type == 'assistant.turn_end' or event.type == 'session.idle' then
     buffers.finish_response(member_id, event_time)
   elseif event.type == 'assistant.message' and data.content then
     buffers.complete_conversation(member_id, data.messageId or event.id, data.content, event_time)
   elseif event.type == 'assistant.reasoning' and data.content then
-    buffers.begin_response(member_id, data.reasoningId or event.id, event_time)
     buffers.complete_activity(member_id, data.reasoningId or event.id, data.content, event_time)
   elseif event.type == 'tool.execution_start' then
     local call_id = data.toolCallId or event.id

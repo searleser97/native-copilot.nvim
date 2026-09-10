@@ -1285,6 +1285,12 @@ tick = function()
     end
     resume_cli_session()
   elseif phase == 'resume' then
+    if not check(
+      not content:find('\nwriting', 1, true),
+      'CLI session replay did not show a live writing indicator'
+    ) then
+      return
+    end
     local user_message =
       content:find('Inspect this workspace and validate it without blocking the conversation.', 1, true)
     local reasoning =
