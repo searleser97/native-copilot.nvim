@@ -16,6 +16,7 @@ export interface RuntimeAdapter {
   listModels(): Promise<unknown[]>;
   listSessions(): Promise<unknown[]>;
   resumePrimarySession(sessionId: string): Promise<void>;
+  historicalToolResult(target: string, toolCallId: string): Promise<unknown>;
   listCommands(target: string): Promise<unknown[]>;
   invokeCommand(target: string, name: string, input?: string): Promise<unknown>;
   modelState(target: string): Promise<unknown>;

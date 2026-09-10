@@ -366,6 +366,10 @@ The primary agent is reclaimed through the same stored context/session path on h
 `/resume` keeps its durable agent UUID and dynamic UI target while creating a coherent replacement
 run for the selected SDK conversation. If a managed SDK session is missing, the host reports the
 failure instead of silently creating an empty conversation and losing schedules or state.
+Historical replay transfers only fields required to reconstruct the visible transcript and sends
+them in bounded ordered chunks. Neovim defers cursor following and fold refresh until the final
+chunk, leaving one complete continuously scrollable conversation buffer. Historical Tool rows load
+their potentially large result payload only when their details window is opened.
 The old primary run retains its pending mail until the selected SDK session is connected; retiring
 the old run, adopting its mail, and making the replacement recoverable then happen in one SQLite
 transaction. If replacement fails after activation, pending mail is adopted back into the restored

@@ -847,10 +847,27 @@ export class ScriptedRuntime implements RuntimeAdapter {
     return [current, ...older.reverse()];
   }
 
+  async historicalToolResult(
+    target: string,
+    toolCallId: string,
+  ): Promise<Record<string, unknown>> {
+    if (target !== this.primaryAgent().target) {
+      return { found: false };
+    }
+    if (toolCallId === "cli-history-timestamp") {
+      return {
+        found: true,
+        result: { content: "timestamp probe complete" },
+      };
+    }
+    return { found: false };
+  }
+
   async resumePrimarySession(sessionId: string): Promise<void> {
     if (this.profile === "telescope" && sessionId === "e2e-older-session-023") {
       throw new Error(`Session "${sessionId}" is active in another process.`);
     }
+
     if (sessionId !== "e2e-cli-session") {
       throw new Error(`Session "${sessionId}" was not found for this workspace.`);
     }
@@ -1241,7 +1258,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
             toolCallId: "cli-history-timestamp",
             toolName: "view",
             success: true,
-            result: { content: "timestamp probe complete" },
+            resultDeferred: true,
           },
         },
       ].map((event) => ({

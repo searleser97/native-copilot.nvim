@@ -143,6 +143,24 @@ async function main(): Promise<void> {
           done: true,
         });
         return;
+      case "history.tool_result": {
+        const target = requiredString(payload, "target", command.type);
+        const toolCallId = requiredString(payload, "toolCallId", command.type);
+        protocol.send(
+          "history.tool_result",
+          {
+            toolCallId,
+            ...(await runtime.historicalToolResult(target, toolCallId) as Record<string, unknown>),
+          },
+          {
+            requestId: command.id,
+            memberId: target,
+            target: "activity",
+            done: true,
+          },
+        );
+        return;
+      }
       case "commands.list": {
         const target = requiredString(payload, "target", command.type);
         const purpose = typeof payload.purpose === "string" ? payload.purpose : undefined;

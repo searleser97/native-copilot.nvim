@@ -983,6 +983,7 @@ local function update_tool_call(member_id, call_id, tool_name, status, details, 
       or json_value(arguments.detach) == true
     )
   item.async = item.async or async_mode
+  item.shell_id = item.shell_id or json_value(item.details.shellId)
   if item.is_shell and status == 'completed' then
     local function shell_id(value)
       value = json_value(value)
@@ -1363,6 +1364,17 @@ local function render_task_detail()
         { 'Next run', details.nextRunAt },
       }
     local populated = false
+    if details.resultLoading then
+      populated = true
+      table.insert(lines, 'Result:')
+      table.insert(lines, 'Loading historical Tool result...')
+      table.insert(lines, '')
+    elseif details.resultUnavailable then
+      populated = true
+      table.insert(lines, 'Result:')
+      table.insert(lines, 'Historical Tool result is unavailable.')
+      table.insert(lines, '')
+    end
     for _, field in ipairs(fields) do
       local value = json_value(field[2])
       if value ~= nil and value ~= '' then
@@ -1456,6 +1468,22 @@ local function show_cursor_task()
   state.task_detail_member = member_id
   state.detail_item = item
   open_detail_window()
+  local details = type(item.details) == 'table' and item.details or {}
+  if details.resultDeferred and not details.resultLoading and not details.resultLoaded then
+    details.resultLoading = true
+    render_task_detail()
+    local tool_call_id = json_value(details.toolCallId)
+    if not tool_call_id
+      or not send('history.tool_result', {
+        target = member_id,
+        toolCallId = tool_call_id,
+      })
+    then
+      details.resultLoading = false
+      details.resultUnavailable = true
+      render_task_detail()
+    end
+  end
 end
 
 local function ordered_members()
@@ -2369,6 +2397,9 @@ local function history_event(member_id, event, context)
     update_tool_call(member_id, data.toolCallId or event.id, data.toolName, data.success == false and 'failed' or 'completed', {
       result = data.result,
       error = data.error,
+      resultDeferred = data.resultDeferred,
+      shellId = data.shellId,
+      toolCallId = data.toolCallId or event.id,
       created_at = event_time,
     }, true)
   elseif event.type == 'subagent.started' then
@@ -2928,6 +2959,25 @@ function M._on_event(message)
     return
   elseif message.type == 'session.identity' then
     buffers.set_session_id(event_member(message), payload.sessionId)
+    return
+  elseif message.type == 'history.tool_result' then
+    local item = state.detail_item
+    local details = type(item) == 'table' and type(item.details) == 'table'
+        and item.details
+      or nil
+    if details
+      and tostring(json_value(details.toolCallId) or '') == tostring(payload.toolCallId or '')
+    then
+      details.resultLoading = false
+      details.resultDeferred = false
+      details.resultLoaded = json_value(payload.found) == true
+      details.resultUnavailable = json_value(payload.found) ~= true
+      if details.resultLoaded then
+        details.result = payload.result
+        details.error = payload.error or details.error
+      end
+      render_task_detail()
+    end
     return
   elseif message.type == 'environment.progress' then
     local component = payload.component or 'Environment'

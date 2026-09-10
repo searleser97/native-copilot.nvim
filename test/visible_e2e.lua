@@ -1453,6 +1453,48 @@ tick = function()
     ) then
       return
     end
+    local historical_tool_row
+    for index, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+      if line:find('view — history-timestamp-probe.txt', 1, true) then
+        historical_tool_row = index
+        break
+      end
+    end
+    local conversation_windows = vim.fn.win_findbuf(buf)
+    if not check(
+      historical_tool_row ~= nil and #conversation_windows > 0,
+      'historical Tool row remained available for lazy details'
+    ) then
+      return
+    end
+    vim.api.nvim_set_current_win(conversation_windows[1])
+    vim.api.nvim_win_set_cursor(conversation_windows[1], { historical_tool_row, 0 })
+    local mapping = vim.api.nvim_buf_call(buf, function()
+      return vim.fn.maparg('<CR>', 'n', false, true)
+    end)
+    if not check(mapping.callback ~= nil, 'historical Tool details mapping was available') then
+      return
+    end
+    mapping.callback()
+    phase = 'resume-tool-result'
+    schedule_tick()
+  elseif phase == 'resume-tool-result' then
+    local detail_buf = vim.api.nvim_get_current_buf()
+    local detail_content = text(detail_buf)
+    if not detail_content:find('timestamp probe complete', 1, true) then
+      schedule_tick()
+      return
+    end
+    if not check(
+      not detail_content:find('Loading historical Tool result', 1, true),
+      'historical Tool result loaded lazily in the details window'
+    ) then
+      return
+    end
+    local close_mapping = vim.api.nvim_buf_call(detail_buf, function()
+      return vim.fn.maparg('q', 'n', false, true)
+    end)
+    if close_mapping.callback then close_mapping.callback() end
     finish()
   end
 end

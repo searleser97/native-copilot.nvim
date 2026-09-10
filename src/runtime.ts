@@ -213,6 +213,7 @@ interface LiveSession {
   sequence: number;
   taskRefresh: number;
   seenEventIds: Set<string>;
+  historicalToolResults: Map<string, HistoricalToolResult>;
   lastEventAt: number;
   lastRecoveryAt: number;
   recoveringEvents: boolean;
@@ -220,6 +221,11 @@ interface LiveSession {
   mailboxDrainCycle: number;
   approveAll: boolean;
   unsubscribe: () => void;
+}
+
+interface HistoricalToolResult {
+  result?: unknown;
+  error?: unknown;
 }
 
 interface AgentTransition {
@@ -471,6 +477,27 @@ interface HistoryReplayEvent {
   data: Record<string, unknown>;
 }
 
+function historyShellId(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value.match(/[Ss]hell[Ii]d[\s:=]+([\w-]+)/)?.[1];
+  }
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const direct = record.shellId ?? record.shell_id;
+  if (direct !== undefined) {
+    return String(direct);
+  }
+  for (const nested of Object.values(record)) {
+    const found = historyShellId(nested);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
 function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefined {
   if (event.ephemeral === true) {
     return undefined;
@@ -520,8 +547,9 @@ function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefine
         toolCallId: data.toolCallId,
         toolName: data.toolName,
         success: data.success,
-        result: data.result,
         error: data.error,
+        resultDeferred: data.result !== undefined,
+        shellId: historyShellId(data.result),
       };
       break;
     case "subagent.started":
@@ -539,6 +567,7 @@ function compactHistoryEvent(event: SessionEvent): HistoryReplayEvent | undefine
     default:
       return undefined;
   }
+
   return {
     id: event.id,
     type: event.type,
@@ -3782,6 +3811,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         sequence: continuity?.sequence ?? 0,
         taskRefresh: 0,
         seenEventIds: new Set(continuity?.seenEventIds ?? []),
+        historicalToolResults: new Map(),
         lastEventAt: Date.now(),
         lastRecoveryAt: 0,
         recoveringEvents: false,
@@ -3796,6 +3826,19 @@ export class CopilotRuntime implements RuntimeAdapter {
       const history = await session.getEvents();
       this.assertLiveMatchesRequest(live, request);
       const durableHistory = history.filter((event) => event.ephemeral !== true);
+      for (const event of durableHistory) {
+        if (event.type !== "tool.execution_complete" || event.agentId !== undefined) {
+          continue;
+        }
+        const toolCallId = event.data.toolCallId;
+        if (typeof toolCallId !== "string" || toolCallId === "") {
+          continue;
+        }
+        live.historicalToolResults.set(toolCallId, {
+          result: event.data.result,
+          error: event.data.error,
+        });
+      }
       const stateReplayEvents = durableHistory.filter(
         (event) => !live!.seenEventIds.has(event.id),
       );
@@ -4575,12 +4618,33 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
   }
 
+  async historicalToolResult(
+    target: string,
+    toolCallId: string,
+  ): Promise<Record<string, unknown>> {
+    const context = this.requireAgent(target);
+    const live = this.currentLive(context);
+    if (!live) {
+      throw new Error(`Agent "${context.alias}" has no active SDK session.`);
+    }
+    const details = live.historicalToolResults.get(toolCallId);
+    if (!details) {
+      return { found: false };
+    }
+    return {
+      found: true,
+      result: details.result,
+      error: details.error,
+    };
+  }
+
   async resumePrimarySession(sessionId: string): Promise<void> {
     const client = await this.ensureClient();
     const active = this.liveSessionById(sessionId);
     if (active) {
       throw new Error(`Session "${sessionId}" is already active as "${active.target}".`);
     }
+
     const available = await client.listSessions({ workingDirectory: this.workspace });
     if (!available.some((session) => session.sessionId === sessionId)) {
       throw new Error(`Session "${sessionId}" was not found for this workspace.`);
