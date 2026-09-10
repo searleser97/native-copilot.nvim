@@ -317,7 +317,7 @@ local function adjacent_tool_signs_survive_completion(buf)
     local completed_anchors = 0
     for _, mark in ipairs(signs) do
       local sign = mark[4].sign_text and vim.trim(mark[4].sign_text) or nil
-      if sign == '✓' and mark[4].end_row == row then
+      if sign == '✓' and mark[4].end_row == nil then
         completed_anchors = completed_anchors + 1
         anchor_ids[mark[1]] = true
       end
@@ -367,7 +367,7 @@ local function identical_tools_recover_by_render_order(buf)
     { rows[2], 0 },
     { details = true }
   )) do
-    if mark[4].sign_text and mark[4].end_row then
+    if mark[4].end_row and not mark[4].sign_text then
       second_anchor = mark[1]
       vim.api.nvim_buf_del_extmark(buf, namespace, mark[1])
       break
@@ -459,16 +459,18 @@ local function timeline_anchors_follow_inserted_rows(buf)
       { anchor_row, 0 },
       { details = true }
     ) or {}
-    local matches = 0
+    local range_matches = 0
+    local sign_matches = 0
     for _, mark in ipairs(anchors) do
       local details = mark[4] or {}
-      if vim.trim(details.sign_text or '') == entry.sign
-        and details.end_row == anchor_row - 1 + entry.lines
-      then
-        matches = matches + 1
+      if details.end_row == anchor_row - 1 + entry.lines and not details.sign_text then
+        range_matches = range_matches + 1
+      end
+      if vim.trim(details.sign_text or '') == entry.sign and details.end_row == nil then
+        sign_matches = sign_matches + 1
       end
     end
-    valid = valid and matches == 1
+    valid = valid and range_matches == 1 and sign_matches == 1
   end
 
   buffers.remove_timeline(primary_target, 'e2e-late-environment')
