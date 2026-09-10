@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { AgentDatabase } from "./database.js";
+import type {
+  AgentDatabase,
+  PrimaryStartupClaim,
+  StoredAgentRun,
+} from "./database.js";
 import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
 import type { SpawnAgentsRequest } from "./types.js";
 
@@ -42,6 +46,7 @@ interface ScriptedAgent {
   runId: string;
   sessionId: string;
   primary?: boolean;
+  primaryClaim?: PrimaryStartupClaim;
 }
 
 const PRIMARY_AGENT_ID = "e2e0aaaa-0000-4000-8000-00000000e2e0";
@@ -60,6 +65,7 @@ const observationPause = (milliseconds = 350): Promise<void> =>
 
 export class ScriptedRuntime implements RuntimeAdapter {
   private primaryRunId: string | undefined;
+  private primaryAgentId: string | undefined;
   private resumedCliSession = false;
   private sessionListCount = 0;
   private readonly pendingPermissions = new Map<string, PendingPermission>();
@@ -94,11 +100,116 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   private primaryAgent(): ScriptedAgent {
-    const primary = this.agents.get(PRIMARY_AGENT_ID);
+    const primary =
+      this.primaryAgentId === undefined
+        ? undefined
+        : this.agents.get(this.primaryAgentId);
     if (!primary) {
       throw new Error("The scripted primary agent is not running.");
     }
     return primary;
+  }
+
+  private primaryDefinitionForClaim(
+    stagedDefinition: string | undefined,
+    alias: string,
+  ): string {
+    if (stagedDefinition === undefined) {
+      return this.storedAgentJson({
+        agentId: PRIMARY_AGENT_ID,
+        target: PRIMARY_TARGET,
+        alias,
+        displayName: "Copilot",
+        description: "Primary user-facing Copilot agent",
+        task: "Assist the user in the primary Neovim conversation.",
+        recipients: [],
+        observes: [],
+        runId: "pending-primary-claim",
+        sessionId: "e2e-primary-session",
+        primary: true,
+      });
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stagedDefinition);
+    } catch (error) {
+      throw new Error("The staged scripted primary definition is invalid JSON.", {
+        cause: error,
+      });
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      typeof (parsed as Record<string, unknown>).definition !== "object" ||
+      (parsed as Record<string, unknown>).definition === null ||
+      Array.isArray((parsed as Record<string, unknown>).definition)
+    ) {
+      throw new Error("The staged scripted primary definition is invalid.");
+    }
+    const record = { ...(parsed as Record<string, unknown>) };
+    const definition = record.definition as Record<string, unknown>;
+    const canTalkToAgentIds = record.canTalkToAgentIds ?? [];
+    const canObserveAgentIds = record.canObserveAgentIds ?? [];
+    if (
+      typeof definition.displayName !== "string" ||
+      typeof definition.description !== "string" ||
+      typeof definition.task !== "string" ||
+      !Array.isArray(canTalkToAgentIds) ||
+      canTalkToAgentIds.some((agentId) => typeof agentId !== "string") ||
+      !Array.isArray(canObserveAgentIds) ||
+      canObserveAgentIds.some((agentId) => typeof agentId !== "string")
+    ) {
+      throw new Error("The staged scripted primary definition is incomplete.");
+    }
+    record.definition = {
+      ...definition,
+      id: alias,
+    };
+    record.canTalkToAgentIds = canTalkToAgentIds;
+    record.canObserveAgentIds = canObserveAgentIds;
+    return JSON.stringify(record);
+  }
+
+  private primaryFromClaim(
+    run: StoredAgentRun,
+    claim: PrimaryStartupClaim | undefined,
+  ): ScriptedAgent {
+    if (!run.definition) {
+      throw new Error(`Claimed scripted primary run "${run.id}" has no definition.`);
+    }
+    const parsed = JSON.parse(run.definition) as {
+      definition?: Record<string, unknown>;
+      canTalkToAgentIds?: unknown;
+      canObserveAgentIds?: unknown;
+    };
+    const definition = parsed.definition;
+    if (
+      !definition ||
+      typeof definition.displayName !== "string" ||
+      typeof definition.description !== "string" ||
+      typeof definition.task !== "string" ||
+      !Array.isArray(parsed.canTalkToAgentIds) ||
+      parsed.canTalkToAgentIds.some((agentId) => typeof agentId !== "string") ||
+      !Array.isArray(parsed.canObserveAgentIds) ||
+      parsed.canObserveAgentIds.some((agentId) => typeof agentId !== "string")
+    ) {
+      throw new Error(`Claimed scripted primary run "${run.id}" has an invalid definition.`);
+    }
+    return {
+      agentId: run.agentId,
+      target: `agent:${run.agentId}`,
+      alias: run.alias,
+      displayName: definition.displayName as string,
+      description: definition.description as string,
+      task: definition.task as string,
+      recipients: [...parsed.canTalkToAgentIds] as string[],
+      observes: [...parsed.canObserveAgentIds] as string[],
+      runId: run.id,
+      sessionId: "e2e-primary-session",
+      primary: true,
+      ...(claim ? { primaryClaim: claim } : {}),
+    };
   }
 
   private beginTransition(agent: ScriptedAgent, reason: string): ScriptedTransition {
@@ -508,36 +619,23 @@ export class ScriptedRuntime implements RuntimeAdapter {
 
   async openPrimary(): Promise<void> {
     if (this.primaryRunId) {
-      this.requireAvailableAgent(PRIMARY_AGENT_ID);
+      this.requireAvailableAgent(this.primaryAgentId ?? PRIMARY_AGENT_ID);
       return;
     }
-    const runId = randomUUID();
-    this.primaryRunId = runId;
-    const primary: ScriptedAgent = {
-      agentId: PRIMARY_AGENT_ID,
-      target: PRIMARY_TARGET,
-      alias: "copilot",
-      displayName: "Copilot",
-      description: "Primary user-facing Copilot agent",
-      task: "Assist the user in the primary Neovim conversation.",
-      recipients: [],
-      observes: [],
-      runId,
-      sessionId: "e2e-primary-session",
-      primary: true,
-    };
+    const claimed = this.db.claimPrimaryRun(
+      randomUUID(),
+      PRIMARY_AGENT_ID,
+      this.workspace,
+      process.pid,
+      (stagedDefinition, alias) =>
+        this.primaryDefinitionForClaim(stagedDefinition, alias),
+    );
+    const primary = this.primaryFromClaim(claimed.run, claimed.claim);
+    this.primaryRunId = primary.runId;
+    this.primaryAgentId = primary.agentId;
     this.agents.set(primary.agentId, primary);
     const transition = this.beginTransition(primary, "starting its scripted session");
     try {
-      this.db.createAgentRun(
-        primary.runId,
-        primary.agentId,
-        primary.alias,
-        this.storedAgentJson(primary),
-        this.workspace,
-        process.pid,
-        true,
-      );
       this.db.upsertSession(primary.runId, primary.sessionId, "connected");
       const target = primary.target;
       this.emit("agent.loading", { ...this.agentPayload(primary), recovered: false }, {
@@ -560,7 +658,9 @@ export class ScriptedRuntime implements RuntimeAdapter {
         this.workspace,
         primary.agentId,
         primary.target,
+        primary.primaryClaim,
       );
+      delete primary.primaryClaim;
       this.emit("agent.ready", {
         ...this.agentPayload(primary),
         recovered: false,
@@ -581,6 +681,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
     } catch (error) {
       this.agents.delete(primary.agentId);
       this.primaryRunId = undefined;
+      this.primaryAgentId = undefined;
       this.db.finishRun(primary.runId, "interrupted", "Scripted primary startup failed");
       throw error;
     } finally {
@@ -649,7 +750,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
   }
 
   status(): unknown {
-    const primary = this.agents.get(PRIMARY_AGENT_ID);
+    const primary =
+      this.primaryAgentId === undefined
+        ? undefined
+        : this.agents.get(this.primaryAgentId);
     return {
       scripted: true,
       profile: this.profile,
@@ -690,7 +794,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
       displayName: "Planner",
       description: "Plan the workspace validation",
       task: "Plan the workspace validation and report the plan.",
-      recipients: [PRIMARY_TARGET],
+      recipients: [
+        this.primaryAgentId === undefined
+          ? PRIMARY_TARGET
+          : `agent:${this.primaryAgentId}`,
+      ],
       observes: [],
       status: "interrupted",
       startedAt: "2026-08-31T14:00:00.000Z",
@@ -1687,5 +1795,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
     this.transitions.clear();
     this.generations.clear();
     this.primaryRunId = undefined;
+    this.primaryAgentId = undefined;
   }
 }

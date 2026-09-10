@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1",
+    "test": "npm run build && node --test test/database.test.mjs && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1",
+    "test:database": "npm run build && node --test test/database.test.mjs",
     "test:e2e": "npm run test",
     "test:e2e:observe": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all -Observe",
     "test:e2e:allow-all": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all",

@@ -5,9 +5,21 @@ import { DatabaseSync } from "node:sqlite";
 
 /** Deprecated schema-v8 primary identity retained for migration and mailbox adoption. */
 const LEGACY_PRIMARY_IDENTITY = "standard";
+const CALLER_ALIAS = "caller";
 const PRIMARY_ALIAS = "copilot";
+const AGENT_ALIAS_PATTERN = /^[a-z][a-z0-9_]*$/;
 const RESERVED_AGENT_ALIAS_INDEX = "runs_reserved_agent_alias_uq";
 const AGENT_ALIAS_CONFLICT_MARKER = "agent alias reservation conflict";
+const INCOMPLETE_MIGRATION_STARTUP_REASON =
+  "Incomplete agent startup found during schema migration";
+const LEGACY_PRIMARY_STAGED_REASON =
+  "Legacy primary session was unavailable; pending mail retained for adoption";
+const OBSOLETE_LEGACY_PRIMARY_REASON =
+  "Obsolete legacy primary state repaired by schema v14";
+const OBSOLETE_LEGACY_PRIMARY_REASONS = new Set([
+  "Obsolete legacy primary state repaired by schema v13",
+  OBSOLETE_LEGACY_PRIMARY_REASON,
+]);
 
 type LegacyRunMode = "standard" | "agent";
 export type OwnerIsAlive = (pid: number) => boolean;
@@ -19,7 +31,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is one UUID-backed agent session; a
  * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 export interface StoredMessage {
   id: string;
@@ -62,8 +74,26 @@ export interface StoredAgentRun {
   status: RunStatus;
   startedAt: string;
   endedAt: string | null;
+  primaryPredecessorRunId: string | null;
+  primaryClaimToken: string | null;
   session: StoredAgentSession | undefined;
 }
+
+export interface PrimaryStartupClaim {
+  predecessorRunId: string;
+  token: string;
+}
+
+export interface ClaimedPrimaryRun {
+  run: StoredAgentRun;
+  claim?: PrimaryStartupClaim;
+}
+
+export type PrimaryDefinitionFactory = (
+  stagedDefinition: string | undefined,
+  alias: string,
+  agentId: string,
+) => string;
 
 export interface StoredSessionOwner {
   sessionId: string;
@@ -126,6 +156,16 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function primaryAliasCandidate(attempt: number): string {
+  if (attempt === 0) {
+    return PRIMARY_ALIAS;
+  }
+  if (attempt === 1) {
+    return "primary";
+  }
+  return `primary_${attempt}`;
+}
+
 /**
  * Probes a process without signalling it. Only an explicit "no such process"
  * result is treated as dead; access-denied and unknown OS failures stay live so
@@ -150,8 +190,10 @@ export function processIsAlive(pid: number): boolean {
 
 export class AgentDatabase {
   readonly db: DatabaseSync;
+  private readonly ownerIsAlive: OwnerIsAlive;
 
   constructor(path: string, ownerIsAlive: OwnerIsAlive = processIsAlive) {
+    this.ownerIsAlive = ownerIsAlive;
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     try {
@@ -164,7 +206,7 @@ export class AgentDatabase {
 
   /**
    * Brings the database to {@link SCHEMA_VERSION}. Pre-v6 state is rebuilt as before;
-   * v6-v12 agent runs and mailboxes are migrated in place. A database written by a
+   * v6-v13 agent runs and mailboxes are migrated in place. A database written by a
    * newer host is never erased.
    */
   private migrate(ownerIsAlive: OwnerIsAlive): void {
@@ -236,7 +278,9 @@ export class AgentDatabase {
           started_at TEXT NOT NULL,
           ended_at TEXT,
           interruption_reason TEXT,
-          owner_pid INTEGER
+          owner_pid INTEGER,
+          primary_predecessor_run_id TEXT,
+          primary_claim_token TEXT
         );
         CREATE INDEX IF NOT EXISTS runs_agent_idx ON runs(agent_id);
 
@@ -305,6 +349,12 @@ export class AgentDatabase {
             "ALTER TABLE runs ADD COLUMN recovery_eligible INTEGER NOT NULL DEFAULT 1",
           );
         }
+        if (!this.hasColumn("runs", "primary_predecessor_run_id")) {
+          this.db.exec("ALTER TABLE runs ADD COLUMN primary_predecessor_run_id TEXT");
+        }
+        if (!this.hasColumn("runs", "primary_claim_token")) {
+          this.db.exec("ALTER TABLE runs ADD COLUMN primary_claim_token TEXT");
+        }
         if (schema.version <= 6) {
           this.db.exec("DROP TABLE IF EXISTS checkpoints; DROP TABLE IF EXISTS events;");
         }
@@ -325,7 +375,7 @@ export class AgentDatabase {
         if (schema.version < 9) {
           preservedLegacyPrimaryRunIds = this.migrateLegacyAgentState();
         } else {
-          preservedLegacyPrimaryRunIds = this.repairLegacyPrimaryStateV13();
+          preservedLegacyPrimaryRunIds = this.repairLegacyPrimaryStateV14();
         }
         // Legacy Standard mail and ACLs must be adopted before classification so
         // a failed/sessionless generic primary cannot hide an older viable session.
@@ -333,6 +383,12 @@ export class AgentDatabase {
         this.scrubGhostAclsInTransaction();
         this.assertAgentAliasState();
       }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS runs_primary_predecessor_idx
+          ON runs(primary_predecessor_run_id);
+        CREATE INDEX IF NOT EXISTS runs_primary_claim_token_idx
+          ON runs(primary_claim_token);
+      `);
       this.assertSessionOwnershipState();
       this.db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
       this.db.exec("COMMIT");
@@ -417,12 +473,12 @@ export class AgentDatabase {
   }
 
   /**
-   * Repairs the schema-v9 migration failure mode where a sessionless Standard
-   * run was converted first and an older Standard run retained the usable SDK
-   * session. This runs only while upgrading v9-v12 and is safe to repeat inside
-   * the migration transaction.
+   * Repairs legacy-primary state left by pre-v14 migrations. In addition to
+   * adopting a surviving Standard session, this reconstructs a staged primary
+   * from migration-failed generic rows after every Standard row has already been
+   * consumed. It is safe to repeat inside the migration transaction.
    */
-  private repairLegacyPrimaryStateV13(): Set<string> {
+  private repairLegacyPrimaryStateV14(): Set<string> {
     type RepairRun = {
       id: string;
       mode: LegacyRunMode;
@@ -432,6 +488,7 @@ export class AgentDatabase {
       workspace: string;
       status: RunStatus;
       startedAt: string;
+      endedAt: string | null;
       interruptionReason: string | null;
       isPrimary: number;
       startupState: RunStartupState;
@@ -457,6 +514,7 @@ export class AgentDatabase {
         `SELECT runs.id, runs.mode, runs.agent_id AS agentId, runs.alias,
                 runs.definition, runs.workspace, runs.status,
                 runs.started_at AS startedAt,
+                runs.ended_at AS endedAt,
                 runs.interruption_reason AS interruptionReason,
                 runs.is_primary AS isPrimary,
                 runs.startup_state AS startupState,
@@ -485,14 +543,14 @@ export class AgentDatabase {
         parsed = JSON.parse(run.definition);
       } catch (error) {
         throw new Error(
-          `Stored agent run "${run.id}" contains invalid JSON during schema-v13 ` +
+          `Stored agent run "${run.id}" contains invalid JSON during schema-v14 ` +
             "legacy-primary repair.",
           { cause: error },
         );
       }
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error(
-          `Stored agent run "${run.id}" is not an object during schema-v13 ` +
+          `Stored agent run "${run.id}" is not an object during schema-v14 ` +
             "legacy-primary repair.",
         );
       }
@@ -503,7 +561,7 @@ export class AgentDatabase {
         Array.isArray(record.definition)
       ) {
         throw new Error(
-          `Stored agent run "${run.id}" has no valid definition during schema-v13 ` +
+          `Stored agent run "${run.id}" has no valid definition during schema-v14 ` +
             "legacy-primary repair.",
         );
       }
@@ -520,7 +578,7 @@ export class AgentDatabase {
         }
         if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
           throw new Error(
-            `Stored agent run "${run.id}" has an invalid ${field} during schema-v13 ` +
+            `Stored agent run "${run.id}" has an invalid ${field} during schema-v14 ` +
               "legacy-primary repair.",
           );
         }
@@ -532,12 +590,40 @@ export class AgentDatabase {
         }
         if (typeof value !== "boolean") {
           throw new Error(
-            `Stored agent run "${run.id}" has an invalid ${field} during schema-v13 ` +
+            `Stored agent run "${run.id}" has an invalid ${field} during schema-v14 ` +
               "legacy-primary repair.",
           );
         }
         return value;
       };
+      for (const field of [
+        "id",
+        "displayName",
+        "description",
+        "task",
+        "prompt",
+      ] as const) {
+        const value = definition[field];
+        if (typeof value !== "string" || value.length === 0) {
+          throw new Error(
+            `Stored agent run "${run.id}" has an invalid definition.${field} during ` +
+              "schema-v14 legacy-primary repair.",
+          );
+        }
+      }
+      if (
+        run.isPrimary === 0 &&
+        (
+          run.alias === null ||
+          definition.id !== run.alias ||
+          !AGENT_ALIAS_PATTERN.test(run.alias)
+        )
+      ) {
+        throw new Error(
+          `Stored non-primary run "${run.id}" has an inconsistent alias during schema-v14 ` +
+            "legacy-primary repair.",
+        );
+      }
       return {
         record,
         definition,
@@ -570,23 +656,38 @@ export class AgentDatabase {
     const timestamp = now();
     for (const [workspace, workspaceRuns] of runsByWorkspace) {
       const standards = workspaceRuns.filter((run) => run.mode === "standard");
-      if (standards.length === 0) {
-        continue;
-      }
       const primaryRuns = workspaceRuns.filter(
         (run) => run.mode === "agent" && run.isPrimary === 1,
       );
+      const isMigrationPrimary = (run: RepairRun): boolean =>
+        run.isPrimary === 1 &&
+        (
+          (
+            run.startupState === "failed" &&
+            run.interruptionReason === INCOMPLETE_MIGRATION_STARTUP_REASON
+          ) ||
+          (
+            run.sessionId === null &&
+            run.startupState === "reserved" &&
+            run.recoveryEligible === 0
+          ) ||
+          run.interruptionReason === LEGACY_PRIMARY_STAGED_REASON
+        );
+      const isRelatedLegacyPrimary = (run: RepairRun): boolean =>
+        isMigrationPrimary(run) ||
+        (
+          run.interruptionReason !== null &&
+          OBSOLETE_LEGACY_PRIMARY_REASONS.has(run.interruptionReason)
+        );
+      const migrationPrimaries = primaryRuns.filter(isMigrationPrimary);
+      if (standards.length === 0 && migrationPrimaries.length === 0) {
+        continue;
+      }
       for (const run of primaryRuns) {
         if (!run.agentId || !run.alias) {
           throw new Error(
             `Legacy primary run "${run.id}" in workspace "${workspace}" has no complete ` +
-              "durable agent identity; schema-v13 repair was aborted.",
-          );
-        }
-        if (run.alias === LEGACY_PRIMARY_IDENTITY) {
-          throw new Error(
-            `Legacy primary run "${run.id}" in workspace "${workspace}" uses the reserved ` +
-              `alias "${LEGACY_PRIMARY_IDENTITY}"; schema-v13 repair was aborted.`,
+              "durable agent identity; schema-v14 repair was aborted.",
           );
         }
       }
@@ -594,9 +695,14 @@ export class AgentDatabase {
       const viablePrimaries = primaryRuns.filter(
         (run) =>
           run.sessionId !== null &&
-          run.definition !== null &&
-          run.startupState !== "failed" &&
-          run.recoveryEligible === 1,
+          (
+            (
+              run.definition !== null &&
+              run.startupState !== "failed" &&
+              run.recoveryEligible === 1
+            ) ||
+            isMigrationPrimary(run)
+          ),
       );
       const viablePrimaryAgentIds = new Set(
         viablePrimaries.map((run) => run.agentId!),
@@ -610,13 +716,29 @@ export class AgentDatabase {
           .join(", ");
         throw new Error(
           `Workspace "${workspace}" has multiple session-backed generic primary identities ` +
-            `during schema-v13 repair (${details}). Resolve the ambiguous persisted state ` +
+            `during schema-v14 repair (${details}). Resolve the ambiguous persisted state ` +
             "before starting native-copilot.nvim.",
         );
       }
 
       const viablePrimary = viablePrimaries[0];
-      const existingPrimary = viablePrimary ?? primaryRuns[0];
+      const migrationPrimaryAgentIds = new Set(
+        migrationPrimaries.map((run) => run.agentId!),
+      );
+      if (!viablePrimary && migrationPrimaryAgentIds.size > 1) {
+        const details = migrationPrimaries
+          .map(
+            (run) =>
+              `run "${run.id}" / agent "${run.agentId}" / state "${run.startupState}"`,
+          )
+          .join(", ");
+        throw new Error(
+          `Workspace "${workspace}" has multiple migration-created generic primary ` +
+            `identities during schema-v14 repair (${details}). Resolve the ambiguous ` +
+            "persisted state before starting native-copilot.nvim.",
+        );
+      }
+      const existingPrimary = viablePrimary ?? migrationPrimaries[0];
       const sessionBackedStandard = standards.find(
         (run) => run.sessionId !== null,
       );
@@ -635,13 +757,18 @@ export class AgentDatabase {
             : undefined
         );
       const primaryAgentId = existingPrimary?.agentId ?? randomUUID();
+      const relatedPrimaryRuns = primaryRuns.filter(
+        (run) =>
+          run.agentId === primaryAgentId ||
+          isRelatedLegacyPrimary(run),
+      );
       const oldPrimaryAgentIds = new Set(
-        primaryRuns
+        relatedPrimaryRuns
           .map((run) => run.agentId)
           .filter((agentId): agentId is string => agentId !== null),
       );
       const oldPrimaryAliases = new Set(
-        primaryRuns
+        relatedPrimaryRuns
           .map((run) => run.alias)
           .filter((alias): alias is string => alias !== null),
       );
@@ -662,7 +789,12 @@ export class AgentDatabase {
         [...oldPrimaryAliases].filter((alias) => !workerAliases.has(alias)),
       );
       let primaryAlias = existingPrimary?.alias ?? PRIMARY_ALIAS;
-      if (workerAliases.has(primaryAlias)) {
+      if (
+        primaryAlias === LEGACY_PRIMARY_IDENTITY ||
+        primaryAlias === CALLER_ALIAS ||
+        !AGENT_ALIAS_PATTERN.test(primaryAlias) ||
+        workerAliases.has(primaryAlias)
+      ) {
         let attempt = 0;
         do {
           primaryAlias =
@@ -674,6 +806,7 @@ export class AgentDatabase {
           attempt += 1;
         } while (
           primaryAlias === LEGACY_PRIMARY_IDENTITY ||
+          primaryAlias === CALLER_ALIAS ||
           workerAliases.has(primaryAlias)
         );
       }
@@ -695,7 +828,7 @@ export class AgentDatabase {
         if (!run.agentId || !run.alias) {
           throw new Error(
             `Stored agent run "${run.id}" has a definition but no complete durable identity ` +
-              "during schema-v13 legacy-primary repair.",
+              "during schema-v14 legacy-primary repair.",
           );
         }
         parsedByRunId.set(run.id, parsed);
@@ -710,7 +843,7 @@ export class AgentDatabase {
           ) {
             throw new Error(
               `Workspace "${workspace}" has ambiguous persisted alias "${run.alias}" during ` +
-                "schema-v13 legacy-primary repair.",
+                "schema-v14 legacy-primary repair.",
             );
           }
           aliases.set(run.alias, mappedAgentId);
@@ -752,7 +885,7 @@ export class AgentDatabase {
       const primaryCanTalkTo = new Set<string>();
       const primaryCanObserve = new Set<string>();
       let primaryDefinitionSource: ParsedDefinition | undefined;
-      for (const run of primaryRuns) {
+      for (const run of relatedPrimaryRuns) {
         const parsed = parsedByRunId.get(run.id);
         if (!parsed) {
           continue;
@@ -777,11 +910,11 @@ export class AgentDatabase {
           }
         }
       }
-      primaryDefinitionSource ??= primaryRuns
+      primaryDefinitionSource ??= relatedPrimaryRuns
         .map((run) => parsedByRunId.get(run.id))
         .find((parsed): parsed is ParsedDefinition => parsed !== undefined);
 
-      const obsoletePrimaryRuns = primaryRuns.filter(
+      const obsoletePrimaryRuns = relatedPrimaryRuns.filter(
         (run) => run.id !== targetRun.id,
       );
       const disqualify = this.db.prepare(
@@ -793,7 +926,7 @@ export class AgentDatabase {
              ended_at = COALESCE(ended_at, ?),
              interruption_reason = COALESCE(
                interruption_reason,
-               'Obsolete legacy primary state repaired by schema v13'
+               '${OBSOLETE_LEGACY_PRIMARY_REASON}'
              ),
              owner_pid = NULL
          WHERE id = ?`,
@@ -965,7 +1098,7 @@ export class AgentDatabase {
                interruption_reason = CASE
                  WHEN status = 'active' THEN COALESCE(
                    interruption_reason,
-                   'Legacy primary ownership repaired by schema v13'
+                   'Legacy primary ownership repaired by schema v14'
                  )
                  ELSE interruption_reason
                END,
@@ -992,25 +1125,41 @@ export class AgentDatabase {
       }
 
       const target = `agent:${primaryAgentId}`;
-      const migrationFailedPrimaryRunIds = primaryRuns
+      const migrationFailedWithoutTimestamp = relatedPrimaryRuns.filter(
+        (run) =>
+          run.startupState === "failed" &&
+          run.interruptionReason === INCOMPLETE_MIGRATION_STARTUP_REASON &&
+          run.endedAt === null,
+      );
+      for (const run of migrationFailedWithoutTimestamp) {
+        const failedMail = this.db
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM messages WHERE run_id = ? AND status = 'failed'`,
+          )
+          .get(run.id) as { count: number };
+        if (failedMail.count > 0) {
+          throw new Error(
+            `Migration-failed primary run "${run.id}" has failed mail but no durable failure ` +
+              "timestamp, so migration-created failures cannot be distinguished from genuine " +
+              "message failures.",
+          );
+        }
+      }
+      const migrationFailedPrimaryRuns = relatedPrimaryRuns
         .filter(
           (run) =>
             run.startupState === "failed" &&
-            run.interruptionReason ===
-              "Incomplete agent startup found during schema migration",
-        )
-        .map((run) => run.id);
-      if (migrationFailedPrimaryRunIds.length > 0) {
-        const placeholders = migrationFailedPrimaryRunIds
-          .map(() => "?")
-          .join(", ");
-        this.db
-          .prepare(
-            `UPDATE messages
-             SET status = 'pending', updated_at = ?
-             WHERE status = 'failed' AND run_id IN (${placeholders})`,
-          )
-          .run(timestamp, ...migrationFailedPrimaryRunIds);
+            run.interruptionReason === INCOMPLETE_MIGRATION_STARTUP_REASON &&
+            run.endedAt !== null,
+        );
+      const restoreMigrationFailedMessages = this.db.prepare(
+        `UPDATE messages
+         SET status = 'pending', updated_at = ?
+         WHERE status = 'failed' AND run_id = ? AND updated_at = ?`,
+      );
+      for (const run of migrationFailedPrimaryRuns) {
+        restoreMigrationFailedMessages.run(timestamp, run.id, run.endedAt!);
       }
       const sourceAliases = new Set<string>([
         LEGACY_PRIMARY_IDENTITY,
@@ -1474,7 +1623,7 @@ export class AgentDatabase {
            ended_at = COALESCE(ended_at, ?),
            interruption_reason = COALESCE(
              interruption_reason,
-             'Legacy primary session was unavailable; pending mail retained for adoption'
+             '${LEGACY_PRIMARY_STAGED_REASON}'
            ),
            owner_pid = NULL
        WHERE id = ? AND mode = 'agent' AND is_primary = 1
@@ -1525,7 +1674,7 @@ export class AgentDatabase {
            ended_at = COALESCE(ended_at, ?),
            interruption_reason = COALESCE(
              interruption_reason,
-             'Incomplete agent startup found during schema migration'
+             '${INCOMPLETE_MIGRATION_STARTUP_REASON}'
            ),
            owner_pid = NULL
        WHERE id = ? AND mode = 'agent'`,
@@ -2527,8 +2676,368 @@ export class AgentDatabase {
     return [...bySession.keys()];
   }
 
-  markInterruptedWork(reason: string, ownerIsAlive: OwnerIsAlive = processIsAlive): number {
+  private ownerPidIsAlive(pid: number, ownerIsAlive: OwnerIsAlive): boolean {
+    try {
+      return ownerIsAlive(pid);
+    } catch {
+      return true;
+    }
+  }
+
+  private releaseClaimedPrimaryPredecessorInTransaction(
+    successor: {
+      id: string;
+      workspace: string;
+      agentId: string;
+      ownerPid: number;
+      predecessorRunId: string;
+      claimToken: string;
+    },
+  ): void {
+    const released = this.db
+      .prepare(
+        `UPDATE runs
+         SET primary_claim_token = NULL, owner_pid = NULL
+         WHERE id = ? AND workspace = ? AND mode = 'agent'
+           AND is_primary = 1 AND agent_id = ?
+           AND primary_predecessor_run_id IS NULL
+           AND primary_claim_token = ? AND owner_pid = ?
+           AND status != 'active'`,
+      )
+      .run(
+        successor.predecessorRunId,
+        successor.workspace,
+        successor.agentId,
+        successor.claimToken,
+        successor.ownerPid,
+      );
+    if (released.changes !== 1) {
+      throw new Error(
+        `Primary startup run "${successor.id}" could not release its explicitly claimed ` +
+          `predecessor "${successor.predecessorRunId}".`,
+      );
+    }
+  }
+
+  private retireClaimedPrimaryPredecessorInTransaction(
+    successor: {
+      id: string;
+      workspace: string;
+      agentId: string;
+      ownerPid: number;
+      predecessorRunId: string;
+      claimToken: string;
+    },
+    reason: string,
+  ): void {
+    const retired = this.db
+      .prepare(
+        `UPDATE runs
+         SET definition = NULL,
+             startup_state = 'failed',
+             recovery_eligible = 0,
+             status = CASE WHEN status = 'active' THEN 'interrupted' ELSE status END,
+             ended_at = COALESCE(ended_at, ?),
+             interruption_reason = COALESCE(interruption_reason, ?),
+             owner_pid = NULL,
+             primary_claim_token = NULL
+         WHERE id = ? AND workspace = ? AND mode = 'agent'
+           AND is_primary = 1 AND agent_id = ?
+           AND primary_predecessor_run_id IS NULL
+           AND primary_claim_token = ? AND owner_pid = ?
+           AND status != 'active'
+           AND startup_state = 'reserved' AND recovery_eligible = 0
+           AND definition IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+           )`,
+      )
+      .run(
+        now(),
+        reason,
+        successor.predecessorRunId,
+        successor.workspace,
+        successor.agentId,
+        successor.claimToken,
+        successor.ownerPid,
+      );
+    if (retired.changes !== 1) {
+      throw new Error(
+        `Primary startup run "${successor.id}" could not retire its explicitly claimed ` +
+          `predecessor "${successor.predecessorRunId}".`,
+      );
+    }
+  }
+
+  /**
+   * Resolves claims left by dead hosts before ordinary active-run recovery. A
+   * session-backed successor is promoted and keeps the staged identity; a
+   * sessionless successor is failed and releases the predecessor for another
+   * atomic claim.
+   */
+  private recoverStalePrimaryClaimsInTransaction(
+    reason: string,
+    ownerIsAlive: OwnerIsAlive,
+  ): number {
+    type PredecessorClaim = {
+      id: string;
+      workspace: string;
+      agentId: string;
+      definition: string | null;
+      claimToken: string;
+      ownerPid: number | null;
+      status: RunStatus;
+      startupState: RunStartupState;
+      recoveryEligible: number;
+      hasSession: number;
+    };
+    type SuccessorClaim = {
+      id: string;
+      workspace: string;
+      agentId: string;
+      ownerPid: number | null;
+      predecessorRunId: string;
+      claimToken: string;
+      status: RunStatus;
+      definition: string | null;
+      hasSession: number;
+    };
+
+    const predecessors = this.db
+      .prepare(
+        `SELECT id, workspace, agent_id AS agentId, definition,
+                primary_claim_token AS claimToken, owner_pid AS ownerPid,
+                status, startup_state AS startupState,
+                recovery_eligible AS recoveryEligible,
+                EXISTS (
+                  SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+                ) AS hasSession
+         FROM runs
+         WHERE mode = 'agent' AND is_primary = 1
+           AND agent_id IS NOT NULL
+           AND primary_predecessor_run_id IS NULL
+           AND primary_claim_token IS NOT NULL`,
+      )
+      .all() as unknown as PredecessorClaim[];
+    const successorRows = this.db.prepare(
+      `SELECT id, workspace, agent_id AS agentId, owner_pid AS ownerPid,
+              primary_predecessor_run_id AS predecessorRunId,
+              primary_claim_token AS claimToken, status,
+              definition,
+              EXISTS (
+                SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+              ) AS hasSession
+       FROM runs
+       WHERE mode = 'agent' AND is_primary = 1
+         AND agent_id IS NOT NULL
+         AND primary_predecessor_run_id = ?
+         AND primary_claim_token = ?`,
+    );
+    let recovered = 0;
+    for (const predecessor of predecessors) {
+      if (predecessor.ownerPid === null) {
+        throw new Error(
+          `Staged primary predecessor "${predecessor.id}" has claim token ` +
+            `"${predecessor.claimToken}" but no owner PID.`,
+        );
+      }
+      if (
+        predecessor.definition === null ||
+        predecessor.status === "active" ||
+        predecessor.startupState !== "reserved" ||
+        predecessor.recoveryEligible !== 0 ||
+        predecessor.hasSession !== 0
+      ) {
+        throw new Error(
+          `Staged primary predecessor "${predecessor.id}" is malformed and cannot be recovered.`,
+        );
+      }
+      const successors = successorRows.all(
+        predecessor.id,
+        predecessor.claimToken,
+      ) as unknown as SuccessorClaim[];
+      if (successors.length !== 1) {
+        if (
+          successors.length === 0 &&
+          !this.ownerPidIsAlive(predecessor.ownerPid, ownerIsAlive)
+        ) {
+          const released = this.db
+            .prepare(
+              `UPDATE runs
+               SET primary_claim_token = NULL, owner_pid = NULL
+               WHERE id = ? AND primary_claim_token = ? AND owner_pid = ?`,
+            )
+            .run(predecessor.id, predecessor.claimToken, predecessor.ownerPid);
+          if (released.changes !== 1) {
+            throw new Error(
+              `Orphaned staged primary claim on run "${predecessor.id}" could not be released.`,
+            );
+          }
+          recovered += 1;
+          continue;
+        }
+        throw new Error(
+          `Staged primary predecessor "${predecessor.id}" has ${successors.length} matching ` +
+            "successor runs; the durable claim is ambiguous.",
+        );
+      }
+      const successor = successors[0]!;
+      if (
+        successor.workspace !== predecessor.workspace ||
+        successor.agentId !== predecessor.agentId ||
+        successor.ownerPid === null ||
+        successor.ownerPid !== predecessor.ownerPid ||
+        successor.definition === null
+      ) {
+        throw new Error(
+          `Staged primary claim "${predecessor.claimToken}" does not link one workspace, ` +
+            "agent identity, and owner PID consistently.",
+        );
+      }
+      if (this.ownerPidIsAlive(predecessor.ownerPid, ownerIsAlive)) {
+        continue;
+      }
+      if (successor.status !== "active") {
+        throw new Error(
+          `Staged primary claim "${predecessor.claimToken}" points to non-active successor ` +
+            `"${successor.id}" and cannot be recovered automatically.`,
+        );
+      }
+
+      const claim = {
+        id: successor.id,
+        workspace: successor.workspace,
+        agentId: successor.agentId,
+        ownerPid: successor.ownerPid,
+        predecessorRunId: successor.predecessorRunId,
+        claimToken: successor.claimToken,
+      };
+      const timestamp = now();
+      if (successor.hasSession === 1) {
+        this.adoptAgentMessagesInTransaction(
+          successor.id,
+          successor.workspace,
+          successor.agentId,
+          `agent:${successor.agentId}`,
+          LEGACY_PRIMARY_IDENTITY,
+        );
+        this.completeRunStartupInTransaction(successor.id);
+        this.retireClaimedPrimaryPredecessorInTransaction(
+          claim,
+          "Staged primary identity was activated by an interrupted host",
+        );
+        const interrupted = this.db
+          .prepare(
+            `UPDATE runs
+             SET status = 'interrupted', ended_at = ?, interruption_reason = ?,
+                 owner_pid = NULL, primary_claim_token = NULL
+             WHERE id = ? AND status = 'active'
+               AND primary_predecessor_run_id = ? AND primary_claim_token = ?`,
+          )
+          .run(
+            timestamp,
+            reason,
+            successor.id,
+            successor.predecessorRunId,
+            successor.claimToken,
+          );
+        if (interrupted.changes !== 1) {
+          throw new Error(
+            `Recovered primary successor "${successor.id}" could not be made resumable.`,
+          );
+        }
+      } else {
+        this.releaseClaimedPrimaryPredecessorInTransaction(claim);
+        const failed = this.db
+          .prepare(
+            `UPDATE runs
+             SET definition = NULL,
+                 startup_state = 'failed',
+                 recovery_eligible = 0,
+                 status = 'interrupted',
+                 ended_at = ?,
+                 interruption_reason = ?,
+                 owner_pid = NULL,
+                 primary_claim_token = NULL
+             WHERE id = ? AND status = 'active'
+               AND primary_predecessor_run_id = ? AND primary_claim_token = ?`,
+          )
+          .run(
+            timestamp,
+            `${reason} during primary startup`,
+            successor.id,
+            successor.predecessorRunId,
+            successor.claimToken,
+          );
+        if (failed.changes !== 1) {
+          throw new Error(
+            `Interrupted primary successor "${successor.id}" could not release its staged identity.`,
+          );
+        }
+        this.db
+          .prepare(
+            `UPDATE messages
+             SET status = 'failed', updated_at = ?
+             WHERE run_id = ? AND status IN ('pending', 'delivering')`,
+          )
+          .run(timestamp, successor.id);
+        this.db
+          .prepare(
+            `DELETE FROM delivery_leases
+             WHERE message_id IN (SELECT id FROM messages WHERE run_id = ?)`,
+          )
+          .run(successor.id);
+      }
+      recovered += 1;
+    }
+
+    const dangling = this.db
+      .prepare(
+        `SELECT successor.id
+         FROM runs AS successor
+         WHERE successor.mode = 'agent' AND successor.is_primary = 1
+           AND successor.primary_predecessor_run_id IS NOT NULL
+           AND successor.primary_claim_token IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM runs AS predecessor
+             WHERE predecessor.id = successor.primary_predecessor_run_id
+               AND predecessor.primary_predecessor_run_id IS NULL
+               AND predecessor.primary_claim_token = successor.primary_claim_token
+           )
+         LIMIT 1`,
+      )
+      .get() as { id: string } | undefined;
+    if (dangling) {
+      throw new Error(
+        `Primary successor run "${dangling.id}" has no matching staged predecessor claim.`,
+      );
+    }
+    const incompleteSuccessor = this.db
+      .prepare(
+        `SELECT id
+         FROM runs
+         WHERE mode = 'agent' AND is_primary = 1
+           AND primary_predecessor_run_id IS NOT NULL
+           AND primary_claim_token IS NULL
+           AND status = 'active' AND startup_state != 'ready'
+         LIMIT 1`,
+      )
+      .get() as { id: string } | undefined;
+    if (incompleteSuccessor) {
+      throw new Error(
+        `Primary successor run "${incompleteSuccessor.id}" lost its staged claim token ` +
+          "before startup completed.",
+      );
+    }
+    return recovered;
+  }
+
+  markInterruptedWork(reason: string, ownerIsAlive: OwnerIsAlive = this.ownerIsAlive): number {
     return this.transaction(() => {
+      const recoveredPrimaryClaims = this.recoverStalePrimaryClaimsInTransaction(
+        reason,
+        ownerIsAlive,
+      );
       const timestamp = now();
       const active = this.db
         .prepare(
@@ -2571,7 +3080,7 @@ export class AgentDatabase {
         (run) => run.ownerPid === null || !ownerIsAlive(run.ownerPid),
       );
       if (stale.length === 0) {
-        return 0;
+        return recoveredPrimaryClaims;
       }
       const promoteAcceptedStartup = this.db.prepare(
         `UPDATE runs
@@ -2637,7 +3146,8 @@ export class AgentDatabase {
              status = 'interrupted',
              ended_at = ?,
              interruption_reason = ?,
-             owner_pid = NULL
+             owner_pid = NULL,
+             primary_claim_token = NULL
          WHERE id = ? AND status = 'active' AND startup_state != 'ready'`,
       );
       for (const id of startupIds) {
@@ -2673,7 +3183,7 @@ export class AgentDatabase {
          WHERE message_id IN (SELECT id FROM messages WHERE run_id IN (${placeholders}))`,
         )
         .run(...staleIds);
-      return staleIds.length;
+      return recoveredPrimaryClaims + staleIds.length;
     });
   }
 
@@ -2759,16 +3269,71 @@ export class AgentDatabase {
 
   /**
    * Makes a connected primary run recoverable in the same transaction that adopts
-   * mail from inactive predecessors. A crash before this transaction leaves that
-   * mail on the previous run.
+   * mail from inactive predecessors. Only the predecessor named by the successor's
+   * durable claim token is retired; unrelated or active primary runs are untouched.
    */
   completePrimaryStartup(
     runId: string,
     workspace: string,
     agentId: string,
     target: string,
+    claim?: PrimaryStartupClaim,
   ): number {
+    if (target !== `agent:${agentId}`) {
+      throw new Error(
+        `Primary startup target "${target}" does not match agent "${agentId}".`,
+      );
+    }
     return this.transaction(() => {
+      const successor = this.db
+        .prepare(
+          `SELECT owner_pid AS ownerPid,
+                  primary_predecessor_run_id AS predecessorRunId,
+                  primary_claim_token AS claimToken,
+                  startup_state AS startupState,
+                  recovery_eligible AS recoveryEligible
+           FROM runs
+           WHERE id = ? AND workspace = ? AND mode = 'agent'
+             AND is_primary = 1 AND agent_id = ?
+             AND status = 'active' AND definition IS NOT NULL`,
+        )
+        .get(runId, workspace, agentId) as {
+          ownerPid: number | null;
+          predecessorRunId: string | null;
+          claimToken: string | null;
+          startupState: RunStartupState;
+          recoveryEligible: number;
+        } | undefined;
+      if (!successor) {
+        throw new Error(`Primary startup run "${runId}" does not exist.`);
+      }
+      const hasDurableClaim = successor.claimToken !== null;
+      if (
+        successor.predecessorRunId === null &&
+        successor.claimToken !== null
+      ) {
+        throw new Error(
+          `Primary startup run "${runId}" has an incomplete predecessor claim link.`,
+        );
+      }
+      if (hasDurableClaim) {
+        if (
+          !claim ||
+          claim.predecessorRunId !== successor.predecessorRunId ||
+          claim.token !== successor.claimToken ||
+          successor.ownerPid === null
+        ) {
+          throw new Error(
+            `Primary startup run "${runId}" was not completed with its explicit staged claim.`,
+          );
+        }
+      } else if (claim) {
+        throw new Error(
+          `Primary startup run "${runId}" does not own staged predecessor ` +
+            `"${claim.predecessorRunId}".`,
+        );
+      }
+
       const adoptedMessages = this.adoptAgentMessagesInTransaction(
         runId,
         workspace,
@@ -2777,16 +3342,49 @@ export class AgentDatabase {
         LEGACY_PRIMARY_IDENTITY,
       );
       this.completeRunStartupInTransaction(runId);
-      this.db
-        .prepare(
-          `UPDATE runs
-           SET definition = NULL, startup_state = 'failed'
-           WHERE id != ? AND workspace = ? AND mode = 'agent'
-             AND is_primary = 1 AND agent_id = ?
-             AND recovery_eligible = 0 AND startup_state = 'reserved'
-             AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
-        )
-        .run(runId, workspace, agentId);
+      if (claim && successor.ownerPid !== null) {
+        this.retireClaimedPrimaryPredecessorInTransaction(
+          {
+            id: runId,
+            workspace,
+            agentId,
+            ownerPid: successor.ownerPid,
+            predecessorRunId: claim.predecessorRunId,
+            claimToken: claim.token,
+          },
+          `Staged primary identity was claimed by successor run "${runId}"`,
+        );
+        const cleared = this.db
+          .prepare(
+            `UPDATE runs
+             SET primary_claim_token = NULL
+             WHERE id = ? AND primary_predecessor_run_id = ?
+               AND primary_claim_token = ?`,
+          )
+          .run(runId, claim.predecessorRunId, claim.token);
+        if (cleared.changes !== 1) {
+          throw new Error(
+            `Primary startup run "${runId}" could not finalize its staged claim.`,
+          );
+        }
+      } else if (
+        successor.startupState !== "ready" ||
+        successor.recoveryEligible !== 1
+      ) {
+        const latest = this.db
+          .prepare(
+            `SELECT startup_state AS startupState,
+                    recovery_eligible AS recoveryEligible
+             FROM runs WHERE id = ?`,
+          )
+          .get(runId) as {
+            startupState: RunStartupState;
+            recoveryEligible: number;
+          };
+        if (latest.startupState !== "ready" || latest.recoveryEligible !== 1) {
+          throw new Error(`Primary startup run "${runId}" did not become recoverable.`);
+        }
+      }
       return adoptedMessages;
     });
   }
@@ -2961,6 +3559,230 @@ export class AgentDatabase {
     });
   }
 
+  /**
+   * Atomically selects an unclaimed staged primary identity, reserves its alias,
+   * marks the predecessor with a PID-owned token, and creates the successor run.
+   * If no staged identity exists, a new UUID is used without a predecessor link.
+   */
+  claimPrimaryRun(
+    id: string,
+    freshAgentId: string,
+    workspace: string,
+    ownerPid: number,
+    definitionFactory: PrimaryDefinitionFactory,
+  ): ClaimedPrimaryRun {
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
+      throw new Error("A primary startup claim requires a valid owner PID.");
+    }
+    let selectedAlias = PRIMARY_ALIAS;
+    try {
+      return this.transaction(() => {
+        const existingClaims = this.db
+          .prepare(
+            `SELECT id, primary_claim_token AS claimToken, owner_pid AS ownerPid
+             FROM runs
+             WHERE workspace = ? AND mode = 'agent' AND is_primary = 1
+               AND primary_predecessor_run_id IS NULL
+               AND primary_claim_token IS NOT NULL`,
+          )
+          .all(workspace) as unknown as Array<{
+            id: string;
+            claimToken: string;
+            ownerPid: number | null;
+          }>;
+        if (existingClaims.length > 0) {
+          if (existingClaims.length > 1) {
+            const details = existingClaims
+              .map((claim) => `"${claim.id}" / token "${claim.claimToken}"`)
+              .join(", ");
+            throw new Error(
+              `Workspace "${workspace}" has multiple staged primary claims (${details}); ` +
+                "the durable state is ambiguous.",
+            );
+          }
+          const claim = existingClaims[0]!;
+          if (claim.ownerPid === null) {
+            throw new Error(
+              `Staged primary predecessor "${claim.id}" has claim token ` +
+                `"${claim.claimToken}" but no owner PID.`,
+            );
+          }
+          if (this.ownerPidIsAlive(claim.ownerPid, this.ownerIsAlive)) {
+            throw new Error(
+              `Staged primary identity in workspace "${workspace}" is already claimed by ` +
+                `live host process ${claim.ownerPid}.`,
+            );
+          }
+          throw new Error(
+            `Staged primary identity in workspace "${workspace}" has a stale claim owned by ` +
+              `process ${claim.ownerPid}. Run interrupted-work recovery before claiming it again.`,
+          );
+        }
+
+        const stagedRuns = this.agentRunRows(
+          `workspace = ?
+             AND is_primary = 1
+             AND recovery_eligible = 0
+             AND startup_state = 'reserved'
+             AND status != 'active'
+             AND definition IS NOT NULL
+             AND primary_predecessor_run_id IS NULL
+             AND primary_claim_token IS NULL
+             AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+           ORDER BY started_at DESC, id DESC`,
+          workspace,
+        );
+        if (stagedRuns.length > 1) {
+          const details = stagedRuns
+            .map((run) => `"${run.id}" / agent "${run.agentId}"`)
+            .join(", ");
+          throw new Error(
+            `Workspace "${workspace}" has multiple staged primary identities (${details}); ` +
+              "the claim is ambiguous.",
+          );
+        }
+        const staged = stagedRuns[0];
+        const reservedWorkerAliases = new Set(
+          (
+            this.db
+              .prepare(
+                `SELECT alias
+                 FROM runs
+                 WHERE workspace = ? AND mode = 'agent' AND is_primary = 0
+                   AND alias IS NOT NULL AND agent_id IS NOT NULL
+                   AND definition IS NOT NULL`,
+              )
+              .all(workspace) as unknown as Array<{ alias: string }>
+          ).map((row) => row.alias),
+        );
+        if (
+          staged &&
+          staged.alias !== LEGACY_PRIMARY_IDENTITY &&
+          staged.alias !== CALLER_ALIAS &&
+          AGENT_ALIAS_PATTERN.test(staged.alias) &&
+          !reservedWorkerAliases.has(staged.alias)
+        ) {
+          selectedAlias = staged.alias;
+        } else {
+          let attempt = 0;
+          do {
+            selectedAlias = primaryAliasCandidate(attempt);
+            attempt += 1;
+          } while (
+            selectedAlias === LEGACY_PRIMARY_IDENTITY ||
+            selectedAlias === CALLER_ALIAS ||
+            reservedWorkerAliases.has(selectedAlias)
+          );
+        }
+
+        const startedAt = now();
+        const claimToken = staged ? randomUUID() : null;
+        const agentId = staged?.agentId ?? freshAgentId;
+        const definition = definitionFactory(
+          staged?.definition ?? undefined,
+          selectedAlias,
+          agentId,
+        );
+        if (typeof definition !== "string" || definition.length === 0) {
+          throw new Error("A primary startup claim requires a stored definition.");
+        }
+        let parsedDefinition: unknown;
+        try {
+          parsedDefinition = JSON.parse(definition);
+        } catch (error) {
+          throw new Error("A primary startup claim produced invalid definition JSON.", {
+            cause: error,
+          });
+        }
+        if (
+          typeof parsedDefinition !== "object" ||
+          parsedDefinition === null ||
+          Array.isArray(parsedDefinition) ||
+          typeof (parsedDefinition as Record<string, unknown>).definition !== "object" ||
+          (parsedDefinition as Record<string, unknown>).definition === null ||
+          Array.isArray((parsedDefinition as Record<string, unknown>).definition) ||
+          (
+            (parsedDefinition as { definition: Record<string, unknown> }).definition.id !==
+            selectedAlias
+          )
+        ) {
+          throw new Error(
+            `A primary startup claim produced a definition that does not reserve alias ` +
+              `"${selectedAlias}".`,
+          );
+        }
+        this.db
+          .prepare(
+            `INSERT INTO runs(
+               id, mode, agent_id, alias, definition, is_primary, startup_state,
+               recovery_eligible, workspace, status, started_at, owner_pid,
+               primary_predecessor_run_id, primary_claim_token
+             ) VALUES (
+               ?, 'agent', ?, ?, ?, 1, 'reserved',
+               0, ?, 'active', ?, ?, ?, ?
+             )`,
+          )
+          .run(
+            id,
+            agentId,
+            selectedAlias,
+            definition,
+            workspace,
+            startedAt,
+            ownerPid,
+            staged?.id ?? null,
+            claimToken,
+          );
+
+        let claim: PrimaryStartupClaim | undefined;
+        if (staged && claimToken) {
+          const claimed = this.db
+            .prepare(
+              `UPDATE runs
+               SET primary_claim_token = ?, owner_pid = ?
+               WHERE id = ? AND workspace = ? AND mode = 'agent'
+                 AND is_primary = 1 AND agent_id = ?
+                 AND recovery_eligible = 0 AND startup_state = 'reserved'
+                 AND status != 'active' AND definition IS NOT NULL
+                 AND primary_predecessor_run_id IS NULL
+                 AND primary_claim_token IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM agent_sessions WHERE agent_sessions.run_id = runs.id
+                 )`,
+            )
+            .run(claimToken, ownerPid, staged.id, workspace, staged.agentId);
+          if (claimed.changes !== 1) {
+            throw new Error(
+              `Staged primary predecessor "${staged.id}" could not be claimed atomically.`,
+            );
+          }
+          claim = {
+            predecessorRunId: staged.id,
+            token: claimToken,
+          };
+        }
+
+        const run: StoredAgentRun = {
+          id,
+          agentId,
+          alias: selectedAlias,
+          definition,
+          isPrimary: true,
+          startupState: "reserved",
+          status: "active",
+          startedAt,
+          endedAt: null,
+          primaryPredecessorRunId: staged?.id ?? null,
+          primaryClaimToken: claimToken,
+          session: undefined,
+        };
+        return claim ? { run, claim } : { run };
+      });
+    } catch (error) {
+      this.aliasConflict(error, selectedAlias, workspace);
+    }
+  }
+
   /** Atomically reserves every durable run in a newly accepted agent batch. */
   createAgentRuns(runs: readonly AgentRunReservation[]): void {
     if (runs.length === 0) {
@@ -3133,18 +3955,44 @@ export class AgentDatabase {
       const timestamp = now();
       const run = this.db
         .prepare(
-          `SELECT alias, startup_state AS startupState
+          `SELECT alias, startup_state AS startupState,
+                  owner_pid AS ownerPid,
+                  primary_predecessor_run_id AS predecessorRunId,
+                  primary_claim_token AS claimToken
            FROM runs
            WHERE id = ? AND workspace = ? AND mode = 'agent' AND agent_id = ?`,
         )
         .get(id, workspace, agentId) as {
           alias: string | null;
           startupState: RunStartupState;
+          ownerPid: number | null;
+          predecessorRunId: string | null;
+          claimToken: string | null;
         } | undefined;
       if (!run || run.startupState === "ready") {
         throw new Error(
           `Agent run "${id}" could not be released after its startup failed.`,
         );
+      }
+      if (run.predecessorRunId === null && run.claimToken !== null) {
+        throw new Error(
+          `Agent run "${id}" has an incomplete staged-primary claim link.`,
+        );
+      }
+      if (run.predecessorRunId !== null && run.claimToken !== null) {
+        if (run.ownerPid === null) {
+          throw new Error(
+            `Agent run "${id}" has a staged-primary claim but no owner PID.`,
+          );
+        }
+        this.releaseClaimedPrimaryPredecessorInTransaction({
+          id,
+          workspace,
+          agentId,
+          ownerPid: run.ownerPid,
+          predecessorRunId: run.predecessorRunId,
+          claimToken: run.claimToken,
+        });
       }
       const permanentlyDisqualified =
         !this.identitySurvivesOutsideRuns(workspace, agentId, new Set([id]));
@@ -3163,7 +4011,8 @@ export class AgentDatabase {
                status = 'interrupted',
                ended_at = COALESCE(ended_at, ?),
                interruption_reason = ?,
-               owner_pid = NULL
+               owner_pid = NULL,
+               primary_claim_token = NULL
            WHERE id = ? AND workspace = ? AND mode = 'agent' AND agent_id = ?
              AND startup_state != 'ready'`,
         )
@@ -3195,7 +4044,9 @@ export class AgentDatabase {
       .prepare(
         `SELECT id, agent_id AS agentId, alias, definition, is_primary AS isPrimary,
                 startup_state AS startupState, status,
-                started_at AS startedAt, ended_at AS endedAt
+                started_at AS startedAt, ended_at AS endedAt,
+                primary_predecessor_run_id AS primaryPredecessorRunId,
+                primary_claim_token AS primaryClaimToken
          FROM runs
          WHERE mode = 'agent' AND agent_id IS NOT NULL AND alias IS NOT NULL AND ${where}`,
       )
@@ -3265,7 +4116,8 @@ export class AgentDatabase {
 
   /**
    * Sessionless legacy primary identity retained only long enough for a fresh
-   * primary run to inherit its UUID, ACLs, and pending mailbox.
+   * primary run to inherit its UUID, ACLs, and pending mailbox. Runtime startup
+   * must use claimPrimaryRun rather than composing this read with createAgentRun.
    */
   stagedPrimaryRun(workspace: string): StoredAgentRun | undefined {
     return this.agentRunRows(
@@ -3275,6 +4127,8 @@ export class AgentDatabase {
          AND startup_state = 'reserved'
          AND status != 'active'
          AND definition IS NOT NULL
+         AND primary_predecessor_run_id IS NULL
+         AND primary_claim_token IS NULL
          AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
        ORDER BY started_at DESC
        LIMIT 1`,
@@ -3412,7 +4266,9 @@ export class AgentDatabase {
       const row = this.db
         .prepare(
           `SELECT workspace, agent_id AS agentId, alias,
-                  startup_state AS startupState
+                  startup_state AS startupState, owner_pid AS ownerPid,
+                  primary_predecessor_run_id AS predecessorRunId,
+                  primary_claim_token AS claimToken
            FROM runs WHERE id = ? AND status = 'active'`,
         )
         .get(id) as {
@@ -3420,11 +4276,42 @@ export class AgentDatabase {
           agentId: string | null;
           alias: string | null;
           startupState: RunStartupState;
+          ownerPid: number | null;
+          predecessorRunId: string | null;
+          claimToken: string | null;
         } | undefined;
       if (!row) {
         return;
       }
       const startupFailed = row.startupState !== "ready";
+      if (row.predecessorRunId === null && row.claimToken !== null) {
+        throw new Error(`Agent run "${id}" has an incomplete staged-primary claim link.`);
+      }
+      if (
+        row.predecessorRunId !== null &&
+        row.claimToken !== null &&
+        (row.agentId === null || row.ownerPid === null)
+      ) {
+        throw new Error(
+          `Agent run "${id}" has a staged-primary claim without a complete owner identity.`,
+        );
+      }
+      if (
+        startupFailed &&
+        row.agentId !== null &&
+        row.ownerPid !== null &&
+        row.predecessorRunId !== null &&
+        row.claimToken !== null
+      ) {
+        this.releaseClaimedPrimaryPredecessorInTransaction({
+          id,
+          workspace: row.workspace,
+          agentId: row.agentId,
+          ownerPid: row.ownerPid,
+          predecessorRunId: row.predecessorRunId,
+          claimToken: row.claimToken,
+        });
+      }
       if (
         startupFailed &&
         row.agentId !== null &&
@@ -3444,13 +4331,15 @@ export class AgentDatabase {
                definition = CASE WHEN ? = 1 THEN NULL ELSE definition END,
                startup_state = CASE WHEN ? = 1 THEN 'failed' ELSE startup_state END,
                recovery_eligible = CASE WHEN ? = 1 THEN 0 ELSE recovery_eligible END,
-               owner_pid = NULL
+               owner_pid = NULL,
+               primary_claim_token = CASE WHEN ? = 1 THEN NULL ELSE primary_claim_token END
            WHERE id = ? AND status = 'active'`,
         )
         .run(
           status,
           timestamp,
           reason ?? null,
+          startupFailed ? 1 : 0,
           startupFailed ? 1 : 0,
           startupFailed ? 1 : 0,
           startupFailed ? 1 : 0,

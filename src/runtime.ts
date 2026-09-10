@@ -17,14 +17,11 @@ import {
   type Tool,
 } from "@github/copilot-sdk";
 import { z } from "zod";
-import {
-  AgentAliasConflictError,
-  AgentDatabase,
-} from "./database.js";
+import { AgentDatabase } from "./database.js";
+import type { PrimaryStartupClaim } from "./database.js";
 import {
   CALLER_SELECTOR,
   LEGACY_PRIMARY_SELECTOR,
-  PRIMARY_ALIAS,
   dynamicAgentSchema,
   spawnAgentsSchema,
   validateAgentDefinition,
@@ -338,6 +335,8 @@ interface AgentContext {
   canObserve: Set<string>;
   /** MCP server ceiling captured from the primary session when the agent started. */
   mcpServers: Set<string>;
+  /** Durable staged-primary claim held until the new SDK session is connected. */
+  primaryClaim?: PrimaryStartupClaim;
 }
 
 interface PrimaryContextClaim {
@@ -435,16 +434,6 @@ function storedAgentRecord(value: string): StoredAgentRecord {
       ? parsed.canObserveAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
       : [],
   };
-}
-
-function primaryAliasCandidate(attempt: number): string {
-  if (attempt === 0) {
-    return PRIMARY_ALIAS;
-  }
-  if (attempt === 1) {
-    return "primary";
-  }
-  return `primary_${attempt}`;
 }
 
 function primaryAgentDefinition(alias: string): DynamicAgentDefinition {
@@ -4238,57 +4227,53 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private createFreshPrimaryContext(): AgentContext {
-    const staged = this.db.stagedPrimaryRun(this.workspace);
-    const stagedRecord =
-      staged?.definition === null || staged?.definition === undefined
-        ? undefined
-        : storedAgentRecord(staged.definition);
-    const agentId = staged?.agentId ?? randomUUID();
     const runId = randomUUID();
-    let defaultAliasAttempt = 0;
-    for (let attempt = 0; ; attempt += 1) {
-      let alias: string;
-      if (attempt === 0 && staged) {
-        alias = staged.alias;
-      } else {
-        do {
-          alias = primaryAliasCandidate(defaultAliasAttempt);
-          defaultAliasAttempt += 1;
-        } while (alias === staged?.alias);
-      }
-      const definition =
-        stagedRecord === undefined
-          ? primaryAgentDefinition(alias)
-          : { ...stagedRecord.definition, id: alias };
-      const context: AgentContext = {
-        agentId,
-        target: agentTarget(agentId),
-        alias,
-        runId,
-        definition,
-        agent: this.resolveStoredDefinition(definition),
-        canTalkTo: new Set(stagedRecord?.canTalkToAgentIds ?? []),
-        canObserve: new Set(stagedRecord?.canObserveAgentIds ?? []),
-        mcpServers: new Set(stagedRecord?.mcpServers ?? []),
-      };
-      try {
-        this.db.createAgentRun(
-          context.runId,
-          context.agentId,
-          context.alias,
-          this.storedAgentJson(context),
-          this.workspace,
-          process.pid,
-          true,
-        );
-        return context;
-      } catch (error) {
-        if (error instanceof AgentAliasConflictError) {
-          continue;
-        }
-        throw error;
-      }
+    const claimed = this.db.claimPrimaryRun(
+      runId,
+      randomUUID(),
+      this.workspace,
+      process.pid,
+      (stagedDefinition, alias, agentId) => {
+        const stagedRecord =
+          stagedDefinition === undefined
+            ? undefined
+            : storedAgentRecord(stagedDefinition);
+        const definition =
+          stagedRecord === undefined
+            ? primaryAgentDefinition(alias)
+            : { ...stagedRecord.definition, id: alias };
+        const context: AgentContext = {
+          agentId,
+          target: agentTarget(agentId),
+          alias,
+          runId,
+          definition,
+          agent: this.resolveStoredDefinition(definition),
+          canTalkTo: new Set(stagedRecord?.canTalkToAgentIds ?? []),
+          canObserve: new Set(stagedRecord?.canObserveAgentIds ?? []),
+          mcpServers: new Set(stagedRecord?.mcpServers ?? []),
+        };
+        return this.storedAgentJson(context);
+      },
+    );
+    if (!claimed.run.definition) {
+      throw new Error(
+        `Claimed primary agent run "${claimed.run.id}" has no stored definition.`,
+      );
     }
+    const record = storedAgentRecord(claimed.run.definition);
+    return {
+      agentId: claimed.run.agentId,
+      target: agentTarget(claimed.run.agentId),
+      alias: claimed.run.alias,
+      runId: claimed.run.id,
+      definition: record.definition,
+      agent: this.resolveStoredDefinition(record.definition),
+      canTalkTo: new Set(record.canTalkToAgentIds),
+      canObserve: new Set(record.canObserveAgentIds),
+      mcpServers: new Set(record.mcpServers),
+      ...(claimed.claim ? { primaryClaim: claimed.claim } : {}),
+    };
   }
 
   private claimPrimaryContext(createIfMissing: boolean): PrimaryContextClaim | undefined {
@@ -4408,7 +4393,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         this.workspace,
         context.agentId,
         context.target,
+        context.primaryClaim,
       );
+      delete context.primaryClaim;
       this.emitAgentLifecycle("agent.ready", context, {
         recovered,
         sessionId: live.session.sessionId,

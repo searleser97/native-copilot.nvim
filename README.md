@@ -454,7 +454,8 @@ UUID/session mappings, all agent runs (including the primary), UUID-backed commu
 observation rules, durable mail, delivery leases, and per-caller activity cursors. Schema v11 adds
 explicit startup durability to v10 state; schema v12 adds generation-safe delivery lease tokens
 and indexed durable SDK-session ownership checks; schema v13 repairs startup and ACL state in
-databases already stamped as v9-v12.
+databases already stamped as v9-v12; schema v14 reruns and extends the primary repair for databases
+already stamped as v13 and adds durable staged-primary claim links.
 Migrations take the SQLite write lock before reading the schema version, migrate v8 worker
 definitions and mailboxes in place, and choose the newest legacy Standard run that owns a persisted
 SDK session as the primary source. Undelivered Standard mail and Standard ACL mappings move to that
@@ -468,21 +469,37 @@ migration transaction rolls back without rebuilding leases, resetting deliveries
 startup rows. Close every Neovim instance using the database and start again to perform the
 upgrade; after the schema version advances, newly started older hosts reject the newer database,
 while the v12 lease constraints make a concurrently started legacy writer fail closed instead of
-storing an incompatible lease. The v9-to-v13 repair also recognizes databases where an earlier
+storing an incompatible lease. The legacy-primary repair recognizes databases where an earlier
 migration left a failed or staged generic primary beside legacy Standard rows. It retains the
 generic primary UUID, alias, and ACL identity when possible, transfers the newest usable Standard
 SDK session into that run, adopts pending mail, restores Standard ACL selectors, and disqualifies
 the obsolete rows before classification and ghost scrubbing. If no generic identity exists, that
 Standard run is converted in place. Ambiguous identities, malformed ACL records, and conflicting
-session ownership abort the migration instead of being guessed through. The v12-to-v13 upgrade
-does not rebuild v12 delivery leases. A non-primary run is recoverable only when it has both a
-persisted SDK session and an accepted first user task; session-only rows are failed, release their
+session ownership abort the migration instead of being guessed through. The v13-to-v14 repair also
+handles workspaces where no Standard row remains: a migration-failed or sessionless generic primary
+is reconstructed with its durable UUID, a valid primary definition and alias, and every surviving
+ACL mapping. When that generic identity has no usable session, a surviving Standard session is
+adopted; otherwise the repaired identity is staged for a fresh SDK session. Mail is revived only
+when the primary run carries the exact
+incomplete-migration reason and the message update timestamp matches that migration failure;
+unrelated failed mail stays failed, and missing evidence is surfaced rather than guessed. Neither
+the v12-to-v13 nor v13-to-v14 upgrade rebuilds v12 delivery leases. A non-primary run is
+recoverable only when it has both a persisted SDK session and an accepted first user task;
+session-only rows are failed, release their
 aliases, and are removed from related ACLs. On interrupted startup, a stale non-primary
 `session_created` run is defensively promoted only when that ordered first user task is already
 delivered. Primary rows retain their session-only startup semantics. A session-id index and startup
 consistency check reject persisted ownership by multiple agent UUIDs while allowing historical
 runs of the same UUID. The migration is idempotent and does not duplicate conversation or SDK
 event history.
+
+A staged primary is claimed and its successor run is inserted in one SQLite write transaction.
+The predecessor and successor share a random claim token and an explicit predecessor link owned by
+the host PID, while alias fallback (`copilot`, `primary`, `primary_2`, ...) is selected under the
+same lock. A competing live host cannot reuse that staged UUID. Completing startup retires only the
+linked predecessor, never another active primary. Interrupted-work recovery releases a dead
+sessionless claim for retry, or promotes a claimed successor that had already persisted its SDK
+session, adopts the predecessor mailbox, and leaves that successor resumable.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.
@@ -675,10 +692,11 @@ stdin closure, parent-process loss, `SIGINT`, and `SIGTERM` trigger the same bou
 
 ## Testing
 
-The supported test workflow is visible UI E2E. It launches a maximized WezTerm window with a real
-Neovim instance, plugin Lua, Node host, NDJSON protocol, SQLite database, prompt buffer, and
-conversation rendering. Copilot replies, MCP initialization, permissions, Tasks, and Tool events
-are scripted at the runtime boundary so scenarios remain fast and deterministic.
+The supported test workflow combines focused Node SQLite regressions with visible UI E2E. The
+visible suite launches a maximized WezTerm window with a real Neovim instance, plugin Lua, Node
+host, NDJSON protocol, SQLite database, prompt buffer, and conversation rendering. Copilot replies,
+MCP initialization, permissions, Tasks, and Tool events are scripted at the runtime boundary so
+scenarios remain fast and deterministic.
 
 Prerequisites:
 
@@ -692,6 +710,14 @@ Run the complete visible matrix:
 
 ```powershell
 npm test
+```
+
+`npm test` first runs the Node SQLite regression suite, including schema-v13 primary repair,
+single-owner staged claims, exact predecessor cleanup, alias fallback, and dead-owner recovery.
+Run only those database regressions with:
+
+```powershell
+npm run test:database
 ```
 
 Run one launch profile while developing:
