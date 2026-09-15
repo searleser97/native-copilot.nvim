@@ -873,6 +873,37 @@ local function replace_activity_content(view, activity, content)
   return true
 end
 
+local function refresh_activity_highlight(view, activity)
+  if not activity.extmark or not activity.body_extmark then return end
+  local highlight_position = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    activity_namespace,
+    activity.extmark,
+    {}
+  )
+  local body_position = vim.api.nvim_buf_get_extmark_by_id(
+    view.buf,
+    activity_body_namespace,
+    activity.body_extmark,
+    { details = true }
+  )
+  if #highlight_position == 0 or #body_position == 0 then return end
+  activity.extmark = vim.api.nvim_buf_set_extmark(
+    view.buf,
+    activity_namespace,
+    highlight_position[1],
+    0,
+    {
+      id = activity.extmark,
+      end_row = body_position[3].end_row,
+      end_col = 0,
+      hl_group = 'Comment',
+      hl_eol = true,
+      priority = 200,
+    }
+  )
+end
+
 function M.complete_activity(member_id, activity_id, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
@@ -891,6 +922,7 @@ function M.complete_activity(member_id, activity_id, content, event_time)
     if content ~= '' and content ~= activity.content then
       replace_activity_content(view, activity, content)
     end
+    refresh_activity_highlight(view, activity)
     activity.content = content ~= '' and content or activity.content
     activity.completed = true
     if was_active then

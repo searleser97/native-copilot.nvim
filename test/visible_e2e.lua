@@ -198,6 +198,27 @@ local function has_ranged_sign(buf)
   return false
 end
 
+local function line_has_highlight(buf, row, namespace_name, highlight)
+  local namespace = vim.api.nvim_get_namespaces()[namespace_name]
+  if not namespace or not row then return false end
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+    buf,
+    namespace,
+    { 0, 0 },
+    { -1, -1 },
+    { details = true }
+  )) do
+    local details = mark[4] or {}
+    if details.hl_group == highlight
+      and mark[2] <= row - 1
+      and (details.end_row or mark[2] + 1) > row - 1
+    then
+      return true
+    end
+  end
+  return false
+end
+
 local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
   buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
@@ -1212,6 +1233,22 @@ tick = function()
     )
     local tool_line = line_with_after(buf, 'read_powershell', second_row)
     local final_row = line_with(buf, 'The event order is correct:')
+    if not check(
+      line_has_highlight(
+        buf,
+        first_row,
+        'native_copilot_inline_activity',
+        'Comment'
+      ) and line_has_highlight(
+        buf,
+        second_row,
+        'native_copilot_inline_activity',
+        'Comment'
+      ),
+      'completed reasoning remains visually subdued'
+    ) then
+      return
+    end
     local windows = vim.fn.win_findbuf(buf)
     local fold
     if
