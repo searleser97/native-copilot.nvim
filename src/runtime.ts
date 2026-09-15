@@ -5356,7 +5356,12 @@ export class CopilotRuntime implements RuntimeAdapter {
           await this.reconnectAgent(subject, transition);
           reconnected = true;
         } catch (error) {
-          await this.failAgent(subject, "Agent rules were persisted but reconnect failed", transition);
+          const detail = error instanceof Error ? error.message : String(error);
+          await this.failAgent(
+            subject,
+            `Agent rules were persisted but reconnect failed: ${detail}`,
+            transition,
+          );
           throw error;
         } finally {
           this.endAgentTransition(transition, reconnected);
