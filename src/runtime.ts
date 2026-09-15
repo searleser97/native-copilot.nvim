@@ -4596,6 +4596,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           stagedRecord === undefined
             ? primaryAgentDefinition(alias)
             : { ...stagedRecord.definition, id: alias };
+        const administration = this.db.agentAdministration(stored.agentId);
         const context: AgentContext = {
           agentId,
           target: agentTarget(agentId),
@@ -4652,6 +4653,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         canTalkTo: new Set(record.canTalkToAgentIds),
         canObserve: new Set(record.canObserveAgentIds),
         mcpServers: new Set(record.mcpServers),
+        rulesConfigured: true,
       };
       this.db.resumeRun(stored.id, process.pid);
       recovered = true;
@@ -5661,9 +5663,13 @@ export class CopilotRuntime implements RuntimeAdapter {
       canTalkTo: new Set(record.canTalkToAgentIds),
       canObserve: new Set(record.canObserveAgentIds),
       mcpServers,
-      ownerAgentId: this.db.agentAdministration(stored.agentId)?.ownerAgentId,
-      ownerSessionId: this.db.agentAdministration(stored.agentId)?.ownerSessionId,
-      rulesConfigured: this.db.agentAdministration(stored.agentId)?.configured ?? true,
+      ...(administration === undefined
+        ? {}
+        : {
+            ownerAgentId: administration.ownerAgentId,
+            ownerSessionId: administration.ownerSessionId,
+          }),
+      rulesConfigured: administration?.configured ?? true,
     };
     this.registerAgent(context);
     const transition = this.beginAgentTransition(context, "recovering its SDK session");

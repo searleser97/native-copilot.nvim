@@ -136,14 +136,26 @@ export const agentRuleSetSchema = z.object({
 export function createDefinitionToDynamic(
   definition: AgentCreateDefinition,
 ): DynamicAgentDefinition {
-  return {
-    ...definition,
+  const dynamic: DynamicAgentDefinition = {
+    id: definition.id,
+    displayName: definition.displayName,
+    description: definition.description,
+    prompt: definition.prompt,
     task: "Awaiting the first authorized parent prompt.",
     permissions: { mode: "inherit" },
     mcpServers: [],
     canTalkTo: [],
     canObserve: [],
   };
+  if (definition.model !== undefined) dynamic.model = definition.model;
+  if (definition.reasoningEffort !== undefined) {
+    dynamic.reasoningEffort = definition.reasoningEffort;
+  }
+  if (definition.reasoningSummary !== undefined) {
+    dynamic.reasoningSummary = definition.reasoningSummary;
+  }
+  if (definition.ui !== undefined) dynamic.ui = definition.ui;
+  return dynamic;
 }
 
 export function parseAgentRuleSet(value: unknown): AgentRuleSet {
