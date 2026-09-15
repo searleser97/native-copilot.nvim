@@ -4596,7 +4596,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           stagedRecord === undefined
             ? primaryAgentDefinition(alias)
             : { ...stagedRecord.definition, id: alias };
-        const administration = this.db.agentAdministration(stored.agentId);
         const context: AgentContext = {
           agentId,
           target: agentTarget(agentId),
@@ -5653,6 +5652,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     this.assertAliasesAvailable([definition.id], stored.agentId);
 
     this.db.resumeRun(runId, process.pid);
+    const administration = this.db.agentAdministration(stored.agentId);
     const context: AgentContext = {
       agentId: stored.agentId,
       target: agentTarget(stored.agentId),
