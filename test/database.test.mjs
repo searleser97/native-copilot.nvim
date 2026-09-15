@@ -404,12 +404,31 @@ test("dead claim on a resumable primary releases a sessionless successor", (t) =
   assert.ok(successor);
   assert.equal(predecessor.status, "interrupted");
   assert.equal(predecessor.startupState, "ready");
-  assert.equal(predecessor.recoveryEligible, true);
   assert.equal(predecessor.primaryClaimToken, null);
   assert.equal(predecessor.session?.sessionId, "resumable-primary-session");
   assert.equal(successor.status, "interrupted");
   assert.equal(successor.startupState, "failed");
-  assert.equal(successor.recoveryEligible, false);
   assert.equal(successor.definition, undefined);
+  const durable = db.db
+    .prepare(
+      `SELECT id, recovery_eligible AS recoveryEligible, definition
+       FROM runs WHERE id IN (?, ?) ORDER BY id`,
+    )
+    .all(first.run.id, second.run.id);
+  assert.deepEqual(
+    durable.map((row) => ({ ...row })),
+    [
+      {
+        id: second.run.id,
+        recoveryEligible: 0,
+        definition: null,
+      },
+      {
+        id: first.run.id,
+        recoveryEligible: 1,
+        definition: first.run.definition,
+      },
+    ].sort((left, right) => left.id.localeCompare(right.id)),
+  );
   db.close();
 });
