@@ -451,55 +451,55 @@ export class AgentDatabase {
       if (transactionStarted) {
         this.db.exec("ROLLBACK");
       }
-
-      private migrateAgentAdministrationV15(): void {
-        const timestamp = now();
-        this.db
-          .prepare(
-            `INSERT OR IGNORE INTO agent_ownership(
-               agent_id, owner_agent_id, owner_session_id, workspace, created_at
-             )
-             SELECT worker.agent_id, owner.agent_id, owner.session_id, worker.workspace, ?
-             FROM runs worker
-             JOIN (
-               SELECT primary_run.workspace, primary_run.agent_id, primary_session.session_id
-               FROM runs primary_run
-               JOIN agent_sessions primary_session ON primary_session.run_id = primary_run.id
-               WHERE primary_run.mode = 'agent' AND primary_run.is_primary = 1
-                 AND primary_run.agent_id IS NOT NULL
-                 AND primary_run.definition IS NOT NULL
-                 AND primary_run.started_at = (
-                   SELECT MAX(candidate.started_at)
-                   FROM runs candidate
-                   JOIN agent_sessions candidate_session ON candidate_session.run_id = candidate.id
-                   WHERE candidate.workspace = primary_run.workspace
-                     AND candidate.mode = 'agent' AND candidate.is_primary = 1
-                     AND candidate.agent_id IS NOT NULL
-                     AND candidate.definition IS NOT NULL
-                 )
-             ) owner ON owner.workspace = worker.workspace
-             WHERE worker.mode = 'agent' AND worker.is_primary = 0
-               AND worker.agent_id IS NOT NULL AND worker.definition IS NOT NULL`,
-          )
-          .run(timestamp);
-        this.db
-          .prepare(
-            `INSERT OR IGNORE INTO agent_rules(
-               agent_id, owner_agent_id, owner_session_id, workspace, configured,
-               permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
-               revision, updated_at
-             )
-             SELECT agent_id, owner_agent_id, owner_session_id, workspace, 1,
-                    NULL, '[]', '[]', '[]', 1, ?
-             FROM agent_ownership`,
-          )
-          .run(timestamp);
-      }
       throw error;
     } finally {
       this.db.exec("PRAGMA foreign_keys = ON");
     }
     this.ensureAgentAliasConstraints();
+  }
+
+  private migrateAgentAdministrationV15(): void {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO agent_ownership(
+           agent_id, owner_agent_id, owner_session_id, workspace, created_at
+         )
+         SELECT worker.agent_id, owner.agent_id, owner.session_id, worker.workspace, ?
+         FROM runs worker
+         JOIN (
+           SELECT primary_run.workspace, primary_run.agent_id, primary_session.session_id
+           FROM runs primary_run
+           JOIN agent_sessions primary_session ON primary_session.run_id = primary_run.id
+           WHERE primary_run.mode = 'agent' AND primary_run.is_primary = 1
+             AND primary_run.agent_id IS NOT NULL
+             AND primary_run.definition IS NOT NULL
+             AND primary_run.started_at = (
+               SELECT MAX(candidate.started_at)
+               FROM runs candidate
+               JOIN agent_sessions candidate_session ON candidate_session.run_id = candidate.id
+               WHERE candidate.workspace = primary_run.workspace
+                 AND candidate.mode = 'agent' AND candidate.is_primary = 1
+                 AND candidate.agent_id IS NOT NULL
+                 AND candidate.definition IS NOT NULL
+             )
+         ) owner ON owner.workspace = worker.workspace
+         WHERE worker.mode = 'agent' AND worker.is_primary = 0
+           AND worker.agent_id IS NOT NULL AND worker.definition IS NOT NULL`,
+      )
+      .run(timestamp);
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO agent_rules(
+           agent_id, owner_agent_id, owner_session_id, workspace, configured,
+           permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
+           revision, updated_at
+         )
+         SELECT agent_id, owner_agent_id, owner_session_id, workspace, 1,
+                NULL, '[]', '[]', '[]', 1, ?
+         FROM agent_ownership`,
+      )
+      .run(timestamp);
   }
 
   private assertNoLiveMigrationOwners(
