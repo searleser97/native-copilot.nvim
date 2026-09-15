@@ -91,7 +91,7 @@ parsed native policy, so children inherit it by default (see
 [Inherited native configuration](#inherited-native-configuration)). The former
 `vim.g.native_copilot_command`, `NVIM_COPILOT_CMD`, and `COPILOT_CLI_CMD` inputs are not read. If no
 resolver is configured, the SDK's bundled Copilot runtime is used. No agent configuration file is
-required: the `native_copilot_spawn_agents` tool schema lets the primary agent define agents at runtime.
+required: the `real_team_spawn_agents` tool schema lets the primary agent define agents at runtime.
 Reusable agent recipes can be stored as ordinary prompt snippets and submitted through the prompt
 buffer.
 
@@ -237,14 +237,19 @@ session at the bottom, and keeps that entry visible.
 ## Configuration
 
 Agents are not predefined and require no external configuration file. The primary agent receives
-guarded `native_copilot_spawn_agents`, `native_copilot_update_agent`,
-`native_copilot_remove_agent`, the deprecated compatibility wrapper
-`native_copilot_send_to_agent`, and `native_copilot_list_agents`. Every agent, including the
-primary, receives `native_copilot_list_recipients`, `native_copilot_send_message`, and
-`native_copilot_read_agent_activity`. The namespace keeps plugin-owned tools distinct from Copilot
-CLI built-ins. Each generated definition selects a unique tool-safe alias, display name, operating
+guarded `real_team_spawn_agents`, `real_team_update_agent`, `real_team_remove_agent`, and
+`real_team_list_agents`. Every agent, including the primary, receives
+`real_agent_list_recipients`, `real_agent_send_message`, `real_agent_read_activity`, and the
+deprecated compatibility wrapper `real_agent_send_to_agent`. The `real_team_*` namespace manages
+the fleet, while `real_agent_*` operates as the invoking real agent; both remain distinct from
+Copilot CLI built-ins. Each generated definition selects a unique tool-safe alias, display name, operating
 prompt, initial task, model, reasoning effort, permissions, MCP subset, UI metadata, directional
 `canTalkTo` selectors, and independent `canObserve` selectors.
+
+The former `native_copilot_*` fleet tool names are intentionally replaced rather than registered as
+duplicate aliases, so the model sees one unambiguous API. Existing durable agents receive the new
+tool names the next time their SDK session connects; stored identities, sessions, ACLs, and
+mailboxes are unchanged.
 
 Every participant receives:
 
@@ -254,7 +259,7 @@ Every participant receives:
 - Its own top-level Copilot SDK session and `session.sessionId`.
 - Its own SQLite run, recovery state, mailbox, permissions, and conversation buffer.
 
-A call to `native_copilot_spawn_agents` may create several agents, but the request is not persisted
+A call to `real_team_spawn_agents` may create several agents, but the request is not persisted
 as a group and does not become a lifecycle or routing boundary. Agents remain independently
 stoppable, recoverable, configurable, and addressable. Their run rows and aliases are reserved in
 one transaction with the primary caller's requested ACL grants before any child is announced; SDK
@@ -337,11 +342,11 @@ Neovim always starts one generic primary agent that stays connected for the host
 Native Copilot starts a fresh SDK conversation; previous primary conversations are never resumed
 automatically and remain available only through explicit `/resume`. The durable primary UUID,
 alias, ACLs, mailbox, and monitor relationships carry forward to the fresh conversation. Agents
-are created when that primary invokes `native_copilot_spawn_agents`, either from an ordinary prompt
+are created when that primary invokes `real_team_spawn_agents`, either from an ordinary prompt
 or from `/fleet <objective>`. Requests made while the primary is busy queue until that turn becomes
 idle. Each requested agent then starts independently and receives its own `task`.
 
-`native_copilot_update_agent` replaces one complete definition and may change its operating prompt,
+`real_team_update_agent` replaces one complete definition and may change its operating prompt,
 model, reasoning, permissions, MCP subset, task, communication ACL, or observation ACL.
 Management changes that can alter the primary caller's outgoing ACL take the primary and target
 locks in deterministic UUID order. The target definition and caller ACL are committed in one
@@ -352,7 +357,7 @@ durable history, so stale callbacks are dropped without losing messages or tool 
 during the transition. While a stop, replacement, recovery, or reconnect is in progress, that agent
 is explicitly transitioning: passive activity reads return a temporary-unavailable error, and
 ordinary activation or mailbox work cannot recreate or attach to the superseded run.
-`native_copilot_remove_agent` stops only the selected agent. `/fleet` without an objective opens
+`real_team_remove_agent` stops only the selected agent. `/fleet` without an objective opens
 per-agent stop and recovery actions.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
@@ -398,9 +403,9 @@ the Copilot runtime chooses its default model.
 
 Every agent, including the primary, receives the same stable communication tools:
 
-- `native_copilot_list_recipients` returns the agents it may message or observe with their alias,
+- `real_agent_list_recipients` returns the agents it may message or observe with their alias,
   durable UUID, current SDK session ID, runtime state, and directional grant flags.
-- `native_copilot_send_message` sends to one of those recipients by alias, UUID, or current session
+- `real_agent_send_message` sends to one of those recipients by alias, UUID, or current session
   ID.
 
 There are no generated per-recipient tools. The model may retain aliases such as `reviewer1` and
@@ -416,9 +421,9 @@ selector `caller` in a child's `canTalkTo` or `canObserve` list. The host resolv
 immediately to an agent UUID. Top-level
 `callerCanTalkTo` and `callerCanObserve` lists grant the invoking agent outgoing access to selected
 new children. These are directional grants; neither direction is enabled merely because one agent
-spawned another. `native_copilot_send_to_agent` remains only as a deprecated primary-agent
+spawned another. `real_agent_send_to_agent` remains only as a deprecated primary-agent
 compatibility wrapper and follows the exact same `canTalkTo` authorization path as
-`native_copilot_send_message`.
+`real_agent_send_message`.
 
 Resolved grants are persisted as durable agent UUIDs, not aliases. Renaming an alias therefore does
 not invalidate an established link. Stopping an agent leaves UUID-backed grants intact and marks
@@ -427,10 +432,10 @@ that recipient inactive; recovering the same durable agent makes the links usabl
 ## Passive agent activity
 
 `canObserve` is independent from `canTalkTo`. It grants one agent permission to call
-`native_copilot_read_agent_activity` for another active UUID-backed agent without sending that
+`real_agent_read_activity` for another active UUID-backed agent without sending that
 session a prompt. The primary agent uses the same outgoing `canObserve` set as every other caller.
 ACLs are revalidated on every read and may be replaced dynamically with
-`native_copilot_update_agent`.
+`real_team_update_agent`.
 
 The activity tool reads the target's authoritative SDK event log with bounded cursor pagination and
 returns raw chronological events so the caller can infer status generically. Completed user and

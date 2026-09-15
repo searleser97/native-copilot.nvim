@@ -83,7 +83,7 @@ export const dynamicAgentSchema = z.object({
     `Directional passive-observation grants. Each peer alias, durable agent:<uuid> target, or ` +
       `"${CALLER_SELECTOR}" allows this ` +
       "agent to read that session's SDK event history through " +
-      "native_copilot_read_agent_activity without prompting or interrupting it. This is " +
+      "real_agent_read_activity without prompting or interrupting it. This is " +
       "independent from canTalkTo.",
   ),
   ui: z.object({

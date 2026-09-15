@@ -36,7 +36,16 @@ import type {
   SpawnAgentsRequest,
 } from "./types.js";
 
-const TOOL_PREFIX = "native_copilot_";
+export const FLEET_TOOL_NAMES = Object.freeze({
+  spawnAgents: "real_team_spawn_agents",
+  updateAgent: "real_team_update_agent",
+  removeAgent: "real_team_remove_agent",
+  listAgents: "real_team_list_agents",
+  listRecipients: "real_agent_list_recipients",
+  sendMessage: "real_agent_send_message",
+  readActivity: "real_agent_read_activity",
+  sendToAgent: "real_agent_send_to_agent",
+});
 const GITHUB_MCP_SERVER_NAME = "github-mcp-server";
 const GITHUB_MCP_ENDPOINT_HOSTS = new Set([
   "api.githubcopilot.com",
@@ -45,10 +54,6 @@ const GITHUB_MCP_ENDPOINT_HOSTS = new Set([
   "api.enterprise.githubcopilot.com",
 ]);
 const GITHUB_MCP_ENDPOINT_PATHS = new Set(["/mcp", "/mcp/readonly"]);
-
-function nativeCopilotTool(name: string): string {
-  return `${TOOL_PREFIX}${name}`;
-}
 
 export interface RuntimeEmitter {
   (
@@ -2769,16 +2774,16 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private spawnAgentsTool(caller: AgentContext): Tool<any> {
-    return defineTool(nativeCopilotTool("spawn_agents"), {
+    return defineTool(FLEET_TOOL_NAMES.spawnAgents, {
       description:
         "Spawn one or more standalone durable Copilot agents when the user asks for additional " +
         "agents or when independent planning, implementation, testing, or review would materially " +
         "improve the result. Define every agent completely at runtime: a focused prompt, a concrete " +
         "initial task, least-privilege permissions, only the MCP servers it needs, and directional " +
-        "canTalkTo recipients. Every agent receives stable native_copilot_list_recipients and " +
-        "native_copilot_send_message tools; the host resolves their authorized aliases, agent " +
+        "canTalkTo recipients. Every agent receives stable real_agent_list_recipients and " +
+        "real_agent_send_message tools; the host resolves their authorized aliases, agent " +
         "ids, and SDK session ids. canObserve independently grants passive access through " +
-        `native_copilot_read_agent_activity. The request-local selector "${CALLER_SELECTOR}" lets ` +
+        `real_agent_read_activity. The request-local selector "${CALLER_SELECTOR}" lets ` +
         "a child address this calling agent without relying on its alias. Communication is denied " +
         "by default in both directions: callerCanTalkTo/callerCanObserve grant this caller outgoing " +
         "access to selected children. This request is not a group — every agent gets its own durable " +
@@ -2821,7 +2826,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private updateAgentTool(caller: AgentContext): Tool<any> {
-    return defineTool(nativeCopilotTool("update_agent"), {
+    return defineTool(FLEET_TOOL_NAMES.updateAgent, {
       description:
         "Replace the complete definition of one active agent in place, without disturbing this " +
         "session or any other agent. Identify the agent by alias or by its agent id; the alias is " +
@@ -2865,7 +2870,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private removeAgentTool(caller: AgentContext): Tool<any> {
-    return defineTool(nativeCopilotTool("remove_agent"), {
+    return defineTool(FLEET_TOOL_NAMES.removeAgent, {
       description:
         "Stop and remove one active agent, identified by alias or agent id, without disturbing " +
         "this session or any other agent. The agent is disconnected and its run is closed. " +
@@ -2892,9 +2897,9 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private sendToAgentTool(caller: AgentContext): Tool<any> {
-    return defineTool(nativeCopilotTool("send_to_agent"), {
+    return defineTool(FLEET_TOOL_NAMES.sendToAgent, {
       description:
-        "Deprecated compatibility wrapper over native_copilot_send_message. It uses the calling " +
+        "Deprecated compatibility wrapper over real_agent_send_message. It uses the calling " +
         "agent's ordinary canTalkTo ACL and grants no privileged routing.",
       parameters: z.object({
         agent: z.string().min(1).describe("Alias or agent id of the recipient agent."),
@@ -2924,7 +2929,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private listAgentsTool(caller: AgentContext): Tool<any> {
-    return defineTool(nativeCopilotTool("list_agents"), {
+    return defineTool(FLEET_TOOL_NAMES.listAgents, {
       description:
         "List every currently active UUID-backed agent, including the primary caller, with its " +
         "alias, agent id, task, outgoing grants, and runtime state.",
@@ -2949,11 +2954,11 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   private readAgentActivityTool(observer: AgentContext): Tool<any> {
     const observerAgentId = observer.agentId;
-    return defineTool(nativeCopilotTool("read_agent_activity"), {
+    return defineTool(FLEET_TOOL_NAMES.readActivity, {
       description:
         "Read the target agent's raw SDK events since this caller last checked, without sending " +
         "the target a prompt. The caller may inspect itself or a target in its explicit canObserve " +
-        "ACL. Use native_copilot_list_recipients to discover observable UUID-backed targets. " +
+        "ACL. Use real_agent_list_recipients to discover observable UUID-backed targets. " +
         "Results preserve " +
         "unknown future event types and omit streaming message/reasoning deltas. Pass the previous " +
         "result's nextCursor as acknowledgeCursor on the next call; only that acknowledgement " +
@@ -3566,7 +3571,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (!matched) {
       throw new Error(
         `Recipient "${selector}" is not a known active agent. Call ` +
-          "native_copilot_list_recipients to refresh the authorized mapping.",
+          "real_agent_list_recipients to refresh the authorized mapping.",
       );
     }
     const recipientTransition = this.transitions.get(matched.agentId);
@@ -3620,7 +3625,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   private createAgentMessagingTools(context: AgentContext): Tool<any>[] {
     const agentId = context.agentId;
     return [
-      defineTool(nativeCopilotTool("list_recipients"), {
+      defineTool(FLEET_TOOL_NAMES.listRecipients, {
         description:
           "List the agents this caller is currently authorized to message or observe, including " +
           "their current alias, durable agent id, current SDK session id, runtime state, and " +
@@ -3660,11 +3665,11 @@ export class CopilotRuntime implements RuntimeAdapter {
           return { recipients };
         },
       }),
-      defineTool(nativeCopilotTool("send_message"), {
+      defineTool(FLEET_TOOL_NAMES.sendMessage, {
         description:
           "Send a durable asynchronous message to one authorized recipient. Identify it with an " +
           "alias, durable agent id, or current SDK session id returned by " +
-          "native_copilot_list_recipients. The host revalidates the current ACL; knowing a session " +
+          "real_agent_list_recipients. The host revalidates the current ACL; knowing a session " +
           "id never grants permission.",
         parameters: z.object({
           recipient: z

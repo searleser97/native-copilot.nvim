@@ -846,8 +846,8 @@ end
 
 local function is_agent_message_tool(name)
   return name == 'write_agent'
-    or name == 'native_copilot_send_message'
-    or name == 'native_copilot_send_to_agent'
+    or name == 'real_agent_send_message'
+    or name == 'real_agent_send_to_agent'
     or name:find('^send_to_') ~= nil
 end
 
