@@ -259,6 +259,12 @@ that session ID without sending a task. The child is recoverable but remains `aw
 no communication grants, until its creating session calls `real_agent_update_rules`. Prompts and
 mailbox delivery to an unconfigured child are rejected explicitly.
 
+The session returned by `real_agent_create` is provisional while the agent has zero turns. Copilot
+does not persist an empty SDK session for resume; if the first ruleset changes SDK-level
+permissions, the host replaces that unstarted session and `real_agent_update_rules` returns the
+finalized session ID. Subsequent get, messaging, observation, and removal calls must use that latest
+ID. No user prompt is sent during this replacement.
+
 Ownership and rules are workspace-global durable SQLite records. The exact creating Copilot
 session owns the child; another session cannot mutate or remove it merely by knowing its session
 ID. Any agent may therefore become a scoped administrator of children it creates, while it has no

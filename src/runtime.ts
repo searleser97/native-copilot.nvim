@@ -2784,9 +2784,11 @@ export class CopilotRuntime implements RuntimeAdapter {
   private createAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(FLEET_TOOL_NAMES.create, {
       description:
-        "Provision exactly one durable Copilot agent and return its SDK session id. The new agent " +
-        "starts dormant with no communication grants and cannot receive a prompt until this exact " +
-        "calling Copilot session assigns its rules with real_agent_update_rules.",
+        "Provision exactly one durable Copilot agent and return its provisional SDK session id. " +
+        "The new agent starts dormant with no communication grants and cannot receive a prompt " +
+        "until this exact calling Copilot session assigns its rules with real_agent_update_rules. " +
+        "If applying SDK-level permissions replaces an unstarted zero-turn session, use the " +
+        "finalized session id returned by real_agent_update_rules.",
       parameters: agentCreateSchema,
       skipPermission: true,
       defer: "never",
@@ -2849,7 +2851,8 @@ export class CopilotRuntime implements RuntimeAdapter {
         "Assign or replace the authoritative rules of one directly owned agent, normally using " +
         "the session id returned by real_agent_create. Only the immutable creating Copilot session " +
         "may update them. Permissions may widen previous child rules but never exceed the root ai " +
-        "launch ceiling. The SDK session is reconnected before the agent can receive prompts.",
+        "launch ceiling. The SDK session is reconnected before the agent can receive prompts; the " +
+        "result contains the finalized session id to use for subsequent tools.",
       parameters: z.object({
         agent: z.string().min(1).describe("Owned agent Copilot session id or managed identifier."),
         rules: agentRuleSetSchema,
