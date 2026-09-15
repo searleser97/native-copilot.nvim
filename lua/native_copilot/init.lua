@@ -140,7 +140,7 @@ local state = {
   history_replays = {},
   resume_request_id = nil,
   resume_cursor_animation_restore = nil,
-  session_replacing = false,
+  session_replacing = nil,
 }
 
 local function update_conversation_label(member_id)
@@ -3077,7 +3077,7 @@ function M._on_event(message)
     local target = set_primary(payload)
     if not target then return end
     state.mode = 'primary'
-    state.session_replacing = false
+    if state.session_replacing == target then state.session_replacing = nil end
     state.agents[target] = vim.deepcopy(payload)
     state.member_meta[target] = vim.deepcopy(payload)
     ensure_member(target, payload.displayName or 'Copilot')
@@ -3101,7 +3101,7 @@ function M._on_event(message)
     close_task_detail()
     reset_member(target, true)
     state.mode = 'primary-loading'
-    state.session_replacing = true
+    state.session_replacing = target
     add_to_order(target)
     ensure_member(target, 'Copilot')
     buffers.set_state(target, 'loading')
@@ -3351,7 +3351,7 @@ function M._on_event(message)
     local member_state = payload.state or 'unknown'
     buffers.set_state(member_id, member_state)
     if member_state == 'busy' then
-      if not state.session_replacing then
+      if state.session_replacing ~= member_id then
         set_member_activity(member_id, 'Thinking', true)
         buffers.begin_response(member_id, payload.turnId or message.id)
       end
