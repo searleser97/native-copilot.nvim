@@ -1340,6 +1340,10 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }, { runId: primary.runId, memberId: target, target: "activity", done: true });
     await this.loadEnvironment(target);
     this.emit("member.state", {
+      state: "busy",
+      sessionId,
+    }, { runId: primary.runId, memberId: target, target: "status" });
+    this.emit("member.state", {
       state: "idle",
       sessionId,
     }, { runId: primary.runId, memberId: target, target: "status", done: true });

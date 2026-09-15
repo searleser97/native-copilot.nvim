@@ -3349,7 +3349,9 @@ function M._on_event(message)
     buffers.set_state(member_id, member_state)
     if member_state == 'busy' then
       set_member_activity(member_id, 'Thinking', true)
-      buffers.begin_response(member_id, payload.turnId or message.id)
+      if payload.turnId then
+        buffers.begin_response(member_id, payload.turnId)
+      end
     elseif member_state == 'idle' then
       set_member_activity(member_id, 'Idle', false)
       local environment = state.environment[member_id]
