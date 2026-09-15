@@ -645,6 +645,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
         target: "status",
         done: false,
       });
+      for (const [stage, message] of [
+        ["runtime", "Connecting to Copilot runtime"],
+        ["session", "Creating Copilot session"],
+        ["configuration", "Configuring Copilot session"],
+        ["history", "Loading conversation history"],
+        ["environment", "Discovering Copilot environment"],
+      ] as const) {
+        this.emit("startup.progress", { stage, message }, {
+          runId: primary.runId,
+          memberId: target,
+          target: "status",
+        });
+      }
       this.emit("session.identity", {
         sessionId: primary.sessionId,
       }, { runId: primary.runId, memberId: target, target: "activity", done: true });
@@ -902,6 +915,18 @@ export class ScriptedRuntime implements RuntimeAdapter {
       target,
       agentId: primary.agentId,
       }, { runId: primary.runId, memberId: target, target: "status", done: false });
+      for (const [stage, message] of [
+        ["runtime", "Connecting to Copilot runtime"],
+        ["session", "Opening existing Copilot session"],
+        ["configuration", "Configuring Copilot session"],
+        ["history", "Loading conversation history"],
+      ] as const) {
+        this.emit("startup.progress", { stage, message }, {
+          runId: primary.runId,
+          memberId: target,
+          target: "status",
+        });
+      }
       const historyEvents = [
         {
           id: "cli-user-1",

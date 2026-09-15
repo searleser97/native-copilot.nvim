@@ -513,8 +513,11 @@ session, adopts the predecessor mailbox, and leaves that successor resumable.
 
 Restarting Neovim reclaims the primary agent and surfaces recoverable additional agents, but it
 does not automatically restart those additional agents or spend credits on their behalf.
-The loading buffer is displayed before the Node host starts, so command resolution, database
-migration, and SDK initialization always have immediate visible feedback.
+The loading buffer is displayed before the Node host starts and remains visible until history or
+environment content has actually been rendered. It reports and animates the current startup stage,
+including primary-agent preparation, runtime connection, session creation or opening, session
+configuration, history loading, and environment discovery. Startup failures replace the progress
+message with the concrete host error instead of leaving an empty or indefinitely loading pane.
 
 ## Rendering and observability
 

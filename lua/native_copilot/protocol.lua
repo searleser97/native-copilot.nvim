@@ -101,6 +101,17 @@ function M.start(opts, on_event)
       if not expected then
         vim.schedule(function()
           vim.notify(('Native Copilot host exited with code %d.'):format(code), vim.log.levels.ERROR)
+          if state.on_event then
+            state.on_event({
+              v = 1,
+              type = 'host.error',
+              payload = {
+                message = ('Native Copilot host exited with code %d. Check native-copilot.log.'):format(
+                  code
+                ),
+              },
+            })
+          end
         end)
       end
     end,

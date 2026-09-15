@@ -112,6 +112,9 @@ local state = {
   detail_item = nil,
   status_buf = nil,
   loading_buf = nil,
+  loading_generation = 0,
+  loading_step = 1,
+  loading_target = nil,
   selected = nil,
   primary_target = nil,
   primary_agent_id = nil,
@@ -1687,6 +1690,43 @@ local function set_loading_message(message)
   return buf
 end
 
+local function stop_loading_animation()
+  state.loading_generation = state.loading_generation + 1
+end
+
+local function set_loading_stage(message, member_id)
+  state.loading_generation = state.loading_generation + 1
+  state.loading_step = 1
+  state.loading_target = member_id or state.loading_target
+  local generation = state.loading_generation
+  local function render()
+    if generation ~= state.loading_generation then return end
+    set_loading_message(message .. string.rep('.', state.loading_step))
+    state.loading_step = (state.loading_step % 3) + 1
+    vim.defer_fn(render, 400)
+  end
+  render()
+end
+
+local function reveal_loading_member(member_id)
+  if state.loading_target and state.loading_target ~= member_id then return end
+  if not state.main_win or not vim.api.nvim_win_is_valid(state.main_win) then return end
+  if vim.api.nvim_win_get_buf(state.main_win) ~= ensure_loading_buffer() then return end
+  local entry = buffers.get_member(member_id)
+  if not entry then return end
+  stop_loading_animation()
+  state.loading_target = nil
+  vim.api.nvim_win_set_buf(state.main_win, entry.views.conversation.buf)
+  buffers.on_shown(entry.views.conversation.buf)
+  update_conversation_label(member_id)
+end
+
+local function loading_visible()
+  return state.main_win
+    and vim.api.nvim_win_is_valid(state.main_win)
+    and vim.api.nvim_win_get_buf(state.main_win) == ensure_loading_buffer()
+end
+
 local function ensure_ui(reuse_current_tab)
   if is_ui_open() then
     vim.api.nvim_set_current_tabpage(state.tab)
@@ -1753,12 +1793,14 @@ end
 
 function M.open(open_options)
   ensure_ui(type(open_options) == 'table' and open_options.reuse_current_tab == true)
-  set_loading_message('Starting the primary Copilot agent…')
+  state.loading_target = nil
+  set_loading_stage('Starting Native Copilot host')
   if state.main_win and vim.api.nvim_win_is_valid(state.main_win) then
     vim.api.nvim_win_set_buf(state.main_win, state.loading_buf)
     vim.cmd('redraw')
   end
   if not start_host() then
+    stop_loading_animation()
     set_loading_message('Native Copilot host failed to start. Check notifications and logs.')
     return
   end
@@ -2528,7 +2570,12 @@ end
 
 function M._on_event(message)
   local payload = message.payload or {}
-  if
+  if message.type == 'host.error' then
+    stop_loading_animation()
+    state.loading_target = nil
+    set_loading_message(payload.message or 'Native Copilot host failed to initialize.')
+    return
+  elseif
     message.type == 'host.ready'
     or message.type == 'host.shutdown'
     or message.type == 'runtime.ready'
@@ -2582,7 +2629,14 @@ function M._on_event(message)
     if not state.selected or not buffers.get_member(state.selected) then
       state.selected = fallback_member()
     end
-    if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
+    local selected = state.selected and buffers.get_member(state.selected)
+    if
+      is_ui_open()
+      and selected
+      and not (loading_visible() and selected.state == 'loading')
+    then
+      refresh_member(state.selected)
+    end
     return
   elseif message.type == 'sessions.list' then
     local entries = {}
@@ -2985,6 +3039,7 @@ function M._on_event(message)
     local member_id = event_member(message)
     buffers.set_state(member_id, 'loading')
     update_environment(member_id, component, 'running', payload.message or 'Loading...')
+    reveal_loading_member(member_id)
     return
   elseif message.type == 'environment.loaded' then
     local component = payload.component or 'Environment'
@@ -3058,6 +3113,10 @@ function M._on_event(message)
     if message.requestId and message.requestId == state.resume_request_id then
       restore_resume_cursor_animation()
     end
+    if loading_visible() then
+      stop_loading_animation()
+      set_loading_message(payload.message or 'Native Copilot failed to initialize.')
+    end
     notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
     return
   elseif message.type == 'agents.requested' then
@@ -3085,6 +3144,7 @@ function M._on_event(message)
     if not buffers.get_member(state.selected) then state.selected = target end
     if protocol.is_running() then send('hello') end
     if is_ui_open() and buffers.get_member(state.selected) then
+      reveal_loading_member(state.selected)
       M.show_member(state.selected)
       focus_prompt()
     end
@@ -3106,7 +3166,11 @@ function M._on_event(message)
     ensure_member(target, 'Copilot')
     buffers.set_state(target, 'loading')
     state.selected = target
-    if is_ui_open() then refresh_member(target) end
+    state.loading_target = target
+    set_loading_stage('Preparing to open the selected session', target)
+    if state.main_win and vim.api.nvim_win_is_valid(state.main_win) then
+      vim.api.nvim_win_set_buf(state.main_win, ensure_loading_buffer())
+    end
     return
   elseif message.type == 'agent.loading' or message.type == 'agent.ready' then
     local target = payload.target
@@ -3120,6 +3184,13 @@ function M._on_event(message)
     ensure_member(target, payload.displayName or payload.alias or target)
     add_to_order(target)
     buffers.set_state(target, message.type == 'agent.loading' and 'loading' or 'idle')
+    if message.type == 'agent.loading' and payload.primary then
+      state.loading_target = target
+      set_loading_stage(
+        payload.recovered and 'Preparing recovered Copilot agent' or 'Preparing primary Copilot agent',
+        target
+      )
+    end
     if message.type == 'agent.loading' and not payload.primary then
       buffers.append_activity_block(
         target,
@@ -3127,7 +3198,13 @@ function M._on_event(message)
         payload.alias or payload.displayName or target
       )
     end
-    if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
+    if
+      is_ui_open()
+      and buffers.get_member(state.selected)
+      and not (message.type == 'agent.loading' and payload.primary)
+    then
+      refresh_member(state.selected)
+    end
     return
   elseif message.type == 'agent.updated' then
     local target = payload.target
@@ -3185,6 +3262,8 @@ function M._on_event(message)
         )
       )
     end
+    stop_loading_animation()
+    state.loading_target = nil
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   end
@@ -3200,7 +3279,11 @@ function M._on_event(message)
     return
   end
   local entry = ensure_member(member_id)
-  if message.type == 'session.history' then
+  if message.type == 'startup.progress' then
+    if loading_visible() and (not state.loading_target or state.loading_target == member_id) then
+      set_loading_stage(payload.message or 'Loading Native Copilot', member_id)
+    end
+  elseif message.type == 'session.history' then
     local first_event = type(payload.events) == 'table' and payload.events[1] or nil
     local first_timestamp = first_event and tonumber(json_value(first_event.replayTimestamp))
     local replay_id = json_value(payload.replayId)
@@ -3225,6 +3308,9 @@ function M._on_event(message)
       if chunked then state.history_replays[replay_id] = context end
     end
     for _, event in ipairs(payload.events or {}) do history_event(member_id, event, context) end
+    if type(payload.events) == 'table' and #payload.events > 0 then
+      reveal_loading_member(member_id)
+    end
     local loaded = tonumber(json_value(payload.loadedEvents))
     local total = tonumber(json_value(payload.totalEvents))
     if loaded and total and total > 0 then

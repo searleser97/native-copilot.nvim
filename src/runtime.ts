@@ -3858,6 +3858,13 @@ export class CopilotRuntime implements RuntimeAdapter {
     let persistedSessionId: string | undefined;
     try {
       const context = this.assertConnectionCurrent(request);
+      const progress = (stage: string, message: string): void => {
+        this.emit(
+          "startup.progress",
+          { stage, message },
+          { runId, memberId: target, target: "status" },
+        );
+      };
       if (sessionId !== undefined) {
         const liveOwner = this.liveSessionById(sessionId);
         if (liveOwner) {
@@ -3871,9 +3878,11 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
       binding = this.activateSessionBinding(request);
       const boundConfig = this.bindSessionHandlers(config, context.agent.permission, binding);
+      progress("runtime", "Connecting to Copilot runtime");
       const client = await this.ensureClient();
       this.assertConnectionCurrent(request);
       if (sessionId && (resumeExisting || this.knownSessionIds.has(sessionId))) {
+        progress("session", "Opening existing Copilot session");
         // Managed sessions are never silently recreated: a missing SDK conversation
         // would discard schedules and state that SQLite intentionally does not copy.
         session = await client.resumeSession(sessionId, {
@@ -3881,6 +3890,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           suppressResumeEvent: true,
         });
       } else {
+        progress("session", "Creating Copilot session");
         session = await client.createSession(boundConfig);
       }
       const actualSessionId = session.sessionId;
@@ -3899,6 +3909,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.assertDurableSessionOwnership(actualSessionId, agentId);
       this.db.upsertSession(runId, actualSessionId, "connected");
       persistedSessionId = actualSessionId;
+      progress("configuration", "Configuring Copilot session");
       await session.rpc.permissions.setApproveAll({ enabled: false });
       this.assertConnectionCurrent(request);
       if (!this.sessionBindingCurrent(binding, actualSessionId)) {
@@ -3942,6 +3953,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.assertConnectionCurrent(request);
       this.live.set(target, live);
       live.unsubscribe = session.on((event) => this.handleSessionEvent(live!, event));
+      progress("history", "Loading conversation history");
       const history = await session.getEvents();
       this.assertLiveMatchesRequest(live, request);
       const durableHistory = history.filter((event) => event.ephemeral !== true);
@@ -4003,6 +4015,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           { runId, memberId: target, target: "activity", done: true },
         );
       }
+      progress("environment", "Discovering Copilot environment");
       this.emit(
         "environment.progress",
         {

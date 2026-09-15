@@ -33,6 +33,8 @@ local primary_ready_count = 0
 local resume_ready_count
 local resume_stable_at
 local history_tool_result_count = 0
+local startup_stages = {}
+local empty_loading_handoff = false
 local tick
 
 vim.opt.runtimepath:prepend(root)
@@ -61,10 +63,21 @@ native._on_event = function(message)
   if message.type == 'history.tool_result' then
     history_tool_result_count = history_tool_result_count + 1
   end
+  if message.type == 'startup.progress' then
+    table.insert(startup_stages, message.payload and message.payload.stage or '')
+  end
   local ok, failure = xpcall(on_event, debug.traceback, message)
   if not ok then
     append_trace({ 'event_error=' .. tostring(failure):gsub('\n', '\\n') })
     error(failure)
+  end
+  if message.type == 'agent.loading' and message.payload and message.payload.primary then
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local visible = vim.api.nvim_win_get_buf(win)
+      if vim.api.nvim_buf_get_name(visible):find('/conversation$', 1) ~= nil then
+        empty_loading_handoff = true
+      end
+    end
   end
   if message.type == 'activity.event' and payload.eventType == 'tool.execution_complete' then
     local entry = buffers.get_member(message.memberId or primary_target)
@@ -608,6 +621,14 @@ tick = function()
   if phase == 'ready' then
     if not content:find('[environment] Copilot environment — ready', 1, true) then
       schedule_tick()
+      return
+    end
+    if not check(
+      table.concat(startup_stages, ',') ==
+        'runtime,session,configuration,history,environment'
+        and not empty_loading_handoff,
+      'startup kept descriptive loading stages visible until useful content'
+    ) then
       return
     end
     local session_id = content:find('[SessionId][e2e-primary-session]', 1, true)
