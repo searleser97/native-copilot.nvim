@@ -6083,6 +6083,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           target,
           agentId: context.agentId,
           alias: context.alias,
+          sessionId: undefined,
           config: plan.config,
           configSignature: plan.configSignature,
           availableMcpServers: plan.availableMcpServers,
