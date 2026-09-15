@@ -111,13 +111,13 @@ function seedBrokenV13(path) {
   db.close();
 }
 
-test("schema v14 reconstructs a migration-failed primary without Standard rows", (t) => {
+test("schema v15 reconstructs a migration-failed primary without Standard rows", (t) => {
   const path = databasePath(t);
   seedBrokenV13(path);
 
   const db = new AgentDatabase(path, () => false);
   const schema = db.db.prepare("SELECT version FROM schema_meta").get();
-  assert.equal(schema.version, 14);
+  assert.equal(schema.version, 15);
 
   const primary = db.stagedPrimaryRun("workspace");
   assert.ok(primary);
