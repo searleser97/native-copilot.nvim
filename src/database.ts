@@ -2915,12 +2915,18 @@ export class AgentDatabase {
             `"${predecessor.claimToken}" but no owner PID.`,
         );
       }
+      const retryableReservation =
+        predecessor.startupState === "reserved" &&
+        predecessor.recoveryEligible === 0 &&
+        predecessor.hasSession === 0;
+      const resumablePrimary =
+        predecessor.startupState === "ready" &&
+        predecessor.recoveryEligible === 1 &&
+        predecessor.hasSession === 1;
       if (
         predecessor.definition === null ||
         predecessor.status === "active" ||
-        predecessor.startupState !== "reserved" ||
-        predecessor.recoveryEligible !== 0 ||
-        predecessor.hasSession !== 0
+        (!retryableReservation && !resumablePrimary)
       ) {
         throw new Error(
           `Staged primary predecessor "${predecessor.id}" is malformed and cannot be recovered.`,

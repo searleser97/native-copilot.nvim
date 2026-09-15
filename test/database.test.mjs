@@ -366,3 +366,50 @@ test("ready primary identity starts a fresh successor conversation", (t) => {
   });
   db.close();
 });
+
+test("dead claim on a resumable primary releases a sessionless successor", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, () => false);
+
+  const first = db.claimPrimaryRun(
+    "resumable-primary",
+    "durable-primary-agent",
+    "workspace",
+    7101,
+    claimedDefinition,
+  );
+  db.upsertSession(first.run.id, "resumable-primary-session", "connected");
+  db.completePrimaryStartup(
+    first.run.id,
+    "workspace",
+    first.run.agentId,
+    `agent:${first.run.agentId}`,
+    first.claim,
+  );
+  db.finishRun(first.run.id, "interrupted", "Host exited");
+
+  const second = db.claimPrimaryRun(
+    "interrupted-successor",
+    randomUUID(),
+    "workspace",
+    7102,
+    claimedDefinition,
+  );
+  assert.equal(second.run.agentId, first.run.agentId);
+  assert.equal(db.markInterruptedWork("dead host", () => false), 1);
+
+  const predecessor = db.agentRun(first.run.id, "workspace");
+  const successor = db.agentRun(second.run.id, "workspace");
+  assert.ok(predecessor);
+  assert.ok(successor);
+  assert.equal(predecessor.status, "interrupted");
+  assert.equal(predecessor.startupState, "ready");
+  assert.equal(predecessor.recoveryEligible, true);
+  assert.equal(predecessor.primaryClaimToken, null);
+  assert.equal(predecessor.session?.sessionId, "resumable-primary-session");
+  assert.equal(successor.status, "interrupted");
+  assert.equal(successor.startupState, "failed");
+  assert.equal(successor.recoveryEligible, false);
+  assert.equal(successor.definition, undefined);
+  db.close();
+});
