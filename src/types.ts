@@ -58,6 +58,28 @@ export interface DynamicAgentDefinition {
   };
 }
 
+/** Identity and operating configuration used to provision one dormant agent. */
+export interface AgentCreateDefinition {
+  id: string;
+  displayName: string;
+  description: string;
+  prompt: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  reasoningSummary?: ReasoningSummary;
+  ui?: DynamicAgentDefinition["ui"];
+}
+
+/** Authoritative rules assigned after the child SDK session exists. */
+export interface AgentRuleSet {
+  permissions: DynamicPermission;
+  mcpServers: string[];
+  canTalkToSessionIds: string[];
+  canObserveSessionIds: string[];
+  ownerCanTalk: boolean;
+  ownerCanObserve: boolean;
+}
+
 /**
  * An ephemeral batch request to spawn standalone agents. It is never persisted as
  * a group: every agent it names becomes its own durable run, session, and mailbox.

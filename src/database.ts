@@ -31,7 +31,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is one UUID-backed agent session; a
  * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 export interface StoredMessage {
   id: string;
@@ -136,6 +136,33 @@ export interface AgentRunDefinitionUpdate {
   id: string;
   alias: string;
   definition: string;
+}
+
+export interface AgentAdministration {
+  agentId: string;
+  ownerAgentId: string;
+  ownerSessionId: string;
+  workspace: string;
+  configured: boolean;
+  permissionsJson: string | null;
+  mcpServersJson: string;
+  canTalkToJson: string;
+  canObserveJson: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OwnedAgentRuleUpdate {
+  subjectAgentId: string;
+  ownerAgentId: string;
+  ownerSessionId: string;
+  workspace: string;
+  permissionsJson: string | null;
+  mcpServersJson: string;
+  canTalkToJson: string;
+  canObserveJson: string;
+  runUpdates: readonly AgentRunDefinitionUpdate[];
 }
 
 export class AgentAliasConflictError extends Error {
@@ -325,6 +352,30 @@ export class AgentDatabase {
           updated_at TEXT NOT NULL,
           PRIMARY KEY(observer_id, target_agent_id)
         );
+
+        CREATE TABLE IF NOT EXISTS agent_ownership (
+          agent_id TEXT PRIMARY KEY,
+          owner_agent_id TEXT NOT NULL,
+          owner_session_id TEXT NOT NULL,
+          workspace TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS agent_ownership_owner_idx
+          ON agent_ownership(workspace, owner_agent_id, owner_session_id);
+
+        CREATE TABLE IF NOT EXISTS agent_rules (
+          agent_id TEXT PRIMARY KEY,
+          owner_agent_id TEXT NOT NULL,
+          owner_session_id TEXT NOT NULL,
+          workspace TEXT NOT NULL,
+          configured INTEGER NOT NULL DEFAULT 0,
+          permissions_json TEXT,
+          mcp_servers_json TEXT NOT NULL DEFAULT '[]',
+          can_talk_to_json TEXT NOT NULL DEFAULT '[]',
+          can_observe_json TEXT NOT NULL DEFAULT '[]',
+          revision INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
       `);
       if (schema.version >= 6 && schema.version < SCHEMA_VERSION) {
         if (schema.version < 12) {
@@ -383,6 +434,9 @@ export class AgentDatabase {
         this.scrubGhostAclsInTransaction();
         this.assertAgentAliasState();
       }
+      if (schema.version < 15) {
+        this.migrateAgentAdministrationV15();
+      }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS runs_primary_predecessor_idx
           ON runs(primary_predecessor_run_id);
@@ -396,6 +450,50 @@ export class AgentDatabase {
     } catch (error) {
       if (transactionStarted) {
         this.db.exec("ROLLBACK");
+      }
+
+      private migrateAgentAdministrationV15(): void {
+        const timestamp = now();
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO agent_ownership(
+               agent_id, owner_agent_id, owner_session_id, workspace, created_at
+             )
+             SELECT worker.agent_id, owner.agent_id, owner.session_id, worker.workspace, ?
+             FROM runs worker
+             JOIN (
+               SELECT primary_run.workspace, primary_run.agent_id, primary_session.session_id
+               FROM runs primary_run
+               JOIN agent_sessions primary_session ON primary_session.run_id = primary_run.id
+               WHERE primary_run.mode = 'agent' AND primary_run.is_primary = 1
+                 AND primary_run.agent_id IS NOT NULL
+                 AND primary_run.definition IS NOT NULL
+                 AND primary_run.started_at = (
+                   SELECT MAX(candidate.started_at)
+                   FROM runs candidate
+                   JOIN agent_sessions candidate_session ON candidate_session.run_id = candidate.id
+                   WHERE candidate.workspace = primary_run.workspace
+                     AND candidate.mode = 'agent' AND candidate.is_primary = 1
+                     AND candidate.agent_id IS NOT NULL
+                     AND candidate.definition IS NOT NULL
+                 )
+             ) owner ON owner.workspace = worker.workspace
+             WHERE worker.mode = 'agent' AND worker.is_primary = 0
+               AND worker.agent_id IS NOT NULL AND worker.definition IS NOT NULL`,
+          )
+          .run(timestamp);
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO agent_rules(
+               agent_id, owner_agent_id, owner_session_id, workspace, configured,
+               permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
+               revision, updated_at
+             )
+             SELECT agent_id, owner_agent_id, owner_session_id, workspace, 1,
+                    NULL, '[]', '[]', '[]', 1, ?
+             FROM agent_ownership`,
+          )
+          .run(timestamp);
       }
       throw error;
     } finally {
@@ -4015,6 +4113,214 @@ export class AgentDatabase {
         isPrimary,
       },
     ]);
+  }
+
+  /** Reserves one dormant agent and records the immutable session that administers it. */
+  createOwnedAgentRun(
+    run: AgentRunReservation,
+    ownerAgentId: string,
+    ownerSessionId: string,
+  ): void {
+    if (run.isPrimary === true) {
+      throw new Error("The primary agent cannot be created as an owned child.");
+    }
+    try {
+      this.transaction(() => {
+        this.db
+          .prepare(
+            `INSERT INTO runs(
+               id, mode, agent_id, alias, definition, is_primary, startup_state,
+               recovery_eligible, workspace, status, started_at, owner_pid
+             ) VALUES (?, 'agent', ?, ?, ?, 0, 'reserved', 0, ?, 'active', ?, ?)`,
+          )
+          .run(
+            run.id,
+            run.agentId,
+            run.alias,
+            run.definition,
+            run.workspace,
+            now(),
+            run.ownerPid,
+          );
+        const timestamp = now();
+        this.db
+          .prepare(
+            `INSERT INTO agent_ownership(
+               agent_id, owner_agent_id, owner_session_id, workspace, created_at
+             ) VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(run.agentId, ownerAgentId, ownerSessionId, run.workspace, timestamp);
+        this.db
+          .prepare(
+            `INSERT INTO agent_rules(
+               agent_id, owner_agent_id, owner_session_id, workspace, configured,
+               permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
+               revision, updated_at
+             ) VALUES (?, ?, ?, ?, 0, NULL, '[]', '[]', '[]', 0, ?)`,
+          )
+          .run(run.agentId, ownerAgentId, ownerSessionId, run.workspace, timestamp);
+      });
+    } catch (error) {
+      this.aliasConflict(error, run.alias, run.workspace);
+    }
+  }
+
+  agentAdministration(agentId: string): AgentAdministration | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT ownership.agent_id AS agentId,
+                ownership.owner_agent_id AS ownerAgentId,
+                ownership.owner_session_id AS ownerSessionId,
+                ownership.workspace,
+                rules.configured,
+                rules.permissions_json AS permissionsJson,
+                rules.mcp_servers_json AS mcpServersJson,
+                rules.can_talk_to_json AS canTalkToJson,
+                rules.can_observe_json AS canObserveJson,
+                rules.revision,
+                ownership.created_at AS createdAt,
+                rules.updated_at AS updatedAt
+         FROM agent_ownership ownership
+         JOIN agent_rules rules ON rules.agent_id = ownership.agent_id
+         WHERE ownership.agent_id = ?`,
+      )
+      .get(agentId) as
+      | {
+          agentId: string;
+          ownerAgentId: string;
+          ownerSessionId: string;
+          workspace: string;
+          configured: number;
+          permissionsJson: string | null;
+          mcpServersJson: string;
+          canTalkToJson: string;
+          canObserveJson: string;
+          revision: number;
+          createdAt: string;
+          updatedAt: string;
+        }
+      | undefined;
+    return row === undefined ? undefined : { ...row, configured: row.configured === 1 };
+  }
+
+  ownedAgentAdministrations(
+    ownerAgentId: string,
+    ownerSessionId: string,
+    workspace: string,
+  ): AgentAdministration[] {
+    return this.db
+      .prepare(
+        `SELECT ownership.agent_id AS agentId,
+                ownership.owner_agent_id AS ownerAgentId,
+                ownership.owner_session_id AS ownerSessionId,
+                ownership.workspace,
+                rules.configured,
+                rules.permissions_json AS permissionsJson,
+                rules.mcp_servers_json AS mcpServersJson,
+                rules.can_talk_to_json AS canTalkToJson,
+                rules.can_observe_json AS canObserveJson,
+                rules.revision,
+                ownership.created_at AS createdAt,
+                rules.updated_at AS updatedAt
+         FROM agent_ownership ownership
+         JOIN agent_rules rules ON rules.agent_id = ownership.agent_id
+         WHERE ownership.owner_agent_id = ? AND ownership.owner_session_id = ?
+           AND ownership.workspace = ?
+         ORDER BY ownership.created_at, ownership.agent_id`,
+      )
+      .all(ownerAgentId, ownerSessionId, workspace)
+      .map((row) => {
+        const typed = row as unknown as {
+          agentId: string;
+          ownerAgentId: string;
+          ownerSessionId: string;
+          workspace: string;
+          configured: number;
+          permissionsJson: string | null;
+          mcpServersJson: string;
+          canTalkToJson: string;
+          canObserveJson: string;
+          revision: number;
+          createdAt: string;
+          updatedAt: string;
+        };
+        return { ...typed, configured: typed.configured === 1 };
+      });
+  }
+
+  /** Atomically updates authoritative rules and every denormalized active run definition. */
+  updateOwnedAgentRules(update: OwnedAgentRuleUpdate): AgentAdministration {
+    return this.transaction(() => {
+      const ownership = this.agentAdministration(update.subjectAgentId);
+      if (
+        !ownership ||
+        ownership.ownerAgentId !== update.ownerAgentId ||
+        ownership.ownerSessionId !== update.ownerSessionId ||
+        ownership.workspace !== update.workspace
+      ) {
+        throw new Error(
+          `Copilot session "${update.ownerSessionId}" does not own agent ` +
+            `"${update.subjectAgentId}" in this workspace.`,
+        );
+      }
+      for (const run of update.runUpdates) {
+        const changed = this.db
+          .prepare(
+            `UPDATE runs SET alias = ?, definition = ?
+             WHERE id = ? AND mode = 'agent' AND status = 'active'`,
+          )
+          .run(run.alias, run.definition, run.id);
+        if (changed.changes !== 1) {
+          throw new Error(`Agent run "${run.id}" could not be updated with its new rules.`);
+        }
+      }
+      const changed = this.db
+        .prepare(
+          `UPDATE agent_rules
+           SET configured = 1,
+               permissions_json = ?,
+               mcp_servers_json = ?,
+               can_talk_to_json = ?,
+               can_observe_json = ?,
+               revision = revision + 1,
+               updated_at = ?
+           WHERE agent_id = ? AND owner_agent_id = ? AND owner_session_id = ?
+             AND workspace = ?`,
+        )
+        .run(
+          update.permissionsJson,
+          update.mcpServersJson,
+          update.canTalkToJson,
+          update.canObserveJson,
+          now(),
+          update.subjectAgentId,
+          update.ownerAgentId,
+          update.ownerSessionId,
+          update.workspace,
+        );
+      if (changed.changes !== 1) {
+        throw new Error(`Rules for agent "${update.subjectAgentId}" were not updated.`);
+      }
+      return this.agentAdministration(update.subjectAgentId)!;
+    });
+  }
+
+  /** Makes a session-created worker recoverable without requiring an initial prompt. */
+  completeProvisionedAgentStartup(runId: string): void {
+    const result = this.db
+      .prepare(
+        `UPDATE runs
+         SET startup_state = 'ready', recovery_eligible = 1
+         WHERE id = ? AND mode = 'agent' AND is_primary = 0 AND status = 'active'
+           AND startup_state = 'session_created'
+           AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+      )
+      .run(runId);
+    if (result.changes !== 1) {
+      throw new Error(
+        `Agent run "${runId}" cannot become recoverable before its SDK session is created.`,
+      );
+    }
   }
 
   /**

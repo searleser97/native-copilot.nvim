@@ -432,3 +432,75 @@ test("dead claim on a resumable primary releases a sessionless successor", (t) =
   );
   db.close();
 });
+
+test("owned agents remain dormant until their immutable owner session assigns rules", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, () => false);
+  const childDefinition = storedDefinition("reviewer");
+  db.createOwnedAgentRun(
+    {
+      id: "reviewer-run",
+      agentId: "reviewer-agent",
+      alias: "reviewer",
+      definition: childDefinition,
+      workspace: "workspace",
+      ownerPid: 8101,
+    },
+    "parent-agent",
+    "parent-session",
+  );
+  db.upsertSession("reviewer-run", "reviewer-session", "connected");
+  db.completeProvisionedAgentStartup("reviewer-run");
+
+  assert.deepEqual(db.agentAdministration("reviewer-agent"), {
+    agentId: "reviewer-agent",
+    ownerAgentId: "parent-agent",
+    ownerSessionId: "parent-session",
+    workspace: "workspace",
+    configured: false,
+    permissionsJson: null,
+    mcpServersJson: "[]",
+    canTalkToJson: "[]",
+    canObserveJson: "[]",
+    revision: 0,
+    createdAt: db.agentAdministration("reviewer-agent").createdAt,
+    updatedAt: db.agentAdministration("reviewer-agent").updatedAt,
+  });
+  assert.throws(
+    () =>
+      db.updateOwnedAgentRules({
+        subjectAgentId: "reviewer-agent",
+        ownerAgentId: "parent-agent",
+        ownerSessionId: "different-session",
+        workspace: "workspace",
+        permissionsJson: '{"mode":"inherit"}',
+        mcpServersJson: "[]",
+        canTalkToJson: '["parent-agent"]',
+        canObserveJson: "[]",
+        runUpdates: [],
+      }),
+    /does not own agent/,
+  );
+
+  const configured = db.updateOwnedAgentRules({
+    subjectAgentId: "reviewer-agent",
+    ownerAgentId: "parent-agent",
+    ownerSessionId: "parent-session",
+    workspace: "workspace",
+    permissionsJson: '{"mode":"inherit"}',
+    mcpServersJson: "[]",
+    canTalkToJson: '["parent-agent"]',
+    canObserveJson: "[]",
+    runUpdates: [
+      {
+        id: "reviewer-run",
+        alias: "reviewer",
+        definition: childDefinition,
+      },
+    ],
+  });
+  assert.equal(configured.configured, true);
+  assert.equal(configured.revision, 1);
+  assert.equal(configured.ownerSessionId, "parent-session");
+  db.close();
+});

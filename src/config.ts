@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type {
+  AgentCreateDefinition,
+  AgentRuleSet,
   AgentValidationResult,
   DynamicAgentDefinition,
   ResolvedAgent,
@@ -107,6 +109,46 @@ export const spawnAgentsSchema = z.object({
       "This grants no messaging permission.",
   ),
 }).strict();
+
+export const agentCreateSchema = z.object({
+  id: alias,
+  displayName: z.string().min(1),
+  description: z.string().min(1),
+  prompt: z.string().min(1).describe("Persistent operating instructions for the new agent."),
+  model: z.string().min(1).optional(),
+  reasoningEffort: reasoningEffort.optional(),
+  reasoningSummary: reasoningSummary.optional(),
+  ui: z.object({
+    icon: z.string().min(1).optional(),
+    color: z.string().min(1).optional(),
+  }).strict().optional(),
+}).strict();
+
+export const agentRuleSetSchema = z.object({
+  permissions: dynamicPermissionSchema,
+  mcpServers: stringList,
+  canTalkToSessionIds: stringList,
+  canObserveSessionIds: stringList,
+  ownerCanTalk: z.boolean(),
+  ownerCanObserve: z.boolean(),
+}).strict();
+
+export function createDefinitionToDynamic(
+  definition: AgentCreateDefinition,
+): DynamicAgentDefinition {
+  return {
+    ...definition,
+    task: "Awaiting the first authorized parent prompt.",
+    permissions: { mode: "inherit" },
+    mcpServers: [],
+    canTalkTo: [],
+    canObserve: [],
+  };
+}
+
+export function parseAgentRuleSet(value: unknown): AgentRuleSet {
+  return agentRuleSetSchema.parse(value) as AgentRuleSet;
+}
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {
   issues.push({ path, message });

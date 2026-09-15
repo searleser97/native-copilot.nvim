@@ -456,13 +456,13 @@ local function submit_prompt_content(queue_only)
         send('prompt.send', {
           target = state.primary_target,
           content = table.concat({
-            'Design and spawn standalone Copilot agents for this objective: ',
+            'Design a team of standalone Copilot agents for this objective: ',
             command.input,
-            '. Give each agent a focused task and explicitly define every directional ',
-            'communication and passive-observation link. Use the request-local selector ',
-            '`caller` when a child should message or observe you, and callerCanTalkTo or ',
-            'callerCanObserve when you need outgoing access to a child. Do not assume any ',
-            'access is granted by default.',
+            '. Provision each member separately with real_agent_create. After every create call ',
+            'returns its Copilot session id, assign its permissions and session-id-based ',
+            'communication and observation rules with real_agent_update_rules. Do not send an ',
+            'agent its first prompt until its rules are configured. Use real_agent_send_message ',
+            'only after the required directional links exist.',
           }),
         })
       else
@@ -847,7 +847,6 @@ end
 local function is_agent_message_tool(name)
   return name == 'write_agent'
     or name == 'real_agent_send_message'
-    or name == 'real_agent_send_to_agent'
     or name:find('^send_to_') ~= nil
 end
 

@@ -91,7 +91,8 @@ parsed native policy, so children inherit it by default (see
 [Inherited native configuration](#inherited-native-configuration)). The former
 `vim.g.native_copilot_command`, `NVIM_COPILOT_CMD`, and `COPILOT_CLI_CMD` inputs are not read. If no
 resolver is configured, the SDK's bundled Copilot runtime is used. No agent configuration file is
-required: the `real_team_spawn_agents` tool schema lets the primary agent define agents at runtime.
+required: `real_agent_create` lets an authorized Copilot session provision one durable agent at a
+time.
 Reusable agent recipes can be stored as ordinary prompt snippets and submitted through the prompt
 buffer.
 
@@ -236,20 +237,14 @@ session at the bottom, and keeps that entry visible.
 
 ## Configuration
 
-Agents are not predefined and require no external configuration file. The primary agent receives
-guarded `real_team_spawn_agents`, `real_team_update_agent`, `real_team_remove_agent`, and
-`real_team_list_agents`. Every agent, including the primary, receives
-`real_agent_list_recipients`, `real_agent_send_message`, `real_agent_read_activity`, and the
-deprecated compatibility wrapper `real_agent_send_to_agent`. The `real_team_*` namespace manages
-the fleet, while `real_agent_*` operates as the invoking real agent; both remain distinct from
-Copilot CLI built-ins. Each generated definition selects a unique tool-safe alias, display name, operating
-prompt, initial task, model, reasoning effort, permissions, MCP subset, UI metadata, directional
-`canTalkTo` selectors, and independent `canObserve` selectors.
+Agents are not predefined and require no external configuration file. Every agent receives
+`real_agent_create`, `real_agent_get`, `real_agent_list`, `real_agent_get_rules`,
+`real_agent_update_rules`, `real_agent_remove`, `real_agent_list_recipients`,
+`real_agent_send_message`, and `real_agent_read_activity`. Each create call provisions exactly one
+agent and returns its Copilot SDK session ID; there is no batch or `real_team_*` tool API.
 
-The former `native_copilot_*` fleet tool names are intentionally replaced rather than registered as
-duplicate aliases, so the model sees one unambiguous API. Existing durable agents receive the new
-tool names the next time their SDK session connects; stored identities, sessions, ACLs, and
-mailboxes are unchanged.
+The former `native_copilot_*` and `real_team_*` fleet tool names are intentionally not registered as
+duplicate aliases, so the model sees one unambiguous API.
 
 Every participant receives:
 
@@ -259,21 +254,15 @@ Every participant receives:
 - Its own top-level Copilot SDK session and `session.sessionId`.
 - Its own SQLite run, recovery state, mailbox, permissions, and conversation buffer.
 
-A call to `real_team_spawn_agents` may create several agents, but the request is not persisted
-as a group and does not become a lifecycle or routing boundary. Agents remain independently
-stoppable, recoverable, configurable, and addressable. Their run rows and aliases are reserved in
-one transaction with the primary caller's requested ACL grants before any child is announced; SDK
-session startup remains independent. A reserved additional-agent run becomes recoverable only
-after its SDK session is persisted and its initial task is accepted. The delivery lease completion
-for that first user task and the `ready`/recovery transition commit in one SQLite transaction, so a
-restart cannot observe a delivered initial task on a still-incomplete startup.
-If one child fails before that point, its alias reservation is released and its UUID is removed
-from every persisted workspace ACL (and every active in-memory ACL) without preventing the other
-children from starting. Both the UUID arrays and the corresponding definition selectors are
-rewritten in one transaction; malformed persisted JSON aborts and surfaces the cleanup failure
-instead of silently retaining a ghost grant. If the primary agent needs to remember a conceptual
-team or workflow, it may keep that relationship in its conversation or a workspace file; the host
-does not interpret or own that grouping.
+A call to `real_agent_create` reserves one durable identity, creates its SDK session, and returns
+that session ID without sending a task. The child is recoverable but remains `awaiting_rules`, with
+no communication grants, until its creating session calls `real_agent_update_rules`. Prompts and
+mailbox delivery to an unconfigured child are rejected explicitly.
+
+Ownership and rules are workspace-global durable SQLite records. The exact creating Copilot
+session owns the child; another session cannot mutate or remove it merely by knowing its session
+ID. Any agent may therefore become a scoped administrator of children it creates, while it has no
+authority over siblings or unrelated agents.
 
 Aliases cannot collide between the primary and any persisted additional-agent definition in the
 workspace. The primary prefers `copilot` and atomically falls back to `primary`, `primary_2`, and so
@@ -342,23 +331,15 @@ Neovim always starts one generic primary agent that stays connected for the host
 Native Copilot starts a fresh SDK conversation; previous primary conversations are never resumed
 automatically and remain available only through explicit `/resume`. The durable primary UUID,
 alias, ACLs, mailbox, and monitor relationships carry forward to the fresh conversation. Agents
-are created when that primary invokes `real_team_spawn_agents`, either from an ordinary prompt
-or from `/fleet <objective>`. Requests made while the primary is busy queue until that turn becomes
-idle. Each requested agent then starts independently and receives its own `task`.
+are created one at a time with `real_agent_create`, either from an ordinary prompt or from
+`/fleet <objective>`. `/fleet` directs the primary to create each member, collect all returned
+session IDs, configure each member's owned rules, and only then send initial prompts.
 
-`real_team_update_agent` replaces one complete definition and may change its operating prompt,
-model, reasoning, permissions, MCP subset, task, communication ACL, or observation ACL.
-Management changes that can alter the primary caller's outgoing ACL take the primary and target
-locks in deterministic UUID order. The target definition and caller ACL are committed in one
-SQLite transaction; reconnect rollback reverses only that operation's caller grant delta.
-Configuration changes reconnect the SDK session while preserving its session ID and conversation
-history. Reconnects carry forward rendered SDK event IDs and incrementally replay only unseen
-durable history, so stale callbacks are dropped without losing messages or tool completions emitted
-during the transition. While a stop, replacement, recovery, or reconnect is in progress, that agent
-is explicitly transitioning: passive activity reads return a temporary-unavailable error, and
-ordinary activation or mailbox work cannot recreate or attach to the superseded run.
-`real_team_remove_agent` stops only the selected agent. `/fleet` without an objective opens
-per-agent stop and recovery actions.
+`real_agent_update_rules` atomically replaces the child's permission profile, MCP subset, outgoing
+communication and observation targets, and the owner's links to that child. All relationship
+targets are Copilot session IDs. A rules update may elevate a previously restricted child only
+within the immutable policy ceiling established by the root `ai` invocation. Configuration changes
+reconnect the SDK session while preserving its session ID and history.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
 mailbox, communication and observation ACLs, and original MCP ceiling. Active runs owned by another
@@ -416,14 +397,9 @@ grants access. Identity resolution and authorization are separate: a known but u
 alias, UUID, or session ID returns an explicit communication-rule denial, while an identifier that
 does not resolve to an active managed agent returns an unknown-recipient error.
 
-Spawn definitions may use peer aliases, durable `agent:<uuid>` targets, or the request-local
-selector `caller` in a child's `canTalkTo` or `canObserve` list. The host resolves each selector
-immediately to an agent UUID. Top-level
-`callerCanTalkTo` and `callerCanObserve` lists grant the invoking agent outgoing access to selected
-new children. These are directional grants; neither direction is enabled merely because one agent
-spawned another. `real_agent_send_to_agent` remains only as a deprecated primary-agent
-compatibility wrapper and follows the exact same `canTalkTo` authorization path as
-`real_agent_send_message`.
+`real_agent_update_rules` accepts `canTalkToSessionIds` and `canObserveSessionIds`; the host resolves
+them immediately to durable UUID ACL principals. `ownerCanTalk` and `ownerCanObserve` independently
+control the creating session's outgoing links to its child. These grants remain directional.
 
 Resolved grants are persisted as durable agent UUIDs, not aliases. Renaming an alias therefore does
 not invalidate an established link. Stopping an agent leaves UUID-backed grants intact and marks
@@ -435,7 +411,7 @@ that recipient inactive; recovering the same durable agent makes the links usabl
 `real_agent_read_activity` for another active UUID-backed agent without sending that
 session a prompt. The primary agent uses the same outgoing `canObserve` set as every other caller.
 ACLs are revalidated on every read and may be replaced dynamically with
-`real_team_update_agent`.
+`real_agent_update_rules`.
 
 The activity tool reads the target's authoritative SDK event log with bounded cursor pagination and
 returns raw chronological events so the caller can infer status generically. Completed user and
