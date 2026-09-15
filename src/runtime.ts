@@ -3411,7 +3411,14 @@ export class CopilotRuntime implements RuntimeAdapter {
     availableMcpServers: ReadonlySet<string>,
   ): string {
     return stableStringify({
-      definition: context.definition,
+      sessionConfiguration: {
+        prompt: context.definition.prompt,
+        model: context.definition.model,
+        reasoningEffort: context.definition.reasoningEffort,
+        reasoningSummary: context.definition.reasoningSummary,
+        permissions: context.definition.permissions,
+        mcpServers: context.definition.mcpServers,
+      },
       mcpCeiling: [...context.mcpServers].sort(),
       availableMcpServers:
         context.agentId === this.primaryAgentId
@@ -5353,7 +5360,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         const transition = this.beginAgentTransition(subject, "applying owned agent rules");
         let reconnected = false;
         try {
-          await this.reconnectAgent(subject, transition);
+          await this.reconnectAgent(subject, transition, undefined, true);
           reconnected = true;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -6012,6 +6019,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       config: SessionConfig;
       configSignature: string;
     },
+    allowFreshUnstartedSession = false,
   ): Promise<void> {
     const target = context.target;
     let continuity: SessionContinuity | undefined;
@@ -6046,19 +6054,42 @@ export class CopilotRuntime implements RuntimeAdapter {
           "SDK session disconnect failed while reconnecting updated agent",
         );
       }
-      const connected = await this.connectSession({
-        runId: context.runId,
-        target,
-        agentId: context.agentId,
-        alias: context.alias,
-        sessionId,
-        config: plan.config,
-        configSignature: plan.configSignature,
-        availableMcpServers: plan.availableMcpServers,
-        resumeExisting: true,
-        ...(continuity === undefined ? {} : { continuity }),
-        transition,
-      });
+      let connected: LiveSession;
+      try {
+        connected = await this.connectSession({
+          runId: context.runId,
+          target,
+          agentId: context.agentId,
+          alias: context.alias,
+          sessionId,
+          config: plan.config,
+          configSignature: plan.configSignature,
+          availableMcpServers: plan.availableMcpServers,
+          resumeExisting: true,
+          ...(continuity === undefined ? {} : { continuity }),
+          transition,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !allowFreshUnstartedSession ||
+          !message.includes("Session not found") ||
+          this.db.hasDeliveredUserMessage(context.runId)
+        ) {
+          throw error;
+        }
+        connected = await this.connectSession({
+          runId: context.runId,
+          target,
+          agentId: context.agentId,
+          alias: context.alias,
+          config: plan.config,
+          configSignature: plan.configSignature,
+          availableMcpServers: plan.availableMcpServers,
+          resumeExisting: false,
+          transition,
+        });
+      }
       const verifiedPlan = await this.sessionConnectionPlan(context);
       if (connected.configSignature === verifiedPlan.configSignature) {
         return;

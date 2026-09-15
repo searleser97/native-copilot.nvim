@@ -4946,6 +4946,17 @@ export class AgentDatabase {
       .get(runId) as unknown as StoredAgentSession | undefined;
   }
 
+  hasDeliveredUserMessage(runId: string): boolean {
+    return this.db
+      .prepare(
+        `SELECT 1
+         FROM messages
+         WHERE run_id = ? AND kind = 'user' AND status = 'delivered'
+         LIMIT 1`,
+      )
+      .get(runId) !== undefined;
+  }
+
   nextSequence(runId: string, target: string): number {
     const row = this.db
       .prepare(
