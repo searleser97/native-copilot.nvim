@@ -408,7 +408,7 @@ test("dead claim on a resumable primary releases a sessionless successor", (t) =
   assert.equal(predecessor.session?.sessionId, "resumable-primary-session");
   assert.equal(successor.status, "interrupted");
   assert.equal(successor.startupState, "failed");
-  assert.equal(successor.definition, undefined);
+  assert.equal(successor.definition, null);
   const durable = db.db
     .prepare(
       `SELECT id, recovery_eligible AS recoveryEligible, definition
