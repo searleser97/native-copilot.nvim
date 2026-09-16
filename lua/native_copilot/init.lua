@@ -3280,6 +3280,7 @@ function M._on_event(message)
         payload.recovered and 'Preparing recovered Copilot agent' or 'Preparing primary Copilot agent',
         target
       )
+      update_prompt_label()
     end
     if message.type == 'agent.loading' and not payload.primary then
       buffers.append_activity_block(
