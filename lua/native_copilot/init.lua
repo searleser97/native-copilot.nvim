@@ -2719,6 +2719,7 @@ function M._on_event(message)
       is_ui_open()
       and selected
       and not (loading_visible() and selected.state == 'loading')
+      and vim.bo[vim.api.nvim_get_current_buf()].filetype ~= 'TelescopePrompt'
     then
       refresh_member(state.selected)
     end
