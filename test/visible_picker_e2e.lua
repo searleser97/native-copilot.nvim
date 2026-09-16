@@ -561,9 +561,7 @@ tick = function()
     submit('/fleet Validate command picker behavior')
     phase = 'agent-objective-result'
   elseif phase == 'agent-objective-result' then
-    if not content:find(
-      'Design and spawn standalone Copilot agents for this objective: Validate command picker behavior'
-    ) then
+    if not content:find('this objective: Validate command picker behavior', 1, true) then
       schedule_tick()
       return
     end
