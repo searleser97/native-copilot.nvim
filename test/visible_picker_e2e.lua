@@ -355,8 +355,12 @@ tick = function()
         break
       end
     end
+    if not found_resume then
+      schedule_tick()
+      return
+    end
     if not check(
-      found_resume and not content:find('[environment] Copilot environment — ready', 1, true),
+      not content:find('[environment] Copilot environment — ready', 1, true),
       'Blink offered /resume before the environment finished loading'
     ) then
       finish()
