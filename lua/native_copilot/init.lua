@@ -2550,11 +2550,13 @@ local function schedule_history_render()
         history_event(job.member_id, job.events[job.index], job.context)
         job.index = job.index + 1
         if vim.uv.hrtime() - started >= HISTORY_RENDER_BUDGET_NS then
+          buffers.follow_history_replay(job.member_id)
           schedule_history_render()
           return
         end
       end
 
+      buffers.follow_history_replay(job.member_id, true)
       if #job.events > 0 then reveal_loading_member(job.member_id) end
       local loaded = tonumber(json_value(payload.loadedEvents))
       local total = tonumber(json_value(payload.totalEvents))

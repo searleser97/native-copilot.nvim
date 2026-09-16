@@ -1,6 +1,7 @@
 local M = {}
 
 local registry = {}
+local views_by_buffer = {}
 local status_symbols = {
   running = '🟡',
   idle = '🟡',
@@ -150,6 +151,8 @@ local function with_modifiable(buf, operation)
   vim.bo[buf].modifiable = true
   operation()
   vim.bo[buf].modifiable = was_modifiable
+  local view = views_by_buffer[buf]
+  if view then view.fold_cache = nil end
 end
 
 local function visible(buf)
@@ -229,22 +232,25 @@ local function configure_folds(view)
   end
 end
 
-local function refresh_folds(view)
+local function refresh_folds(view, preserve_closed)
   if view.id ~= 'conversation' or view.history_replaying then return end
+  view.fold_cache = nil
   for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
     if vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_call(win, function()
         local cursor = vim.api.nvim_win_get_cursor(win)
         local closed = {}
-        local line = 1
-        local line_count = vim.api.nvim_buf_line_count(view.buf)
-        while line <= line_count do
-          local start_line = vim.fn.foldclosed(line)
-          if start_line >= 0 then
-            table.insert(closed, start_line)
-            line = vim.fn.foldclosedend(line) + 1
-          else
-            line = line + 1
+        if preserve_closed ~= false then
+          local line = 1
+          local line_count = vim.api.nvim_buf_line_count(view.buf)
+          while line <= line_count do
+            local start_line = vim.fn.foldclosed(line)
+            if start_line >= 0 then
+              table.insert(closed, start_line)
+              line = vim.fn.foldclosedend(line) + 1
+            else
+              line = line + 1
+            end
           end
         end
         vim.cmd('silent! normal! zx')
@@ -297,7 +303,7 @@ local function create_buffer(name, member_id, view_id)
   with_modifiable(buf, function()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
   end)
-  return {
+  local view = {
     buf = buf,
     member_id = member_id,
     id = view_id,
@@ -328,8 +334,12 @@ local function create_buffer(name, member_id, view_id)
     timeline_time_overrides = {},
     follow_windows = {},
     following_update = false,
+    history_last_follow = 0,
+    fold_cache = nil,
     session_id = nil,
   }
+  views_by_buffer[buf] = view
+  return view
 end
 
 local function member(member_id)
@@ -406,8 +416,12 @@ function M.prepare_history(member_id, event_time)
   view.history_prepared = true
   view.history_environment_started = false
   view.history_replaying = true
+  view.history_last_follow = 0
   view.history_turn_active = false
   view.session_id = nil
+  for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
+    if vim.api.nvim_win_is_valid(win) then view.follow_windows[win] = true end
+  end
 end
 
 local function flush(view)
@@ -469,7 +483,12 @@ local function flush(view)
 end
 
 function M.begin_history_replay(member_id)
-  M.ensure_member(member_id).views.conversation.history_replaying = true
+  local view = M.ensure_member(member_id).views.conversation
+  view.history_replaying = true
+  view.history_last_follow = 0
+  for _, win in ipairs(vim.fn.win_findbuf(view.buf)) do
+    if vim.api.nvim_win_is_valid(win) then view.follow_windows[win] = true end
+  end
 end
 
 function M.begin_history_turn(member_id)
@@ -480,7 +499,16 @@ function M.finish_history_replay(member_id)
   local view = M.ensure_member(member_id).views.conversation
   flush(view)
   view.history_replaying = false
-  refresh_folds(view)
+  refresh_folds(view, false)
+  follow_bottom(view, true, true)
+end
+
+function M.follow_history_replay(member_id, force)
+  local view = M.ensure_member(member_id).views.conversation
+  if not view.history_replaying then return end
+  local now = vim.uv.hrtime()
+  if not force and now - view.history_last_follow < 50 * 1000 * 1000 then return end
+  view.history_last_follow = now
   follow_bottom(view, true, true)
 end
 
@@ -1098,21 +1126,28 @@ end
 
 function M.foldexpr(lnum)
   local buf = vim.api.nvim_get_current_buf()
-  local row = lnum - 1
-  local folds = vim.api.nvim_buf_get_extmarks(
-    buf,
-    activity_fold_namespace,
-    0,
-    -1,
-    { details = true }
-  )
-  for _, fold in ipairs(folds) do
-    local start_row = fold[2]
-    local end_row = fold[4].end_row or start_row
-    if row == start_row then return '>1' end
-    if row > start_row and row < end_row then return '1' end
+  local view = views_by_buffer[buf]
+  if not view or view.history_replaying then return '0' end
+  if not view.fold_cache then
+    local cache = {}
+    local folds = vim.api.nvim_buf_get_extmarks(
+      buf,
+      activity_fold_namespace,
+      0,
+      -1,
+      { details = true }
+    )
+    for _, fold in ipairs(folds) do
+      local start_row = fold[2]
+      local end_row = fold[4].end_row or start_row
+      cache[start_row + 1] = '>1'
+      for line = start_row + 2, end_row do
+        cache[line] = '1'
+      end
+    end
+    view.fold_cache = cache
   end
-  return '0'
+  return view.fold_cache[lnum] or '0'
 end
 
 local function reconcile_environment_rows(view, item)
@@ -1867,6 +1902,7 @@ end
 function M.reset()
   for _, entry in pairs(registry) do
     for _, view in pairs(entry.views) do
+      views_by_buffer[view.buf] = nil
       if vim.api.nvim_buf_is_valid(view.buf) then
         pcall(vim.api.nvim_buf_delete, view.buf, { force = true })
       end
@@ -1880,6 +1916,7 @@ function M.remove_member(member_id)
   local entry = registry[member_id]
   if not entry then return end
   for _, view in pairs(entry.views) do
+    views_by_buffer[view.buf] = nil
     if vim.api.nvim_buf_is_valid(view.buf) then
       pcall(vim.api.nvim_buf_delete, view.buf, { force = true })
     end
