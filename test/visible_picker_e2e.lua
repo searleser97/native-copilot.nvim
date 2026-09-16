@@ -815,10 +815,12 @@ tick = function()
     end
     local resumed_session_id = content:find('[SessionId][e2e-cli-session]', 1, true)
     local resumed_environment = content:find('[environment]', resumed_session_id or 1, true)
+    if not resumed_session_id or not resumed_environment then
+      schedule_tick()
+      return
+    end
     if not check(
-      resumed_session_id
-        and resumed_environment
-        and resumed_session_id < resumed_environment
+      resumed_session_id < resumed_environment
         and content:find('\n\n[SessionId][e2e-cli-session]', 1, true),
       '/resume rendered a separated session identity before environment rows'
     ) then
