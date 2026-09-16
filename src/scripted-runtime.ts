@@ -586,7 +586,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       component: "Copilot environment",
       message: "Starting scripted runtime",
     }, { memberId: target, target: "status" });
-    await observationPause(250);
+    await delay(100);
     for (const [component, count] of [
       ["Tools", 4],
       ["Instructions", 1],
