@@ -6,6 +6,7 @@ import type {
 } from "./database.js";
 import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
 import { compactHistoryEvents } from "./runtime.js";
+import type { HistoryReplayEvent } from "./runtime.js";
 import type { SpawnAgentsRequest } from "./types.js";
 
 interface RuntimeEmitter {
@@ -35,7 +36,7 @@ interface ScriptedTransition {
 }
 
 interface ScriptedHistoryReplay {
-  chunks: Array<Array<Record<string, unknown>>>;
+  chunks: HistoryReplayEvent[][];
   nextChunkIndex: number;
   loadedEvents: number;
   totalEvents: number;
@@ -915,7 +916,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
     replayId: string,
     runId: string,
     target: string,
-    chunks: Array<Array<Record<string, unknown>>>,
+    chunks: HistoryReplayEvent[][],
     totalEvents: number,
   ): Promise<void> {
     return new Promise<void>((resolve) => {
