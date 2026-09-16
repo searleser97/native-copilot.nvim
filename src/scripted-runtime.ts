@@ -880,65 +880,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
       return { found: false };
     }
 
-    private emitHistoryChunk(replayId: string, replay: ScriptedHistoryReplay): void {
-      const chunkIndex = replay.nextChunkIndex;
-      const events = replay.chunks[chunkIndex];
-      if (!events) {
-        this.historyReplays.delete(replayId);
-        replay.resolve();
-        return;
-      }
-      replay.loadedEvents += events.length;
-      replay.nextChunkIndex += 1;
-      this.emit("session.history", {
-        events,
-        replayId,
-        chunkIndex,
-        chunkCount: replay.chunks.length,
-        loadedEvents: replay.loadedEvents,
-        totalEvents: replay.totalEvents,
-        first: chunkIndex === 0,
-        last: chunkIndex === replay.chunks.length - 1,
-      }, { runId: replay.runId, memberId: replay.target, target: "conversation", done: true });
-    }
-
-    private replayHistory(
-      replayId: string,
-      runId: string,
-      target: string,
-      chunks: Array<Array<Record<string, unknown>>>,
-      totalEvents: number,
-    ): Promise<void> {
-      return new Promise<void>((resolve) => {
-        const replay: ScriptedHistoryReplay = {
-          chunks,
-          nextChunkIndex: 0,
-          loadedEvents: 0,
-          totalEvents,
-          runId,
-          target,
-          resolve,
-        };
-        this.historyReplays.set(replayId, replay);
-        this.emitHistoryChunk(replayId, replay);
-      });
-    }
-
-    acknowledgeHistoryChunk(replayId: string, chunkIndex: number): void {
-      const replay = this.historyReplays.get(replayId);
-      if (!replay) {
-        throw new Error(`Scripted history replay "${replayId}" is not pending.`);
-      }
-      if (chunkIndex !== replay.nextChunkIndex - 1) {
-        throw new Error(`Scripted history replay "${replayId}" received an out-of-order ack.`);
-      }
-      if (replay.nextChunkIndex >= replay.chunks.length) {
-        this.historyReplays.delete(replayId);
-        replay.resolve();
-        return;
-      }
-      this.emitHistoryChunk(replayId, replay);
-    }
     if (toolCallId === "cli-history-timestamp") {
       return {
         found: true,
@@ -946,6 +887,66 @@ export class ScriptedRuntime implements RuntimeAdapter {
       };
     }
     return { found: false };
+  }
+
+  private emitHistoryChunk(replayId: string, replay: ScriptedHistoryReplay): void {
+    const chunkIndex = replay.nextChunkIndex;
+    const events = replay.chunks[chunkIndex];
+    if (!events) {
+      this.historyReplays.delete(replayId);
+      replay.resolve();
+      return;
+    }
+    replay.loadedEvents += events.length;
+    replay.nextChunkIndex += 1;
+    this.emit("session.history", {
+      events,
+      replayId,
+      chunkIndex,
+      chunkCount: replay.chunks.length,
+      loadedEvents: replay.loadedEvents,
+      totalEvents: replay.totalEvents,
+      first: chunkIndex === 0,
+      last: chunkIndex === replay.chunks.length - 1,
+    }, { runId: replay.runId, memberId: replay.target, target: "conversation", done: true });
+  }
+
+  private replayHistory(
+    replayId: string,
+    runId: string,
+    target: string,
+    chunks: Array<Array<Record<string, unknown>>>,
+    totalEvents: number,
+  ): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const replay: ScriptedHistoryReplay = {
+        chunks,
+        nextChunkIndex: 0,
+        loadedEvents: 0,
+        totalEvents,
+        runId,
+        target,
+        resolve,
+      };
+      this.historyReplays.set(replayId, replay);
+      this.emitHistoryChunk(replayId, replay);
+    });
+  }
+
+  acknowledgeHistoryChunk(replayId: string, chunkIndex: number): void {
+    const replay = this.historyReplays.get(replayId);
+    if (!replay) {
+      throw new Error(`Scripted history replay "${replayId}" is not pending.`);
+    }
+    if (chunkIndex !== replay.nextChunkIndex - 1) {
+      throw new Error(`Scripted history replay "${replayId}" received an out-of-order ack.`);
+    }
+    if (replay.nextChunkIndex >= replay.chunks.length) {
+      this.historyReplays.delete(replayId);
+      replay.resolve();
+      return;
+    }
+    this.emitHistoryChunk(replayId, replay);
   }
 
   async resumePrimarySession(sessionId: string): Promise<void> {
