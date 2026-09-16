@@ -119,6 +119,19 @@ async function main(): Promise<void> {
       case "state.snapshot":
         protocol.send("state.snapshot", db.snapshot(), { requestId: command.id, done: true });
         return;
+      case "history.chunk.rendered": {
+        const replayId = requiredString(payload, "replayId", command.type);
+        const chunkIndex = payload.chunkIndex;
+        if (!Number.isSafeInteger(chunkIndex) || Number(chunkIndex) < 0) {
+          throw new Error(`${command.type} requires a non-negative integer payload.chunkIndex`);
+        }
+        runtime.acknowledgeHistoryChunk(replayId, Number(chunkIndex));
+        protocol.send("request.complete", { type: command.type }, {
+          requestId: command.id,
+          done: true,
+        });
+        return;
+      }
       case "runtime.status":
         protocol.send("runtime.status", runtime.status(), { requestId: command.id, done: true });
         return;

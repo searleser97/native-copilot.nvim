@@ -34,6 +34,16 @@ interface ScriptedTransition {
   reason: string;
 }
 
+interface ScriptedHistoryReplay {
+  chunks: Array<Array<Record<string, unknown>>>;
+  nextChunkIndex: number;
+  loadedEvents: number;
+  totalEvents: number;
+  runId: string;
+  target: string;
+  resolve: () => void;
+}
+
 /** One scripted standalone agent, mirroring the runtime's durable agent identity. */
 interface ScriptedAgent {
   agentId: string;
@@ -73,6 +83,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
   private readonly agents = new Map<string, ScriptedAgent>();
   private readonly generations = new Map<string, number>();
   private readonly transitions = new Map<string, ScriptedTransition>();
+  private readonly historyReplays = new Map<string, ScriptedHistoryReplay>();
   private recoveredAgentRun = false;
   private stopped = false;
 
@@ -868,6 +879,66 @@ export class ScriptedRuntime implements RuntimeAdapter {
     if (target !== this.primaryAgent().target) {
       return { found: false };
     }
+
+    private emitHistoryChunk(replayId: string, replay: ScriptedHistoryReplay): void {
+      const chunkIndex = replay.nextChunkIndex;
+      const events = replay.chunks[chunkIndex];
+      if (!events) {
+        this.historyReplays.delete(replayId);
+        replay.resolve();
+        return;
+      }
+      replay.loadedEvents += events.length;
+      replay.nextChunkIndex += 1;
+      this.emit("session.history", {
+        events,
+        replayId,
+        chunkIndex,
+        chunkCount: replay.chunks.length,
+        loadedEvents: replay.loadedEvents,
+        totalEvents: replay.totalEvents,
+        first: chunkIndex === 0,
+        last: chunkIndex === replay.chunks.length - 1,
+      }, { runId: replay.runId, memberId: replay.target, target: "conversation", done: true });
+    }
+
+    private replayHistory(
+      replayId: string,
+      runId: string,
+      target: string,
+      chunks: Array<Array<Record<string, unknown>>>,
+      totalEvents: number,
+    ): Promise<void> {
+      return new Promise<void>((resolve) => {
+        const replay: ScriptedHistoryReplay = {
+          chunks,
+          nextChunkIndex: 0,
+          loadedEvents: 0,
+          totalEvents,
+          runId,
+          target,
+          resolve,
+        };
+        this.historyReplays.set(replayId, replay);
+        this.emitHistoryChunk(replayId, replay);
+      });
+    }
+
+    acknowledgeHistoryChunk(replayId: string, chunkIndex: number): void {
+      const replay = this.historyReplays.get(replayId);
+      if (!replay) {
+        throw new Error(`Scripted history replay "${replayId}" is not pending.`);
+      }
+      if (chunkIndex !== replay.nextChunkIndex - 1) {
+        throw new Error(`Scripted history replay "${replayId}" received an out-of-order ack.`);
+      }
+      if (replay.nextChunkIndex >= replay.chunks.length) {
+        this.historyReplays.delete(replayId);
+        replay.resolve();
+        return;
+      }
+      this.emitHistoryChunk(replayId, replay);
+    }
     if (toolCallId === "cli-history-timestamp") {
       return {
         found: true,
@@ -1346,20 +1417,13 @@ export class ScriptedRuntime implements RuntimeAdapter {
         compactEvents.slice(chunkSize, chunkSize * 2),
         compactEvents.slice(chunkSize * 2),
       ];
-      let loadedEvents = 0;
-      for (const [chunkIndex, events] of historyChunks.entries()) {
-        loadedEvents += events.length;
-        this.emit("session.history", {
-          events,
-          replayId,
-          chunkIndex,
-          chunkCount: historyChunks.length,
-          loadedEvents,
-          totalEvents: compactEvents.length,
-          first: chunkIndex === 0,
-          last: chunkIndex === historyChunks.length - 1,
-        }, { runId: primary.runId, memberId: target, target: "conversation", done: true });
-      }
+      await this.replayHistory(
+        replayId,
+        primary.runId,
+        target,
+        historyChunks,
+        compactEvents.length,
+      );
     this.emit("session.identity", {
       sessionId,
     }, { runId: primary.runId, memberId: target, target: "activity", done: true });

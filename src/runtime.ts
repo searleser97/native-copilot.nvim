@@ -305,6 +305,18 @@ interface ConnectionAttempt {
   promise: Promise<LiveSession>;
 }
 
+interface PendingHistoryReplay {
+  chunks: HistoryReplayEvent[][];
+  nextChunkIndex: number;
+  loadedEvents: number;
+  totalEvents: number;
+  incremental: boolean;
+  runId: string;
+  target: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 interface EnvironmentProbe {
   component: string;
   load: (session: CopilotSession) => Promise<unknown[]>;
@@ -1582,6 +1594,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       respond: (result: PermissionDecision) => void;
     }
   >();
+  private readonly pendingHistoryReplays = new Map<string, PendingHistoryReplay>();
   // Serializes lifecycle operations per agent UUID so concurrent update/stop
   // requests cannot interleave on the same agent.
   private readonly agentLocks = new Map<string, Promise<void>>();
@@ -3404,6 +3417,78 @@ export class CopilotRuntime implements RuntimeAdapter {
     };
   }
 
+  private emitHistoryChunk(replayId: string, replay: PendingHistoryReplay): void {
+    const chunkIndex = replay.nextChunkIndex;
+    const events = replay.chunks[chunkIndex];
+    if (!events) {
+      this.pendingHistoryReplays.delete(replayId);
+      replay.resolve();
+      return;
+    }
+    replay.loadedEvents += events.length;
+    replay.nextChunkIndex += 1;
+    this.emit(
+      "session.history",
+      {
+        events,
+        incremental: replay.incremental,
+        replayId,
+        chunkIndex,
+        chunkCount: replay.chunks.length,
+        loadedEvents: replay.loadedEvents,
+        totalEvents: replay.totalEvents,
+        first: chunkIndex === 0,
+        last: chunkIndex === replay.chunks.length - 1,
+      },
+      { runId: replay.runId, memberId: replay.target, target: "conversation", done: true },
+    );
+  }
+
+  private replayHistory(
+    runId: string,
+    target: string,
+    compactEvents: HistoryReplayEvent[],
+    incremental: boolean,
+  ): Promise<void> {
+    const replayId = randomUUID();
+    const chunks = historyChunks(compactEvents);
+    const replayChunks = chunks.length > 0 ? chunks : [[]];
+    return new Promise<void>((resolve, reject) => {
+      const replay: PendingHistoryReplay = {
+        chunks: replayChunks,
+        nextChunkIndex: 0,
+        loadedEvents: 0,
+        totalEvents: compactEvents.length,
+        incremental,
+        runId,
+        target,
+        resolve,
+        reject,
+      };
+      this.pendingHistoryReplays.set(replayId, replay);
+      this.emitHistoryChunk(replayId, replay);
+    });
+  }
+
+  acknowledgeHistoryChunk(replayId: string, chunkIndex: number): void {
+    const replay = this.pendingHistoryReplays.get(replayId);
+    if (!replay) {
+      throw new Error(`History replay "${replayId}" is not awaiting an acknowledgement.`);
+    }
+    if (chunkIndex !== replay.nextChunkIndex - 1) {
+      throw new Error(
+        `History replay "${replayId}" expected acknowledgement for chunk ` +
+          `${replay.nextChunkIndex - 1}, received ${chunkIndex}.`,
+      );
+    }
+    if (replay.nextChunkIndex >= replay.chunks.length) {
+      this.pendingHistoryReplays.delete(replayId);
+      replay.resolve();
+      return;
+    }
+    this.emitHistoryChunk(replayId, replay);
+  }
+
   /**
    * The complete signature of the SessionConfig an agent would be connected with:
    * its full definition, original MCP ceiling, and the primary MCP list used to
@@ -4046,28 +4131,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       }
       if (continuity === undefined || replayEvents.length > 0) {
         const compactEvents = compactHistoryEvents(replayEvents);
-        const chunks = historyChunks(compactEvents);
-        const replayId = randomUUID();
-        const replayChunks = chunks.length > 0 ? chunks : [[]];
-        let loadedEvents = 0;
-        for (const [chunkIndex, events] of replayChunks.entries()) {
-          loadedEvents += events.length;
-          this.emit(
-            "session.history",
-            {
-              events,
-              incremental: continuity !== undefined,
-              replayId,
-              chunkIndex,
-              chunkCount: replayChunks.length,
-              loadedEvents,
-              totalEvents: compactEvents.length,
-              first: chunkIndex === 0,
-              last: chunkIndex === replayChunks.length - 1,
-            },
-            { runId, memberId: target, target: "conversation", done: true },
-          );
-        }
+        await this.replayHistory(runId, target, compactEvents, continuity !== undefined);
       }
       if (continuity === undefined) {
         this.emit(
@@ -6590,6 +6654,10 @@ export class CopilotRuntime implements RuntimeAdapter {
       return;
     }
     this.shuttingDown = true;
+    for (const [replayId, replay] of this.pendingHistoryReplays) {
+      replay.reject(new Error(`History replay "${replayId}" stopped during shutdown.`));
+    }
+    this.pendingHistoryReplays.clear();
     clearInterval(this.recoveryTimer);
     for (const timer of this.mailboxRetryTimers.values()) {
       clearTimeout(timer);

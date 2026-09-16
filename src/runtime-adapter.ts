@@ -17,6 +17,7 @@ export interface RuntimeAdapter {
   listSessions(): Promise<unknown[]>;
   resumePrimarySession(sessionId: string): Promise<void>;
   historicalToolResult(target: string, toolCallId: string): Promise<unknown>;
+  acknowledgeHistoryChunk(replayId: string, chunkIndex: number): void;
   listCommands(target: string): Promise<unknown[]>;
   invokeCommand(target: string, name: string, input?: string): Promise<unknown>;
   modelState(target: string): Promise<unknown>;

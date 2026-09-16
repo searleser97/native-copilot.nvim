@@ -141,6 +141,8 @@ local state = {
   member_activity = {},
   schedules = {},
   history_replays = {},
+  history_render_queue = {},
+  history_render_scheduled = false,
   resume_request_id = nil,
   resume_cursor_animation_restore = nil,
   session_replacing = nil,
@@ -2501,6 +2503,97 @@ local function finish_history_context(member_id, context)
   end
 end
 
+local HISTORY_RENDER_BUDGET_NS = 8 * 1000 * 1000
+
+local function schedule_history_render()
+  if state.history_render_scheduled then return end
+  state.history_render_scheduled = true
+  vim.schedule(function()
+    state.history_render_scheduled = false
+    local started = vim.uv.hrtime()
+    while #state.history_render_queue > 0 do
+      local job = state.history_render_queue[1]
+      local payload = job.payload
+      if not job.initialized then
+        local first_event = type(payload.events) == 'table' and payload.events[1] or nil
+        local first_timestamp = first_event and tonumber(json_value(first_event.replayTimestamp))
+        local replay_id = json_value(payload.replayId)
+        local chunked = replay_id ~= nil
+        local first_chunk = not chunked or json_value(payload.first) == true
+        if first_chunk and json_value(payload.incremental) ~= true then
+          buffers.prepare_history(
+            job.member_id,
+            first_timestamp and math.floor(first_timestamp / 1000) or nil
+          )
+        elseif first_chunk then
+          buffers.begin_history_replay(job.member_id)
+        end
+        local context = chunked and state.history_replays[replay_id] or nil
+        if not context then
+          context = {
+            agent_messages = {},
+            agent_tool_prompts = {},
+            tool_arguments = {},
+          }
+          if chunked then state.history_replays[replay_id] = context end
+        end
+        job.context = context
+        job.replay_id = replay_id
+        job.chunked = chunked
+        job.last_chunk = not chunked or json_value(payload.last) == true
+        job.events = type(payload.events) == 'table' and payload.events or {}
+        job.index = 1
+        job.initialized = true
+      end
+
+      while job.index <= #job.events do
+        history_event(job.member_id, job.events[job.index], job.context)
+        job.index = job.index + 1
+        if vim.uv.hrtime() - started >= HISTORY_RENDER_BUDGET_NS then
+          schedule_history_render()
+          return
+        end
+      end
+
+      if #job.events > 0 then reveal_loading_member(job.member_id) end
+      local loaded = tonumber(json_value(payload.loadedEvents))
+      local total = tonumber(json_value(payload.totalEvents))
+      if loaded and total and total > 0 then
+        set_member_activity(
+          job.member_id,
+          ('Rendering history — %d / %d'):format(loaded, total),
+          false
+        )
+      end
+      if job.last_chunk then
+        finish_history_context(job.member_id, job.context)
+        buffers.finish_history_replay(job.member_id)
+        if job.chunked then state.history_replays[job.replay_id] = nil end
+        set_member_activity(job.member_id, 'Loading environment', false)
+      end
+      table.remove(state.history_render_queue, 1)
+      if job.replay_id then
+        send('history.chunk.rendered', {
+          replayId = job.replay_id,
+          chunkIndex = tonumber(json_value(payload.chunkIndex)) or 0,
+        })
+      end
+      if vim.uv.hrtime() - started >= HISTORY_RENDER_BUDGET_NS then
+        schedule_history_render()
+        return
+      end
+    end
+  end)
+end
+
+local function enqueue_history_render(member_id, payload)
+  table.insert(state.history_render_queue, {
+    member_id = member_id,
+    payload = payload,
+  })
+  schedule_history_render()
+end
+
 local function model_id(model)
   return model.selectionId or model.id or model.modelId or model.name
 end
@@ -3283,48 +3376,7 @@ function M._on_event(message)
       set_loading_stage(payload.message or 'Loading Native Copilot', member_id)
     end
   elseif message.type == 'session.history' then
-    local first_event = type(payload.events) == 'table' and payload.events[1] or nil
-    local first_timestamp = first_event and tonumber(json_value(first_event.replayTimestamp))
-    local replay_id = json_value(payload.replayId)
-    local chunked = replay_id ~= nil
-    local first_chunk = not chunked or json_value(payload.first) == true
-    local last_chunk = not chunked or json_value(payload.last) == true
-    if first_chunk and json_value(payload.incremental) ~= true then
-      buffers.prepare_history(
-        member_id,
-        first_timestamp and math.floor(first_timestamp / 1000) or nil
-      )
-    elseif first_chunk then
-      buffers.begin_history_replay(member_id)
-    end
-    local context = chunked and state.history_replays[replay_id] or nil
-    if not context then
-      context = {
-        agent_messages = {},
-        agent_tool_prompts = {},
-        tool_arguments = {},
-      }
-      if chunked then state.history_replays[replay_id] = context end
-    end
-    for _, event in ipairs(payload.events or {}) do history_event(member_id, event, context) end
-    if type(payload.events) == 'table' and #payload.events > 0 then
-      reveal_loading_member(member_id)
-    end
-    local loaded = tonumber(json_value(payload.loadedEvents))
-    local total = tonumber(json_value(payload.totalEvents))
-    if loaded and total and total > 0 then
-      set_member_activity(
-        member_id,
-        ('Loading history — %d / %d'):format(loaded, total),
-        false
-      )
-    end
-    if last_chunk then
-      finish_history_context(member_id, context)
-      buffers.finish_history_replay(member_id)
-      if chunked then state.history_replays[replay_id] = nil end
-      set_member_activity(member_id, 'Loading environment', false)
-    end
+    enqueue_history_render(member_id, payload)
   elseif message.type == 'scheduled.prompt' then
     local content = payload.displayPrompt or payload.content or 'Scheduled prompt'
     local schedule_id = json_value(payload.scheduleId)

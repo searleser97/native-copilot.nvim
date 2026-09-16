@@ -24,6 +24,15 @@ export class Protocol {
 
   start(): void {
     this.input.on("line", (line) => {
+      try {
+        const parsed = JSON.parse(line) as { type?: unknown };
+        if (parsed.type === "history.chunk.rendered") {
+          void this.handleLine(line);
+          return;
+        }
+      } catch {
+        // The serialized path below reports malformed commands consistently.
+      }
       this.queue = this.queue.then(() => this.handleLine(line));
     });
     this.input.once("close", () => {
