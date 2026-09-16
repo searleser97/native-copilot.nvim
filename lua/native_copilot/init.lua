@@ -2727,7 +2727,12 @@ function M._on_event(message)
     local entries = {}
     for _, session in ipairs(payload.sessions or {}) do
       local summary = session.summary
-      if not summary or summary == '' then summary = session.sessionId end
+      if not summary or summary:match('^%s*$') then
+        local compact_id = tostring(session.sessionId or ''):sub(1, 8)
+        summary = compact_id ~= ''
+            and ('Untitled session [%s]'):format(compact_id)
+          or 'Untitled session'
+      end
       local activity = session.inUse and '[active elsewhere] ' or ''
       table.insert(entries, {
         display = ('%s%s — %s'):format(

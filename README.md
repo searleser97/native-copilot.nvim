@@ -233,7 +233,9 @@ require("native_copilot").setup({
 
 The plugin does not select Telescope merely because it is installed, and it preserves Telescope's
 configured layout. `/resume` displays sessions oldest-to-newest, initially selects the newest
-session at the bottom, and keeps that entry visible.
+session at the bottom, and keeps that entry visible. Session metadata is enriched through the SDK
+before display, so the picker uses a user-assigned name or generated summary instead of degrading
+to a raw session ID. Genuinely empty, unnamed sessions receive a compact `Untitled session` label.
 
 ## Configuration
 
@@ -594,7 +596,7 @@ Instruction file **contents** are never rendered; sources flagged as disabled by
 accordingly. When Copilot discovers a nested instruction file on demand while traversing the
 codebase, the ordinary `view`/read tool row shows that path as well.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it opens a task picker. `/fleet` is deliberately overridden as the standalone-agent spawning workflow described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it opens a task picker. `/fleet` is deliberately overridden as the standalone-agent spawning workflow described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker enriches lightweight SDK metadata before display, preferring a user-assigned name and then the generated session summary. It marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
 
 The client-native command set is intentionally small:
 

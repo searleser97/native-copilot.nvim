@@ -1643,12 +1643,44 @@ export class CopilotRuntime implements RuntimeAdapter {
     const client = await this.ensureClient();
     const activeSessionIds = new Set([...this.live.values()].map((live) => live.session.sessionId));
     const ownedSessionIds = new Set(this.db.ownedSessionIds());
-    const sessions = (await client.listSessions({ workingDirectory: this.workspace }))
+    const listed = await client.rpc.sessions.list({
+      source: "local",
+      metadataLimit: 0,
+      filter: { cwd: this.workspace },
+    });
+    const resumable = listed.sessions
+      .filter((session) => session.isRemote === false)
       .filter(
         (session) =>
           !activeSessionIds.has(session.sessionId) &&
           !ownedSessionIds.has(session.sessionId),
-      )
+      );
+    const enriched = resumable.length === 0
+      ? []
+      : (await client.rpc.sessions.enrichMetadata({ sessions: resumable })).sessions;
+    const sessions = enriched
+      .map((session): SessionMetadata => {
+        const summary = session.name?.trim() || session.summary?.trim();
+        return {
+          sessionId: session.sessionId,
+          startTime: new Date(session.startTime),
+          modifiedTime: new Date(session.modifiedTime),
+          ...(summary ? { summary } : {}),
+          isRemote: false,
+          ...(session.context
+            ? {
+                context: {
+                  workingDirectory: session.context.cwd,
+                  ...(session.context.gitRoot ? { gitRoot: session.context.gitRoot } : {}),
+                  ...(session.context.repository
+                    ? { repository: session.context.repository }
+                    : {}),
+                  ...(session.context.branch ? { branch: session.context.branch } : {}),
+                },
+              }
+            : {}),
+        };
+      })
       .sort((left, right) => right.modifiedTime.getTime() - left.modifiedTime.getTime());
     const { inUse } =
       sessions.length === 0

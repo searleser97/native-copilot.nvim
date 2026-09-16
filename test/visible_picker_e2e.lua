@@ -685,6 +685,13 @@ tick = function()
       finish()
       return
     end
+    if not check(
+      selected.value.display:find('Untitled session [e2e-cli-]', 1, true) ~= nil,
+      '/resume gave sessions without SDK summaries a readable title'
+    ) then
+      finish()
+      return
+    end
     actions.close(prompt_buf)
     resume_picker_ready_at = nil
     phase = 'resume-sparse-closed'

@@ -851,7 +851,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
           startTime: new Date("2026-08-31T15:00:00.000Z"),
           modifiedTime: new Date("2026-08-31T15:30:00.000Z"),
           modifiedAgoSeconds: 60,
-          summary: "CLI workspace validation",
+          summary: "",
           isRemote: false,
           inUse: false,
           context: { workingDirectory: this.workspace },
