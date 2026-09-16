@@ -947,7 +947,11 @@ export class ScriptedRuntime implements RuntimeAdapter {
       replay.resolve();
       return;
     }
-    this.emitHistoryChunk(replayId, replay);
+    setTimeout(() => {
+      if (this.historyReplays.get(replayId) === replay) {
+        this.emitHistoryChunk(replayId, replay);
+      }
+    }, 40);
   }
 
   async resumePrimarySession(sessionId: string): Promise<void> {

@@ -32,6 +32,7 @@ local primary_target
 local primary_ready_count = 0
 local resume_ready_count
 local resume_stable_at
+local resume_follow_observed = false
 local history_tool_result_count = 0
 local startup_stages = {}
 local empty_loading_handoff = false
@@ -1387,12 +1388,30 @@ tick = function()
       return
     end
     if primary_ready_count < (resume_ready_count or 0) then
+      if content:find(
+        'Inspect this workspace and validate it without blocking the conversation.',
+        1,
+        true
+      ) then
+        local windows = vim.fn.win_findbuf(buf)
+        if #windows > 0 then
+          resume_follow_observed = vim.api.nvim_win_call(windows[1], function()
+            return vim.fn.line('w$') >= vim.api.nvim_buf_line_count(buf)
+          end)
+        end
+      end
       schedule_tick()
       return
     end
     resume_stable_at = resume_stable_at or vim.uv.now()
     if vim.uv.now() - resume_stable_at < 200 then
       schedule_tick()
+      return
+    end
+    if not check(
+      resume_follow_observed,
+      'CLI session replay followed the newest rendered history before completion'
+    ) then
       return
     end
     local user_message =
