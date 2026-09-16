@@ -1458,6 +1458,12 @@ tick = function()
         schedule_cancelled,
         true
       )
+    local task_message = schedule_cancelled
+      and content:find(
+        'The constrained layout is present and no actionable findings remain.',
+        schedule_cancelled,
+        true
+      )
     local final_reply = message_reasoning
       and content:find(
         'Validation completed successfully, and the temporary recurring check was cancelled.',
@@ -1482,6 +1488,7 @@ tick = function()
       and schedule_created
       and schedule_cancelled
       and block_reasoning
+      and task_message
       and message_reasoning
       and final_reply
       and agent_task
@@ -1530,10 +1537,20 @@ tick = function()
         and second_user < block_reasoning
         and block_reasoning < schedule_created
         and schedule_created < schedule_cancelled
-        and schedule_cancelled < message_reasoning
+        and schedule_cancelled < task_message
+        and task_message < message_reasoning
         and message_reasoning < final_reply
         and final_reply < agent_task,
       'CLI session history preserved durable timeline order'
+    ) then
+      return
+    end
+    if not check(
+      actor_sign_before(
+        buf,
+        'The constrained layout is present and no actionable findings remain.'
+      ) == '📝',
+      'CLI session replay kept unmatched Task messages at their event position'
     ) then
       return
     end

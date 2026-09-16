@@ -911,6 +911,10 @@ local function agent_tool_prompt(tool_name, arguments)
   end
 end
 
+local function normalized_agent_message(content)
+  return tostring(content):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')
+end
+
 local function render_shell_tool_call(member_id, item)
   local candidate = type(item.background_task) == 'table' and item.background_task or nil
   local task = candidate
@@ -2398,10 +2402,13 @@ local function history_event(member_id, event, context)
     local content = data.content or data.prompt
     if content then
       if agent_id or source:find('^agent%-') then
-        table.insert(context.agent_messages, {
-          content = content,
-          created_at = event_time,
-        })
+        local key = normalized_agent_message(content)
+        local matches = context.agent_tool_prompts[key] or 0
+        if matches > 0 then
+          context.agent_tool_prompts[key] = matches - 1
+        else
+          buffers.append_block(member_id, 'conversation', 'Task', content, event_time)
+        end
       else
         buffers.append_block(member_id, 'conversation', 'You', content, event_time)
       end
@@ -2428,7 +2435,7 @@ local function history_event(member_id, event, context)
     local call_id = data.toolCallId or event.id
     local prompt = agent_tool_prompt(data.toolName, data.arguments)
     if prompt then
-      local key = tostring(prompt):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')
+      local key = normalized_agent_message(prompt)
       context.agent_tool_prompts[key] = (context.agent_tool_prompts[key] or 0) + 1
       context.tool_arguments[tostring(call_id)] = data.arguments
     end
@@ -2483,24 +2490,9 @@ local function history_event(member_id, event, context)
   end
 end
 
-local function finish_history_context(member_id, context)
+local function finish_history_context(member_id)
   buffers.finish_history_turn(member_id)
   buffers.finish_response(member_id)
-  for _, message in ipairs(context.agent_messages) do
-    local key = tostring(message.content):gsub('\r\n', '\n'):gsub('^%s+', ''):gsub('%s+$', '')
-    local matches = context.agent_tool_prompts[key] or 0
-    if matches > 0 then
-      context.agent_tool_prompts[key] = matches - 1
-    else
-      buffers.append_block(
-        member_id,
-        'conversation',
-        'Task',
-        message.content,
-        message.created_at
-      )
-    end
-  end
 end
 
 local HISTORY_RENDER_BUDGET_NS = 8 * 1000 * 1000
@@ -2531,7 +2523,6 @@ local function schedule_history_render()
         local context = chunked and state.history_replays[replay_id] or nil
         if not context then
           context = {
-            agent_messages = {},
             agent_tool_prompts = {},
             tool_arguments = {},
           }
@@ -2568,7 +2559,7 @@ local function schedule_history_render()
         )
       end
       if job.last_chunk then
-        finish_history_context(job.member_id, job.context)
+        finish_history_context(job.member_id)
         buffers.finish_history_replay(job.member_id)
         if job.chunked then state.history_replays[job.replay_id] = nil end
         set_member_activity(job.member_id, 'Loading environment', false)

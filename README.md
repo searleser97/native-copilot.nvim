@@ -554,7 +554,10 @@ ID at the end of the row and the latest background metadata in its detail pane. 
 remain internal for every Tool row; extmark metadata preserves clickability without displaying them.
 Non-clickable lifecycle notices render as Task-authored messages and
 use the concrete runtime identity, such as `shell_cmd_<shell-id>` or `agent_<agent-id>`, without a
-status icon. A transition from `executionMode: "sync"` to
+status icon. During history replay, unmatched Task-authored messages render at their original event
+position; prompts already represented by `task`, `write_agent`, or `real_agent_send_message` Tool
+rows are suppressed in place rather than collected and appended after the replay. A transition from
+`executionMode: "sync"` to
 `executionMode: "background"` produces a separate `moved to background` notice; no transition is
 inferred when the first observed snapshot is already background-managed. The original Tool row
 remains the clickable source for arguments, results, and correlated background details.

@@ -1340,9 +1340,21 @@ export class ScriptedRuntime implements RuntimeAdapter {
           },
         },
         {
-          id: "cli-subagent-complete",
+          id: "cli-subagent-status-message",
           agentId: "cli-reviewer",
           parentId: "cli-subagent-followup-prompt",
+          timestamp: "2026-08-31T15:00:12.475Z",
+          type: "user.message",
+          data: {
+            content: "The constrained layout is present and no actionable findings remain.",
+            source: "agent-reviewer",
+            delivery: "idle",
+          },
+        },
+        {
+          id: "cli-subagent-complete",
+          agentId: "cli-reviewer",
+          parentId: "cli-subagent-status-message",
           timestamp: "2026-08-31T15:00:12.500Z",
           type: "subagent.completed",
           data: {
