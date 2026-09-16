@@ -9,12 +9,6 @@ local default_database = data_root .. '/native-copilot/state.sqlite'
 local function client_commands()
   return {
     {
-      name = 'fleet',
-      description = 'Ask the primary Copilot agent to design and spawn task-specific agents',
-      kind = 'client',
-      input = { hint = 'objective for the agents' },
-    },
-    {
       name = 'tasks',
       description = 'View and cancel background agents and shell commands',
       kind = 'client',
@@ -450,26 +444,10 @@ local function submit_prompt_content(queue_only)
       M.select_task()
       return true
     elseif command.name:lower() == 'fleet' then
-      if command.input then
-        if not state.primary_target then
-          notify('The primary Copilot agent is still starting.', vim.log.levels.WARN)
-          return true
-        end
-        send('prompt.send', {
-          target = state.primary_target,
-          content = table.concat({
-            'Design a team of standalone Copilot agents for this objective: ',
-            command.input,
-            '. Provision each member separately with real_agent_create. After every create call ',
-            'returns its Copilot session id, assign its permissions and session-id-based ',
-            'communication and observation rules with real_agent_update_rules. Do not send an ',
-            'agent its first prompt until its rules are configured. Use real_agent_send_message ',
-            'only after the required directional links exist.',
-          }),
-        })
-      else
-        M.select_agents()
-      end
+      notify(
+        '/fleet has been removed. Use a saved real-agent team prompt instead.',
+        vim.log.levels.WARN
+      )
       return true
     elseif command.name:lower() == 'resume' then
       if command.input then
@@ -2294,7 +2272,7 @@ function M.select_agents()
     })
   end
   if vim.tbl_isempty(entries) then
-    notify('No active or recoverable agents. Use /fleet <objective> to spawn agents.', vim.log.levels.INFO)
+    notify('No active or recoverable agents.', vim.log.levels.INFO)
     return
   end
   picker('Copilot agents', entries, function(item)
@@ -2806,7 +2784,10 @@ function M._on_event(message)
     return
   elseif message.type == 'commands.list' then
     local target = payload.target or state.selected
-    local available = commands.merge(payload.commands or {}, client_commands())
+    local runtime_commands = vim.tbl_filter(function(command)
+      return type(command.name) ~= 'string' or command.name:lower() ~= 'fleet'
+    end, payload.commands or {})
+    local available = commands.merge(runtime_commands, client_commands())
     state.command_requests[target] = nil
     state.command_catalog_loaded[target] = true
     commands.set_catalog(target, available)

@@ -122,7 +122,6 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<C-s>` in `AI Prompt` | Submit from insert mode |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
-| `/fleet <objective>` | Ask the primary Copilot agent to design and spawn task-specific agents |
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
 | `<C-q>` in `AI Prompt` | Explicitly queue the prompt for FIFO delivery after the active turn |
@@ -340,8 +339,9 @@ Native Copilot starts a fresh SDK conversation; previous primary conversations a
 automatically and remain available only through explicit `/resume`. The durable primary UUID,
 alias, ACLs, mailbox, and monitor relationships carry forward to the fresh conversation. Agents
 are created one at a time with `real_agent_create`, either from an ordinary prompt or from
-`/fleet <objective>`. `/fleet` directs the primary to create each member, collect all returned
-session IDs, configure each member's owned rules, and only then send initial prompts.
+a saved prompt snippet. Team prompts should create every member, collect the finalized SDK session
+IDs returned while assigning initial rules, replace those rules with the intended session-ID-based
+peer ACLs, and only then send initial prompts.
 
 `real_agent_update_rules` atomically replaces the child's permission profile, MCP subset, outgoing
 communication and observation targets, and the owner's links to that child. All relationship
@@ -596,12 +596,10 @@ Instruction file **contents** are never rendered; sources flagged as disabled by
 accordingly. When Copilot discovers a nested instruction file on demand while traversing the
 codebase, the ordinary `view`/read tool row shows that path as well.
 
-Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it opens a task picker. `/fleet` is deliberately overridden as the standalone-agent spawning workflow described above. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker enriches lightweight SDK metadata before display, preferring a user-assigned name and then the generated session summary. It marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
+Slash commands are listed and invoked through the active Copilot SDK session. Nothing is hardcoded for `/autopilot`: built-ins, aliases, skills, plugins, and future runtime commands are discovered dynamically. Enter a slash command directly or press `/` in an empty prompt to browse the commands available to the selected agent. `<Tab>` completes command names and aliases, SDK-provided argument choices, and directory arguments declared by the command metadata. `/tasks` is added as a client-native command because the SDK exposes typed task APIs but omits the CLI-owned slash command; it opens a task picker. The SDK-provided `/fleet` command is intentionally omitted, and direct `/fleet` input is rejected; standalone teams are provisioned explicitly with the `real_agent_*` tools, typically through a saved prompt snippet. `/resume` is also client-native because session listing and recovery are typed SDK client APIs rather than session slash commands; it opens a workspace-scoped picker, while `/resume <session-id>` resumes directly. The picker enriches lightweight SDK metadata before display, preferring a user-assigned name and then the generated session summary. It marks sessions locked by another live process as `[active elsewhere]`, prevents unsafe recovery of those sessions, and shows relative time based only on the session's last-modified timestamp.
 
 The client-native command set is intentionally small:
 
-- `/fleet <objective>` asks the primary agent to design and spawn standalone agents; `/fleet` stops or
-  recovers agents individually.
 - `/tasks` browses typed SDK background tasks and opens their floating details.
 - `/resume` lists and safely resumes workspace sessions.
 - `/model` opens the selected session's model picker; `/model <id>` switches directly.
@@ -636,17 +634,13 @@ Command behavior follows the result returned by the SDK:
 - Commands requiring a subcommand open a picker; repeated `select-subcommand` results support nested
   command selection, while SDK-provided argument choices remain available through completion.
 
-Other than the explicit client-native `/fleet`, `/tasks`, `/resume`, `/model`, `/reasoning`, and `/mcp`
+Other than the explicit client-native `/tasks`, `/resume`, `/model`, `/reasoning`, and `/mcp`
 integrations, commands come from `session.rpc.commands.list()`. The model and MCP overrides use
 typed session RPCs so commands that are interactive in Copilot CLI remain actionable rather than
 returning an inert completion. CLI-owned general session navigation such as `/new` and `/clear` is
 not currently exposed by the SDK session command registry. Standalone-agent recovery remains
-handled by the `/fleet` picker because it restores plugin-owned UUID, mailbox, ACL, and SDK-session
-state.
-
-The embedded SDK registry's built-in `/fleet` would start a native subagent workflow inside one
-session. `native-copilot.nvim` replaces it so `/fleet` consistently asks the primary agent to create
-independent top-level agent sessions with explicit mailbox routing instead.
+available through `<leader>aif` and `:NativeCopilotSelect`, which restore plugin-owned UUID,
+mailbox, ACL, and SDK-session state.
 
 The SDK does expose typed task-management RPCs, which the plugin uses directly:
 

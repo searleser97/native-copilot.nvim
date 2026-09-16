@@ -558,15 +558,7 @@ tick = function()
     pass('/tasks opened Telescope and displayed the selected task')
     local windows = vim.fn.win_findbuf(detail)
     if #windows > 0 then vim.api.nvim_win_close(windows[1], true) end
-    submit('/fleet Validate command picker behavior')
-    phase = 'agent-objective-result'
-  elseif phase == 'agent-objective-result' then
-    if not content:find('this objective: Validate command picker behavior', 1, true) then
-      schedule_tick()
-      return
-    end
-    pass('/fleet <objective> routed the standalone agent request to the primary agent')
-    submit('/fleet')
+    native.select_agents()
     phase = 'agent-picker'
   elseif phase == 'agent-picker' then
     if not picker then
@@ -585,7 +577,7 @@ tick = function()
       schedule_tick()
       return
     end
-    pass('/fleet opened Telescope and recovered the selected agent')
+    pass('agent picker recovered the selected standalone agent')
     native.select_commands()
     phase = 'command-picker'
   elseif phase == 'command-picker' then
@@ -595,6 +587,15 @@ tick = function()
     end
     local count = picker.manager:num_results()
     if not check(count >= 6, 'command browser included client-native and SDK commands') then
+      finish()
+      return
+    end
+    if not check(
+      not pcall(choose_where, function(item)
+        return item.command and item.command.name == 'fleet'
+      end),
+      'command browser omitted /fleet'
+    ) then
       finish()
       return
     end
