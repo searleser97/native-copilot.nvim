@@ -903,14 +903,6 @@ end
 
 local function refresh_activity_highlight(view, activity)
   if not activity.body_extmark then return end
-  local highlight_position = activity.extmark
-      and vim.api.nvim_buf_get_extmark_by_id(
-        view.buf,
-        activity_namespace,
-        activity.extmark,
-        { details = true }
-      )
-    or {}
   local body_position = vim.api.nvim_buf_get_extmark_by_id(
     view.buf,
     activity_body_namespace,
@@ -918,11 +910,7 @@ local function refresh_activity_highlight(view, activity)
     { details = true }
   )
   if #body_position == 0 then return end
-  local highlight_valid = #highlight_position > 0
-    and not (highlight_position[3] or {}).invalid
-  local start_row = highlight_valid
-      and highlight_position[1]
-    or activity.plain and body_position[1]
+  local start_row = activity.plain and body_position[1]
     or math.max(0, body_position[1] - 2)
   activity.extmark = vim.api.nvim_buf_set_extmark(
     view.buf,
@@ -930,7 +918,7 @@ local function refresh_activity_highlight(view, activity)
     start_row,
     0,
     {
-      id = highlight_valid and activity.extmark or nil,
+      id = activity.extmark,
       end_row = body_position[3].end_row,
       end_col = 0,
       hl_group = 'Comment',

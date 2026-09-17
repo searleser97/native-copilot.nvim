@@ -240,6 +240,19 @@ local function reasoning_highlight_recovers_after_extmark_loss()
   buffers.begin_response(member_id, 'probe-response')
   buffers.append_activity_delta(member_id, 'probe-reasoning', 'Partial reasoning text.')
   local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
+  local created = vim.wait(500, function()
+    return #vim.api.nvim_buf_get_extmarks(
+      buf,
+      namespace,
+      { 0, 0 },
+      { -1, -1 },
+      {}
+    ) > 0
+  end, 10)
+  if not created then
+    buffers.remove_member(member_id)
+    return false
+  end
   vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
   buffers.complete_activity(
     member_id,
