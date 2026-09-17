@@ -58,6 +58,7 @@ function promptImageAttachments(content: string) {
   const pattern = /@image\("([^"\r\n]+)"\)/g;
   for (const match of content.matchAll(pattern)) {
     const path = match[1];
+    if (!path) continue;
     if (seen.has(path)) continue;
     seen.add(path);
     attachments.push({ type: "file", path, displayName: basename(path) });
