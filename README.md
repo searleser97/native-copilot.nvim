@@ -121,6 +121,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<Enter>` in `AI Prompt` | Submit to the selected recipient |
 | `<C-s>` in `AI Prompt` | Submit from insert mode |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
+| `<C-v>` in `AI Prompt` | Paste text, or save and attach a Windows clipboard image |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
@@ -155,6 +156,21 @@ end, { buffer = true })
 
 `submit_prompt()` returns `false` and displays a warning when called outside the Native Copilot
 prompt buffer or when the prompt cannot be submitted.
+
+On Windows, `<C-v>` checks for an image before falling back to ordinary clipboard text. Images are
+saved as uniquely named PNG files under `~/Downloads` and inserted as an
+`@image("absolute-path")` reference. The host sends each referenced image through the Copilot SDK
+attachment API, including when a queued prompt is retried. Configure the destination or the
+bounded capture timeout in `setup()`:
+
+```lua
+require("native_copilot").setup({
+  clipboard = {
+    image_directory = "~/Downloads",
+    capture_timeout_ms = 5000,
+  },
+})
+```
 
 The conversation is also the chronological activity timeline. Background tasks, environment
 initialization, foreground tools, schedules, and permission decisions appear as compact timeline

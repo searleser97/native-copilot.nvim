@@ -1,6 +1,7 @@
 local protocol = require('native_copilot.protocol')
 local buffers = require('native_copilot.buffers')
 local commands = require('native_copilot.commands')
+local clipboard = require('native_copilot.clipboard')
 
 local M = {}
 local data_root = vim.fn.stdpath('data')
@@ -80,6 +81,10 @@ local defaults = {
   frontend = {
     completion = 'native',
     picker = 'native',
+  },
+  clipboard = {
+    image_directory = '~/Downloads',
+    capture_timeout_ms = 5000,
   },
   mappings = {
     toggle = '<leader>ait',
@@ -244,6 +249,49 @@ local function set_prompt_lines(lines)
   vim.bo[state.prompt_buf].modifiable = true
   vim.api.nvim_buf_set_lines(state.prompt_buf, 0, -1, false, lines)
   vim.bo[state.prompt_buf].modifiable = true
+end
+
+function M.paste_clipboard()
+  if
+    not state.prompt_buf
+    or not vim.api.nvim_buf_is_valid(state.prompt_buf)
+    or vim.api.nvim_get_current_buf() ~= state.prompt_buf
+  then
+    notify(
+      'Clipboard paste is only available from the Native Copilot prompt buffer.',
+      vim.log.levels.WARN
+    )
+    return false
+  end
+
+  local row, column = unpack(vim.api.nvim_win_get_cursor(0))
+  local mark = clipboard.mark_position(state.prompt_buf, row - 1, column)
+  clipboard.capture_image(
+    options.clipboard.image_directory,
+    options.clipboard.capture_timeout_ms,
+    function(result)
+      if result.kind == 'image' then
+        clipboard.insert_at_mark(
+          state.prompt_buf,
+          mark,
+          clipboard.image_reference(result.path) .. ' '
+        )
+        notify(('Attached clipboard image: %s'):format(result.path))
+      elseif result.kind == 'no_image' or result.kind == 'unsupported' then
+        local text = vim.fn.getreg('+')
+        if text == '' then
+          clipboard.insert_at_mark(state.prompt_buf, mark, '')
+          notify('The clipboard does not contain text or a supported image.', vim.log.levels.WARN)
+        else
+          clipboard.insert_at_mark(state.prompt_buf, mark, text)
+        end
+      else
+        clipboard.insert_at_mark(state.prompt_buf, mark, '')
+        notify(result.message, vim.log.levels.ERROR)
+      end
+    end
+  )
+  return true
 end
 
 local function update_prompt_label()
@@ -566,6 +614,10 @@ local function ensure_prompt_buffer()
   vim.keymap.set({ 'n', 'i' }, '<C-q>', M.enqueue_prompt, {
     buffer = buf,
     desc = 'Queue prompt for selected Copilot',
+  })
+  vim.keymap.set({ 'n', 'i' }, '<C-v>', M.paste_clipboard, {
+    buffer = buf,
+    desc = 'Paste text or attach a clipboard image',
   })
   vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,

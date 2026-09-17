@@ -756,13 +756,23 @@ tick = function()
     local removed_insert_mapping = vim.api.nvim_buf_call(prompt_buf, function()
       return vim.fn.maparg('<C-Right>', 'i') == ''
     end)
+    local clipboard_mappings = vim.api.nvim_buf_call(prompt_buf, function()
+      return vim.fn.maparg('<C-v>', 'n', false, true).callback
+        and vim.fn.maparg('<C-v>', 'i', false, true).callback
+    end)
+    local image_reference = require('native_copilot.clipboard').image_reference(
+      'C:\\Users\\example\\Downloads\\clipboard.png'
+    )
     if not check(
       normal_target == 'agent:e2e-recipient-cycle-planner'
         and public_api_target == 'agent:e2e-recipient-cycle-reviewer'
         and normal_preserved
         and public_api_preserved
-        and removed_insert_mapping,
-      'prompt mapping and public API cycled recipients without extra insert bindings'
+        and removed_insert_mapping
+        and clipboard_mappings
+        and image_reference
+          == '@image("C:\\Users\\example\\Downloads\\clipboard.png")',
+      'prompt mappings support recipient cycling and clipboard image references'
     ) then
       return
     end

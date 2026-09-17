@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { delimiter, isAbsolute, relative, resolve } from "node:path";
+import { basename, delimiter, isAbsolute, relative, resolve } from "node:path";
 import {
   CopilotClient,
   RuntimeConnection,
@@ -51,6 +51,19 @@ export const FLEET_TOOL_NAMES = Object.freeze({
   sendMessage: "real_agent_send_message",
   readActivity: "real_agent_read_activity",
 });
+
+function promptImageAttachments(content: string) {
+  const attachments: Array<{ type: "file"; path: string; displayName: string }> = [];
+  const seen = new Set<string>();
+  const pattern = /@image\("([^"\r\n]+)"\)/g;
+  for (const match of content.matchAll(pattern)) {
+    const path = match[1];
+    if (seen.has(path)) continue;
+    seen.add(path);
+    attachments.push({ type: "file", path, displayName: basename(path) });
+  }
+  return attachments;
+}
 const GITHUB_MCP_SERVER_NAME = "github-mcp-server";
 const GITHUB_MCP_ENDPOINT_HOSTS = new Set([
   "api.githubcopilot.com",
@@ -5983,7 +5996,12 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     let sdkMessageId: string;
     try {
-      sdkMessageId = await live.session.send({ prompt: content, mode: "immediate" });
+      const attachments = promptImageAttachments(content);
+      sdkMessageId = await live.session.send({
+        prompt: content,
+        ...(attachments.length > 0 ? { attachments } : {}),
+        mode: "immediate",
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const released = this.db.failMessage(
@@ -6179,7 +6197,14 @@ export class CopilotRuntime implements RuntimeAdapter {
             "Process this durable message from another Copilot agent. Respond or act as " +
             "appropriate, and use the relevant send tool if the sender needs a direct answer.";
       try {
-        const sdkMessageId = await live.session.send({ prompt, mode: "immediate" });
+        const attachments = message.kind === "user"
+          ? promptImageAttachments(message.content)
+          : [];
+        const sdkMessageId = await live.session.send({
+          prompt,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          mode: "immediate",
+        });
         if (!this.liveConnectionCurrent(live, false)) {
           this.db.releaseMessage(
             message.id,
