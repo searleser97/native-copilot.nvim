@@ -34,7 +34,7 @@ function M.capture_image(directory, timeout_ms, callback)
     '$image = [System.Windows.Forms.Clipboard]::GetImage()',
     'try { $image.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png) }',
     'finally { $image.Dispose() }',
-  }, '; ')
+  }, '\n')
   local state = { finished = false }
   local process
   process = vim.system({
