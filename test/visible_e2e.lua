@@ -847,6 +847,13 @@ tick = function()
     phase = 'steering-complete'
     schedule_tick()
   elseif phase == 'steering-complete' then
+    local waiting_response = content:find(
+      'The foreground turn is waiting for steering.',
+      1,
+      true
+    )
+    local steering_marker = waiting_response
+      and content:find('-- steered by user prompt --', waiting_response, true)
     local steering_prompt = content:find('Steer the active foreground turn now.', 1, true)
     local steering_reply = steering_prompt
       and content:find(
@@ -863,8 +870,16 @@ tick = function()
         and vim.b[candidate].native_copilot_prompt_queue == true
     end)
     if not check(
-      queue == nil,
-      'immediate steering bypassed the explicit FIFO prompt queue'
+      queue == nil
+        and waiting_response
+        and steering_marker
+        and steering_prompt
+        and waiting_response < steering_marker
+        and steering_marker < steering_prompt
+        and steering_prompt < steering_reply
+        and actor_sign_before(buf, 'SCRIPTED-REPLY: Steer the active foreground turn now.')
+          == '🤖',
+      'immediate steering rendered an explicit boundary and resumed the Copilot actor'
     ) then
       return
     end

@@ -991,6 +991,41 @@ function M.append_activity_block(member_id, heading, content, event_time)
   if not view.streaming then finalize_render(view) end
 end
 
+function M.append_steering_prompt(member_id, content, event_time)
+  local entry = M.ensure_member(member_id)
+  local view = entry.views.conversation
+  if not (view.response_active or view.awaiting_response or view.active_message) then
+    return false
+  end
+
+  if view.active_activity then
+    local activity = view.active_activity
+    view.pending = view.pending .. '\n'
+    flush(view)
+    refresh_activity_highlight(view, activity)
+    activity.completed = true
+    touch_activity_heading(view, activity, 'Reasoning summary')
+    view.active_activity = nil
+    view.activity_streaming = false
+  end
+
+  prepare_pending_block(view, 1)
+  local marker = '-- steered by user prompt --'
+  local marker_row = vim.api.nvim_buf_line_count(view.buf) - 1
+  append(view, marker .. '\n', true)
+  vim.api.nvim_buf_set_extmark(view.buf, header_highlight_namespace, marker_row, 0, {
+    end_row = marker_row,
+    end_col = #marker,
+    hl_group = 'NativeCopilotHeaderMeta',
+    priority = 210,
+  })
+  M.append_block(member_id, 'conversation', 'You', content, event_time)
+  view.last_block_kind = 'actor_message'
+  view.response_resume_after_actor = true
+  view.response_line_start = true
+  return true
+end
+
 local function timeline_lines(item, now)
   local kind = item.kind
   local label = item.label

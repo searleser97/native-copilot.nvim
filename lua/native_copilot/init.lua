@@ -411,7 +411,13 @@ local function update_schedule(member_id, schedule_id, event, updates, event_id,
 end
 
 local function dispatch_prompt(member_id, content)
-  buffers.append_block(member_id, 'conversation', 'You', content)
+  local entry = buffers.get_member(member_id)
+  local steering = entry
+    and entry.state == 'busy'
+    and buffers.append_steering_prompt(member_id, content)
+  if not steering then
+    buffers.append_block(member_id, 'conversation', 'You', content)
+  end
   buffers.scroll_to_bottom(member_id)
   local request_id = send('prompt.send', { target = member_id, content = content })
   if not request_id then return false end

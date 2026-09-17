@@ -157,6 +157,11 @@ end, { buffer = true })
 `submit_prompt()` returns `false` and displays a warning when called outside the Native Copilot
 prompt buffer or when the prompt cannot be submitted.
 
+Submitting with `<Enter>` or `<C-s>` while the selected Copilot is busy steers its active turn.
+The conversation renders a `-- steered by user prompt --` boundary before the new instruction,
+then resumes subsequent reasoning and response output under a new Copilot actor heading. Use
+`<C-q>` when the prompt is independent and should wait for FIFO delivery after the active turn.
+
 On Windows, `<C-v>` checks for an image before falling back to ordinary clipboard text. Images are
 saved as uniquely named PNG files under `~/Downloads` and inserted as an
 `@image("absolute-path")` reference. The host sends each referenced image through the Copilot SDK
