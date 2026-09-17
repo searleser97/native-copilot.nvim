@@ -122,6 +122,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<C-s>` in `AI Prompt` | Submit from insert mode |
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `<C-v>` in `AI Prompt` | Paste text, or save and attach a Windows clipboard image |
+| `<F24>` in `AI Prompt` | Handle an image-paste signal forwarded by a terminal |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
@@ -167,6 +168,12 @@ saved as uniquely named PNG files under `~/Downloads` and inserted as an
 `@image("absolute-path")` reference. The host sends each referenced image through the Copilot SDK
 attachment API, including when a queued prompt is retried. Configure the destination or the
 bounded capture timeout in `setup()`:
+
+Terminals that retain `<C-v>` for ordinary text paste can send `<F24>` when the Windows clipboard
+contains an image. Native Copilot handles `<F24>` identically inside `AI Prompt`; the terminal
+remains responsible for detecting the clipboard format and leaves non-image paste unchanged. A
+small Win32 clipboard-format probe is available at
+`tools/windows-clipboard-image-probe.rs` for terminal configurations that need it.
 
 ```lua
 require("native_copilot").setup({

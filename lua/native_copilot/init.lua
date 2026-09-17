@@ -625,6 +625,10 @@ local function ensure_prompt_buffer()
     buffer = buf,
     desc = 'Paste text or attach a clipboard image',
   })
+  vim.keymap.set({ 'n', 'i' }, '<F24>', M.paste_clipboard, {
+    buffer = buf,
+    desc = 'Handle terminal clipboard image signal',
+  })
   vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,
     desc = 'Previous Copilot prompt recipient',

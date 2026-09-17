@@ -802,6 +802,8 @@ tick = function()
     local clipboard_mappings = vim.api.nvim_buf_call(prompt_buf, function()
       return vim.fn.maparg('<C-v>', 'n', false, true).callback
         and vim.fn.maparg('<C-v>', 'i', false, true).callback
+        and vim.fn.maparg('<F24>', 'n', false, true).callback
+        and vim.fn.maparg('<F24>', 'i', false, true).callback
     end)
     local image_reference = require('native_copilot.clipboard').image_reference(
       'C:\\Users\\example\\Downloads\\clipboard.png'
