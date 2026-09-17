@@ -276,7 +276,6 @@ function M.paste_clipboard()
           mark,
           clipboard.image_reference(result.path) .. ' '
         )
-        notify(('Attached clipboard image: %s'):format(result.path))
       elseif result.kind == 'no_image' or result.kind == 'unsupported' then
         local text = vim.fn.getreg('+')
         if text == '' then
