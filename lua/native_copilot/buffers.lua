@@ -908,7 +908,7 @@ local function refresh_activity_highlight(view, activity)
         view.buf,
         activity_namespace,
         activity.extmark,
-        {}
+        { details = true }
       )
     or {}
   local body_position = vim.api.nvim_buf_get_extmark_by_id(
@@ -918,7 +918,9 @@ local function refresh_activity_highlight(view, activity)
     { details = true }
   )
   if #body_position == 0 then return end
-  local start_row = #highlight_position > 0
+  local highlight_valid = #highlight_position > 0
+    and not (highlight_position[3] or {}).invalid
+  local start_row = highlight_valid
       and highlight_position[1]
     or activity.plain and body_position[1]
     or math.max(0, body_position[1] - 2)
@@ -928,7 +930,7 @@ local function refresh_activity_highlight(view, activity)
     start_row,
     0,
     {
-      id = #highlight_position > 0 and activity.extmark or nil,
+      id = highlight_valid and activity.extmark or nil,
       end_row = body_position[3].end_row,
       end_col = 0,
       hl_group = 'Comment',
