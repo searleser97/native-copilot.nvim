@@ -26,13 +26,15 @@ function M.capture_image(directory, timeout_ms, callback)
   end
 
   local path = vim.fs.joinpath(directory, image_name())
+  local powershell_path = path:gsub("'", "''")
   local script = table.concat({
     "$ErrorActionPreference = 'Stop'",
+    ("$outputPath = '%s'"):format(powershell_path),
     'Add-Type -AssemblyName System.Windows.Forms',
     'Add-Type -AssemblyName System.Drawing',
     'if (-not [System.Windows.Forms.Clipboard]::ContainsImage()) { exit 3 }',
     '$image = [System.Windows.Forms.Clipboard]::GetImage()',
-    'try { $image.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png) }',
+    'try { $image.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png) }',
     'finally { $image.Dispose() }',
   }, '\n')
   local state = { finished = false }
@@ -45,7 +47,6 @@ function M.capture_image(directory, timeout_ms, callback)
     '-STA',
     '-Command',
     script,
-    path,
   }, { text = true }, function(result)
     vim.schedule(function()
       if result.code == 0 then
