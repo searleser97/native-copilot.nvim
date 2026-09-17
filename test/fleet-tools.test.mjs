@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { FLEET_TOOL_NAMES } from "../dist/runtime.js";
 
-test("fleet tools expose one-agent provisioning and session-owned rules", () => {
+test("fleet tools separate agent creation from host links", () => {
   assert.deepEqual(FLEET_TOOL_NAMES, {
     create: "real_agent_create",
     get: "real_agent_get",
     list: "real_agent_list",
-    getRules: "real_agent_get_rules",
-    updateRules: "real_agent_update_rules",
+    getLinks: "real_agent_get_links",
+    updateLinks: "real_agent_update_links",
     remove: "real_agent_remove",
     listRecipients: "real_agent_list_recipients",
     sendMessage: "real_agent_send_message",

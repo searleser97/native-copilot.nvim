@@ -239,8 +239,8 @@ to a raw session ID. Genuinely empty, unnamed sessions receive a compact `Untitl
 ## Configuration
 
 Agents are not predefined and require no external configuration file. Every agent receives
-`real_agent_create`, `real_agent_get`, `real_agent_list`, `real_agent_get_rules`,
-`real_agent_update_rules`, `real_agent_remove`, `real_agent_list_recipients`,
+`real_agent_create`, `real_agent_get`, `real_agent_list`, `real_agent_get_links`,
+`real_agent_update_links`, `real_agent_remove`, `real_agent_list_recipients`,
 `real_agent_send_message`, and `real_agent_read_activity`. Each create call provisions exactly one
 agent and returns its Copilot SDK session ID; there is no batch or `real_team_*` tool API.
 
@@ -253,23 +253,18 @@ Every participant receives:
   discovers this target dynamically; no fixed participant target exists.
 - A unique user-facing alias such as `planner` or `reviewer`.
 - Its own top-level Copilot SDK session and `session.sessionId`.
-- Its own SQLite run, recovery state, mailbox, permissions, and conversation buffer.
+- Its own SQLite run, recovery state, mailbox, execution configuration, and conversation buffer.
 
-A call to `real_agent_create` reserves one durable identity, creates its SDK session, and returns
-that session ID without sending a task. The child is recoverable but remains `awaiting_rules`, with
-no communication grants, until its creating session calls `real_agent_update_rules`. Prompts and
-mailbox delivery to an unconfigured child are rejected explicitly.
+A call to `real_agent_create` accepts the agent's identity, persona, permissions, and MCP subset,
+creates its SDK session once with that complete execution configuration, and returns the final
+session ID without sending a task. Execution configuration is immutable for that agent run; create
+a replacement agent when it must change. The child starts with empty peer links, which its owner
+can configure after all peer session IDs exist.
 
-The session returned by `real_agent_create` is provisional while the agent has zero turns. Copilot
-does not persist an empty SDK session for resume; if the first ruleset changes SDK-level
-permissions, the host replaces that unstarted session and `real_agent_update_rules` returns the
-finalized session ID. Subsequent get, messaging, observation, and removal calls must use that latest
-ID. No user prompt is sent during this replacement.
-
-Ownership and rules are workspace-global durable SQLite records. The exact creating Copilot
-session owns the child; another session cannot mutate or remove it merely by knowing its session
-ID. Any agent may therefore become a scoped administrator of children it creates, while it has no
-authority over siblings or unrelated agents.
+Ownership and host links are separate workspace-global durable SQLite records. Permissions and MCP
+configuration remain in the run's creation definition, not in the link record. The exact creating
+Copilot session owns the child; another session cannot relink or remove it merely by knowing its
+session ID.
 
 Aliases cannot collide between the primary and any persisted additional-agent definition in the
 workspace. The primary prefers `copilot` and atomically falls back to `primary`, `primary_2`, and so
@@ -338,16 +333,15 @@ Neovim always starts one generic primary agent that stays connected for the host
 Native Copilot starts a fresh SDK conversation; previous primary conversations are never resumed
 automatically and remain available only through explicit `/resume`. The durable primary UUID,
 alias, ACLs, mailbox, and monitor relationships carry forward to the fresh conversation. Agents
-are created one at a time with `real_agent_create`, either from an ordinary prompt or from
-a saved prompt snippet. Team prompts should create every member, collect the finalized SDK session
-IDs returned while assigning initial rules, replace those rules with the intended session-ID-based
-peer ACLs, and only then send initial prompts.
+are created one at a time with `real_agent_create`, either from an ordinary prompt or from a saved
+prompt snippet. Team prompts create every member with its final execution configuration, collect
+the returned SDK session IDs, configure the intended peer links with `real_agent_update_links`, and
+only then send initial prompts.
 
-`real_agent_update_rules` atomically replaces the child's permission profile, MCP subset, outgoing
-communication and observation targets, and the owner's links to that child. All relationship
-targets are Copilot session IDs. A rules update may elevate a previously restricted child only
-within the immutable policy ceiling established by the root `ai` invocation. Configuration changes
-reconnect the SDK session while preserving its session ID and history.
+`real_agent_update_links` atomically replaces only the child's outgoing communication and
+observation targets and the owner's links to that child. All relationship targets are Copilot
+session IDs. Link changes are handled entirely by the host and never reconnect or recreate the SDK
+session.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
 mailbox, communication and observation ACLs, and original MCP ceiling. Active runs owned by another
@@ -410,7 +404,7 @@ grants access. Identity resolution and authorization are separate: a known but u
 alias, UUID, or session ID returns an explicit communication-rule denial, while an identifier that
 does not resolve to an active managed agent returns an unknown-recipient error.
 
-`real_agent_update_rules` accepts `canTalkToSessionIds` and `canObserveSessionIds`; the host resolves
+`real_agent_update_links` accepts `canTalkToSessionIds` and `canObserveSessionIds`; the host resolves
 them immediately to durable UUID ACL principals. `ownerCanTalk` and `ownerCanObserve` independently
 control the creating session's outgoing links to its child. These grants remain directional.
 
@@ -424,7 +418,7 @@ that recipient inactive; recovering the same durable agent makes the links usabl
 `real_agent_read_activity` for another active UUID-backed agent without sending that
 session a prompt. The primary agent uses the same outgoing `canObserve` set as every other caller.
 ACLs are revalidated on every read and may be replaced dynamically with
-`real_agent_update_rules`.
+`real_agent_update_links`.
 
 The activity tool reads the target's authoritative SDK event log with bounded cursor pagination and
 returns raw chronological events so the caller can infer status generically. Completed user and

@@ -31,7 +31,7 @@ export type MessageStatus = "pending" | "delivering" | "delivered" | "failed";
  * Current durable schema version. Every run is one UUID-backed agent session; a
  * minimal primary marker identifies the agent attached to the main UI buffer.
  */
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 export interface StoredMessage {
   id: string;
@@ -143,9 +143,6 @@ export interface AgentAdministration {
   ownerAgentId: string;
   ownerSessionId: string;
   workspace: string;
-  configured: boolean;
-  permissionsJson: string | null;
-  mcpServersJson: string;
   canTalkToJson: string;
   canObserveJson: string;
   revision: number;
@@ -153,13 +150,11 @@ export interface AgentAdministration {
   updatedAt: string;
 }
 
-export interface OwnedAgentRuleUpdate {
+export interface OwnedAgentLinkUpdate {
   subjectAgentId: string;
   ownerAgentId: string;
   ownerSessionId: string;
   workspace: string;
-  permissionsJson: string | null;
-  mcpServersJson: string;
   canTalkToJson: string;
   canObserveJson: string;
   runUpdates: readonly AgentRunDefinitionUpdate[];
@@ -363,14 +358,11 @@ export class AgentDatabase {
         CREATE INDEX IF NOT EXISTS agent_ownership_owner_idx
           ON agent_ownership(workspace, owner_agent_id, owner_session_id);
 
-        CREATE TABLE IF NOT EXISTS agent_rules (
+        CREATE TABLE IF NOT EXISTS agent_links (
           agent_id TEXT PRIMARY KEY,
           owner_agent_id TEXT NOT NULL,
           owner_session_id TEXT NOT NULL,
           workspace TEXT NOT NULL,
-          configured INTEGER NOT NULL DEFAULT 0,
-          permissions_json TEXT,
-          mcp_servers_json TEXT NOT NULL DEFAULT '[]',
           can_talk_to_json TEXT NOT NULL DEFAULT '[]',
           can_observe_json TEXT NOT NULL DEFAULT '[]',
           revision INTEGER NOT NULL DEFAULT 0,
@@ -437,6 +429,9 @@ export class AgentDatabase {
       if (schema.version < 15) {
         this.migrateAgentAdministrationV15();
       }
+      if (schema.version === 15) {
+        this.migrateAgentLinksV16();
+      }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS runs_primary_predecessor_idx
           ON runs(primary_predecessor_run_id);
@@ -490,16 +485,28 @@ export class AgentDatabase {
       .run(timestamp);
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO agent_rules(
-           agent_id, owner_agent_id, owner_session_id, workspace, configured,
-           permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
-           revision, updated_at
+        `INSERT OR IGNORE INTO agent_links(
+           agent_id, owner_agent_id, owner_session_id, workspace,
+           can_talk_to_json, can_observe_json, revision, updated_at
          )
-         SELECT agent_id, owner_agent_id, owner_session_id, workspace, 1,
-                NULL, '[]', '[]', '[]', 1, ?
+         SELECT agent_id, owner_agent_id, owner_session_id, workspace,
+                '[]', '[]', 0, ?
          FROM agent_ownership`,
       )
       .run(timestamp);
+  }
+
+  private migrateAgentLinksV16(): void {
+    this.db.exec(`
+      INSERT OR REPLACE INTO agent_links(
+        agent_id, owner_agent_id, owner_session_id, workspace,
+        can_talk_to_json, can_observe_json, revision, updated_at
+      )
+      SELECT agent_id, owner_agent_id, owner_session_id, workspace,
+             can_talk_to_json, can_observe_json, revision, updated_at
+      FROM agent_rules;
+      DROP TABLE agent_rules;
+    `);
   }
 
   private assertNoLiveMigrationOwners(
@@ -4115,7 +4122,7 @@ export class AgentDatabase {
     ]);
   }
 
-  /** Reserves one dormant agent and records the immutable session that administers it. */
+  /** Reserves one owned agent and records its immutable owner and empty host links. */
   createOwnedAgentRun(
     run: AgentRunReservation,
     ownerAgentId: string,
@@ -4152,11 +4159,10 @@ export class AgentDatabase {
           .run(run.agentId, ownerAgentId, ownerSessionId, run.workspace, timestamp);
         this.db
           .prepare(
-            `INSERT INTO agent_rules(
-               agent_id, owner_agent_id, owner_session_id, workspace, configured,
-               permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
-               revision, updated_at
-             ) VALUES (?, ?, ?, ?, 0, NULL, '[]', '[]', '[]', 0, ?)`,
+            `INSERT INTO agent_links(
+               agent_id, owner_agent_id, owner_session_id, workspace,
+               can_talk_to_json, can_observe_json, revision, updated_at
+             ) VALUES (?, ?, ?, ?, '[]', '[]', 0, ?)`,
           )
           .run(run.agentId, ownerAgentId, ownerSessionId, run.workspace, timestamp);
       });
@@ -4172,16 +4178,13 @@ export class AgentDatabase {
                 ownership.owner_agent_id AS ownerAgentId,
                 ownership.owner_session_id AS ownerSessionId,
                 ownership.workspace,
-                rules.configured,
-                rules.permissions_json AS permissionsJson,
-                rules.mcp_servers_json AS mcpServersJson,
-                rules.can_talk_to_json AS canTalkToJson,
-                rules.can_observe_json AS canObserveJson,
-                rules.revision,
+                links.can_talk_to_json AS canTalkToJson,
+                links.can_observe_json AS canObserveJson,
+                links.revision,
                 ownership.created_at AS createdAt,
-                rules.updated_at AS updatedAt
+                links.updated_at AS updatedAt
          FROM agent_ownership ownership
-         JOIN agent_rules rules ON rules.agent_id = ownership.agent_id
+         JOIN agent_links links ON links.agent_id = ownership.agent_id
          WHERE ownership.agent_id = ?`,
       )
       .get(agentId) as
@@ -4190,9 +4193,6 @@ export class AgentDatabase {
           ownerAgentId: string;
           ownerSessionId: string;
           workspace: string;
-          configured: number;
-          permissionsJson: string | null;
-          mcpServersJson: string;
           canTalkToJson: string;
           canObserveJson: string;
           revision: number;
@@ -4200,7 +4200,7 @@ export class AgentDatabase {
           updatedAt: string;
         }
       | undefined;
-    return row === undefined ? undefined : { ...row, configured: row.configured === 1 };
+    return row === undefined ? undefined : { ...row };
   }
 
   ownedAgentAdministrations(
@@ -4214,16 +4214,13 @@ export class AgentDatabase {
                 ownership.owner_agent_id AS ownerAgentId,
                 ownership.owner_session_id AS ownerSessionId,
                 ownership.workspace,
-                rules.configured,
-                rules.permissions_json AS permissionsJson,
-                rules.mcp_servers_json AS mcpServersJson,
-                rules.can_talk_to_json AS canTalkToJson,
-                rules.can_observe_json AS canObserveJson,
-                rules.revision,
+                links.can_talk_to_json AS canTalkToJson,
+                links.can_observe_json AS canObserveJson,
+                links.revision,
                 ownership.created_at AS createdAt,
-                rules.updated_at AS updatedAt
+                links.updated_at AS updatedAt
          FROM agent_ownership ownership
-         JOIN agent_rules rules ON rules.agent_id = ownership.agent_id
+         JOIN agent_links links ON links.agent_id = ownership.agent_id
          WHERE ownership.owner_agent_id = ? AND ownership.owner_session_id = ?
            AND ownership.workspace = ?
          ORDER BY ownership.created_at, ownership.agent_id`,
@@ -4235,21 +4232,18 @@ export class AgentDatabase {
           ownerAgentId: string;
           ownerSessionId: string;
           workspace: string;
-          configured: number;
-          permissionsJson: string | null;
-          mcpServersJson: string;
           canTalkToJson: string;
           canObserveJson: string;
           revision: number;
           createdAt: string;
           updatedAt: string;
         };
-        return { ...typed, configured: typed.configured === 1 };
+        return { ...typed };
       });
   }
 
-  /** Atomically updates authoritative rules and every denormalized active run definition. */
-  updateOwnedAgentRules(update: OwnedAgentRuleUpdate): AgentAdministration {
+  /** Atomically updates host links and every denormalized active run definition. */
+  updateOwnedAgentLinks(update: OwnedAgentLinkUpdate): AgentAdministration {
     return this.transaction(() => {
       const ownership = this.agentAdministration(update.subjectAgentId);
       if (
@@ -4271,16 +4265,13 @@ export class AgentDatabase {
           )
           .run(run.alias, run.definition, run.id);
         if (changed.changes !== 1) {
-          throw new Error(`Agent run "${run.id}" could not be updated with its new rules.`);
+          throw new Error(`Agent run "${run.id}" could not be updated with its new links.`);
         }
       }
       const changed = this.db
         .prepare(
-          `UPDATE agent_rules
-           SET configured = 1,
-               permissions_json = ?,
-               mcp_servers_json = ?,
-               can_talk_to_json = ?,
+          `UPDATE agent_links
+           SET can_talk_to_json = ?,
                can_observe_json = ?,
                revision = revision + 1,
                updated_at = ?
@@ -4288,8 +4279,6 @@ export class AgentDatabase {
              AND workspace = ?`,
         )
         .run(
-          update.permissionsJson,
-          update.mcpServersJson,
           update.canTalkToJson,
           update.canObserveJson,
           now(),
@@ -4299,7 +4288,7 @@ export class AgentDatabase {
           update.workspace,
         );
       if (changed.changes !== 1) {
-        throw new Error(`Rules for agent "${update.subjectAgentId}" were not updated.`);
+        throw new Error(`Links for agent "${update.subjectAgentId}" were not updated.`);
       }
       return this.agentAdministration(update.subjectAgentId)!;
     });
@@ -4944,17 +4933,6 @@ export class AgentDatabase {
          FROM agent_sessions WHERE run_id = ?`,
       )
       .get(runId) as unknown as StoredAgentSession | undefined;
-  }
-
-  hasDeliveredUserMessage(runId: string): boolean {
-    return this.db
-      .prepare(
-        `SELECT 1
-         FROM messages
-         WHERE run_id = ? AND kind = 'user' AND status = 'delivered'
-         LIMIT 1`,
-      )
-      .get(runId) !== undefined;
   }
 
   nextSequence(runId: string, target: string): number {

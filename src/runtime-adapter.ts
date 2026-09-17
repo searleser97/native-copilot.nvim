@@ -1,12 +1,4 @@
-import type { DynamicAgentDefinition, SpawnAgentsRequest } from "./types.js";
-
-export interface AgentUpdate {
-  definition: DynamicAgentDefinition;
-  /** Omit to keep the calling agent's current outgoing messaging grant. */
-  callerCanTalk?: boolean;
-  /** Omit to keep the calling agent's current outgoing observation grant. */
-  callerCanObserve?: boolean;
-}
+import type { SpawnAgentsRequest } from "./types.js";
 
 export interface RuntimeAdapter {
   shutdown(reason: string): Promise<void>;
@@ -33,7 +25,6 @@ export interface RuntimeAdapter {
   resumeAgent(runId: string): Promise<void>;
   /** Accepts an agent UUID, an "agent:<uuid>" target, an alias, or a run id. */
   stopAgent(agentRef: string, reason?: string): Promise<void>;
-  updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>>;
   sendUserPrompt(target: string, content: string): Promise<string>;
   abort(target: string): Promise<void>;
   reloadMcp(target: string): Promise<number>;

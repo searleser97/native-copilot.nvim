@@ -58,7 +58,7 @@ export interface DynamicAgentDefinition {
   };
 }
 
-/** Identity and operating configuration used to provision one dormant agent. */
+/** Complete identity and execution configuration used to create one agent session. */
 export interface AgentCreateDefinition {
   id: string;
   displayName: string;
@@ -67,13 +67,13 @@ export interface AgentCreateDefinition {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
+  permissions: DynamicPermission;
+  mcpServers: string[];
   ui?: DynamicAgentDefinition["ui"];
 }
 
-/** Authoritative rules assigned after the child SDK session exists. */
-export interface AgentRuleSet {
-  permissions: DynamicPermission;
-  mcpServers: string[];
+/** Host-level relationships assigned after peer session IDs exist. */
+export interface AgentLinkSet {
   canTalkToSessionIds: string[];
   canObserveSessionIds: string[];
   ownerCanTalk: boolean;

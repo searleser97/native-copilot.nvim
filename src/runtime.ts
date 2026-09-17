@@ -23,16 +23,16 @@ import {
   CALLER_SELECTOR,
   LEGACY_PRIMARY_SELECTOR,
   agentCreateSchema,
-  agentRuleSetSchema,
+  agentLinkSetSchema,
   createDefinitionToDynamic,
-  parseAgentRuleSet,
+  parseAgentLinkSet,
   validateAgentDefinition,
   validateSpawnRequest,
 } from "./config.js";
-import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
+import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type {
   AgentCreateDefinition,
-  AgentRuleSet,
+  AgentLinkSet,
   DynamicAgentDefinition,
   DynamicPermission,
   PermissionProfile,
@@ -44,8 +44,8 @@ export const FLEET_TOOL_NAMES = Object.freeze({
   create: "real_agent_create",
   get: "real_agent_get",
   list: "real_agent_list",
-  getRules: "real_agent_get_rules",
-  updateRules: "real_agent_update_rules",
+  getLinks: "real_agent_get_links",
+  updateLinks: "real_agent_update_links",
   remove: "real_agent_remove",
   listRecipients: "real_agent_list_recipients",
   sendMessage: "real_agent_send_message",
@@ -365,10 +365,8 @@ interface AgentContext {
   mcpServers: Set<string>;
   /** Immutable durable parent identity for additional agents. */
   ownerAgentId?: string;
-  /** Immutable Copilot session that owns this agent's rules. */
+  /** Immutable Copilot session that owns this agent's links. */
   ownerSessionId?: string;
-  /** False until the owner has assigned the first authoritative ruleset. */
-  rulesConfigured: boolean;
   /** Durable staged-primary claim held until the new SDK session is connected. */
   primaryClaim?: PrimaryStartupClaim;
 }
@@ -468,6 +466,14 @@ function storedAgentRecord(value: string): StoredAgentRecord {
       ? parsed.canObserveAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
       : [],
   };
+}
+
+function storedAgentIds(value: string): string[] {
+  const parsed: unknown = JSON.parse(value);
+  if (!Array.isArray(parsed) || parsed.some((agentId) => typeof agentId !== "string")) {
+    throw new Error("The stored agent links are invalid.");
+  }
+  return parsed;
 }
 
 function primaryAgentDefinition(alias: string): DynamicAgentDefinition {
@@ -2783,8 +2789,8 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.createAgentTool(context),
       this.getAgentTool(context),
       this.listAgentsTool(context),
-      this.getAgentRulesTool(context),
-      this.updateAgentRulesTool(context),
+      this.getAgentLinksTool(context),
+      this.updateAgentLinksTool(context),
       this.removeOwnedAgentTool(context),
     ];
     config.tools = tools;
@@ -2829,11 +2835,10 @@ export class CopilotRuntime implements RuntimeAdapter {
   private createAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(FLEET_TOOL_NAMES.create, {
       description:
-        "Provision exactly one durable Copilot agent and return its provisional SDK session id. " +
-        "The new agent starts dormant with no communication grants and cannot receive a prompt " +
-        "until this exact calling Copilot session assigns its rules with real_agent_update_rules. " +
-        "If applying SDK-level permissions replaces an unstarted zero-turn session, use the " +
-        "finalized session id returned by real_agent_update_rules.",
+        "Create exactly one durable Copilot agent with its identity, execution permissions, and " +
+        "MCP configuration, then return its final SDK session id. The agent starts with no peer " +
+        "communication grants; configure those separately with real_agent_update_links before " +
+        "sending peer messages.",
       parameters: agentCreateSchema,
       skipPermission: true,
       defer: "never",
@@ -2847,7 +2852,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       description:
         "Get one active managed agent by alias, durable agent id, run id, target, or Copilot SDK " +
         "session id. A caller may inspect itself, a directly owned child, or an agent already " +
-        "visible through its communication or observation rules.",
+        "visible through its communication or observation links.",
       parameters: z.object({ agent: z.string().min(1) }).strict(),
       skipPermission: true,
       defer: "never",
@@ -2878,34 +2883,32 @@ export class CopilotRuntime implements RuntimeAdapter {
     });
   }
 
-  private getAgentRulesTool(caller: AgentContext): Tool<any> {
-    return defineTool(FLEET_TOOL_NAMES.getRules, {
+  private getAgentLinksTool(caller: AgentContext): Tool<any> {
+    return defineTool(FLEET_TOOL_NAMES.getLinks, {
       description:
-        "Read authoritative rules for an agent identified by Copilot session id or another managed " +
-        "identifier. The agent itself and the immutable owner session may read them.",
+        "Read host-level communication and observation links for an agent. The agent itself and " +
+        "the immutable owner session may read them.",
       parameters: z.object({ agent: z.string().min(1) }).strict(),
       skipPermission: true,
       defer: "never",
-      handler: ({ agent }) => this.agentRulesPayload(caller, this.requireAgent(agent)),
+      handler: ({ agent }) => this.agentLinksPayload(caller, this.requireAgent(agent)),
     });
   }
 
-  private updateAgentRulesTool(caller: AgentContext): Tool<any> {
-    return defineTool(FLEET_TOOL_NAMES.updateRules, {
+  private updateAgentLinksTool(caller: AgentContext): Tool<any> {
+    return defineTool(FLEET_TOOL_NAMES.updateLinks, {
       description:
-        "Assign or replace the authoritative rules of one directly owned agent, normally using " +
-        "the session id returned by real_agent_create. Only the immutable creating Copilot session " +
-        "may update them. Permissions may widen previous child rules but never exceed the root ai " +
-        "launch ceiling. The SDK session is reconnected before the agent can receive prompts; the " +
-        "result contains the finalized session id to use for subsequent tools.",
+        "Assign or replace host-level communication and observation links for one directly owned " +
+        "agent. Only the immutable creating Copilot session may update them. This does not change " +
+        "execution permissions or MCP access and does not reconnect the SDK session.",
       parameters: z.object({
         agent: z.string().min(1).describe("Owned agent Copilot session id or managed identifier."),
-        rules: agentRuleSetSchema,
+        links: agentLinkSetSchema,
       }).strict(),
       skipPermission: true,
       defer: "never",
-      handler: async ({ agent, rules }) =>
-        this.updateOwnedAgentRules(caller, this.requireAgent(agent), parseAgentRuleSet(rules)),
+      handler: async ({ agent, links }) =>
+        this.updateOwnedAgentLinks(caller, this.requireAgent(agent), parseAgentLinkSet(links)),
     });
   }
 
@@ -2967,7 +2970,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         ) {
           throw new Error(
             `Agent "${source.alias}" is not allowed to inspect "${targetAgent.alias}" under the current ` +
-              "observation rules.",
+              "observation links.",
           );
         }
 
@@ -3321,7 +3324,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     return {
       ...this.agentPayload(subject),
       ...(sessionId === undefined ? {} : { sessionId }),
-      state: subject.rulesConfigured ? this.agentState(subject) : "awaiting_rules",
+      state: this.agentState(subject),
     };
   }
 
@@ -3333,26 +3336,23 @@ export class CopilotRuntime implements RuntimeAdapter {
     });
   }
 
-  private agentRulesPayload(
+  private agentLinksPayload(
     caller: AgentContext,
     subject: AgentContext,
   ): Record<string, unknown> {
     const source = this.requireActiveCaller(caller.agentId);
     if (!this.canInspectAgent(source, subject)) {
       throw new Error(
-        `Agent "${source.alias}" is not allowed to inspect rules for "${subject.alias}".`,
+        `Agent "${source.alias}" is not allowed to inspect links for "${subject.alias}".`,
       );
     }
     const administration = this.db.agentAdministration(subject.agentId);
     return {
       agentId: subject.agentId,
       sessionId: this.lookupAgentSessionId(subject),
-      configured: subject.rulesConfigured,
       ownerAgentId: administration?.ownerAgentId,
       ownerSessionId: administration?.ownerSessionId,
       revision: administration?.revision ?? 0,
-      permissions: subject.definition.permissions ?? { mode: "inherit" },
-      mcpServers: subject.definition.mcpServers ?? [],
       canTalkToSessionIds: this.sessionIdsForAgents(subject.canTalkTo),
       canObserveSessionIds: this.sessionIdsForAgents(subject.canObserve),
       ownerCanTalk: administration
@@ -3741,12 +3741,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           "real_agent_list_recipients to refresh the authorized mapping.",
       );
     }
-    if (!matched.rulesConfigured) {
-      throw new Error(
-        `Agent "${matched.alias}" is awaiting rules. Its owning Copilot session must call ` +
-          "real_agent_update_rules before any prompt can be delivered.",
-      );
-    }
     const recipientTransition = this.transitions.get(matched.agentId);
     if (recipientTransition) {
       throw this.transitionUnavailable(matched, recipientTransition);
@@ -3754,7 +3748,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (!current.canTalkTo.has(matched.agentId)) {
       throw new Error(
         `Agent "${current.alias}" is not allowed to send messages to "${matched.alias}" under ` +
-          `the current communication rules. "${matched.agentId}" is not in this agent's canTalkTo ` +
+          `the current communication links. "${matched.agentId}" is not in this agent's canTalkTo ` +
           "ACL.",
       );
     }
@@ -4712,7 +4706,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           canTalkTo: new Set(stagedRecord?.canTalkToAgentIds ?? []),
           canObserve: new Set(stagedRecord?.canObserveAgentIds ?? []),
           mcpServers: new Set(stagedRecord?.mcpServers ?? []),
-          rulesConfigured: true,
         };
         return this.storedAgentJson(context);
       },
@@ -4733,7 +4726,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       canTalkTo: new Set(record.canTalkToAgentIds),
       canObserve: new Set(record.canObserveAgentIds),
       mcpServers: new Set(record.mcpServers),
-      rulesConfigured: true,
       ...(claimed.claim ? { primaryClaim: claimed.claim } : {}),
     };
   }
@@ -4758,7 +4750,6 @@ export class CopilotRuntime implements RuntimeAdapter {
         canTalkTo: new Set(record.canTalkToAgentIds),
         canObserve: new Set(record.canObserveAgentIds),
         mcpServers: new Set(record.mcpServers),
-        rulesConfigured: true,
       };
       this.db.resumeRun(stored.id, process.pid);
       recovered = true;
@@ -5293,6 +5284,8 @@ export class CopilotRuntime implements RuntimeAdapter {
     const definition = createDefinitionToDynamic(parsed);
     const resolved = this.resolveStoredDefinition(definition);
     const mcpServers = await this.availableMcpServers();
+    this.assertPermissionCeiling([definition]);
+    this.assertMcpCeiling([definition], mcpServers);
     const context: AgentContext = {
       agentId: randomUUID(),
       target: "",
@@ -5305,7 +5298,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       mcpServers,
       ownerAgentId: caller.agentId,
       ownerSessionId,
-      rulesConfigured: false,
     };
     context.target = agentTarget(context.agentId);
     this.db.createOwnedAgentRun(
@@ -5321,7 +5313,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       ownerSessionId,
     );
     this.registerAgent(context);
-    const transition = this.beginAgentTransition(context, "provisioning its dormant SDK session");
+    const transition = this.beginAgentTransition(context, "creating its SDK session");
     let ready = false;
     try {
       this.emitAgentLifecycle("agent.loading", context, { recovered: false });
@@ -5336,8 +5328,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         ...this.agentPayload(context),
         runId: context.runId,
         sessionId: live.session.sessionId,
-        state: "awaiting_rules",
-        rulesConfigured: false,
+        state: this.agentState(context),
       };
     } catch (error) {
       await this.failStartingAgent(
@@ -5351,7 +5342,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
   }
 
-  private resolveRuleSessionTargets(
+  private resolveLinkSessionTargets(
     sessionIds: readonly string[],
     subject: AgentContext,
     field: string,
@@ -5370,10 +5361,10 @@ export class CopilotRuntime implements RuntimeAdapter {
     return resolved;
   }
 
-  private async updateOwnedAgentRules(
+  private async updateOwnedAgentLinks(
     callerReference: AgentContext,
     subject: AgentContext,
-    rules: AgentRuleSet,
+    links: AgentLinkSet,
   ): Promise<Record<string, unknown>> {
     const caller = this.requireActiveCaller(callerReference.agentId);
     const administration = this.requireOwnedAdministration(caller, subject);
@@ -5381,48 +5372,33 @@ export class CopilotRuntime implements RuntimeAdapter {
       [caller.agentId, subject.agentId],
       async () => {
         this.requireOwnedAdministration(caller, subject);
-        const canTalkTo = this.resolveRuleSessionTargets(
-          rules.canTalkToSessionIds,
+        const canTalkTo = this.resolveLinkSessionTargets(
+          links.canTalkToSessionIds,
           subject,
           "canTalkToSessionIds",
         );
-        const canObserve = this.resolveRuleSessionTargets(
-          rules.canObserveSessionIds,
+        const canObserve = this.resolveLinkSessionTargets(
+          links.canObserveSessionIds,
           subject,
           "canObserveSessionIds",
         );
         const nextDefinition: DynamicAgentDefinition = {
           ...subject.definition,
-          permissions: rules.permissions,
-          mcpServers: [...new Set(rules.mcpServers)],
           canTalkTo: this.grantDetails(canTalkTo),
           canObserve: this.grantDetails(canObserve),
         };
-        this.assertPermissionCeiling([nextDefinition]);
-        this.assertMcpCeiling([nextDefinition], subject.mcpServers);
-        const available = await this.availableMcpServers();
-        for (const server of nextDefinition.mcpServers ?? []) {
-          if (!available.has(server)) {
-            throw new Error(
-              `Agent "${subject.alias}" requested MCP server "${server}", which is unavailable.`,
-            );
-          }
-        }
-        const validated = this.resolveStoredDefinition(nextDefinition);
         const ownerCanTalkTo = new Set(caller.canTalkTo);
         const ownerCanObserve = new Set(caller.canObserve);
-        if (rules.ownerCanTalk) ownerCanTalkTo.add(subject.agentId);
+        if (links.ownerCanTalk) ownerCanTalkTo.add(subject.agentId);
         else ownerCanTalkTo.delete(subject.agentId);
-        if (rules.ownerCanObserve) ownerCanObserve.add(subject.agentId);
+        if (links.ownerCanObserve) ownerCanObserve.add(subject.agentId);
         else ownerCanObserve.delete(subject.agentId);
 
-        this.db.updateOwnedAgentRules({
+        this.db.updateOwnedAgentLinks({
           subjectAgentId: subject.agentId,
           ownerAgentId: administration.ownerAgentId,
           ownerSessionId: administration.ownerSessionId,
           workspace: this.workspace,
-          permissionsJson: JSON.stringify(rules.permissions),
-          mcpServersJson: JSON.stringify(nextDefinition.mcpServers ?? []),
           canTalkToJson: JSON.stringify([...canTalkTo]),
           canObserveJson: JSON.stringify([...canObserve]),
           runUpdates: [
@@ -5449,30 +5425,12 @@ export class CopilotRuntime implements RuntimeAdapter {
           ],
         });
         subject.definition = nextDefinition;
-        subject.agent = validated;
+        subject.agent = this.resolveStoredDefinition(nextDefinition);
         subject.canTalkTo = canTalkTo;
         subject.canObserve = canObserve;
-        subject.rulesConfigured = true;
         caller.canTalkTo = ownerCanTalkTo;
         caller.canObserve = ownerCanObserve;
-
-        const transition = this.beginAgentTransition(subject, "applying owned agent rules");
-        let reconnected = false;
-        try {
-          await this.reconnectAgent(subject, transition, undefined, true);
-          reconnected = true;
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          await this.failAgent(
-            subject,
-            `Agent rules were persisted but reconnect failed: ${detail}`,
-            transition,
-          );
-          throw error;
-        } finally {
-          this.endAgentTransition(transition, reconnected);
-        }
-        return this.agentRulesPayload(caller, subject);
+        return this.agentLinksPayload(caller, subject);
       },
     );
   }
@@ -5566,7 +5524,6 @@ export class CopilotRuntime implements RuntimeAdapter {
         canTalkTo,
         canObserve,
         mcpServers: new Set(mcpServers),
-        rulesConfigured: true,
       };
       contexts.push(context);
     }
@@ -5764,6 +5721,12 @@ export class CopilotRuntime implements RuntimeAdapter {
 
     this.db.resumeRun(runId, process.pid);
     const administration = this.db.agentAdministration(stored.agentId);
+    const canTalkTo = administration
+      ? storedAgentIds(administration.canTalkToJson)
+      : record.canTalkToAgentIds;
+    const canObserve = administration
+      ? storedAgentIds(administration.canObserveJson)
+      : record.canObserveAgentIds;
     const context: AgentContext = {
       agentId: stored.agentId,
       target: agentTarget(stored.agentId),
@@ -5771,8 +5734,8 @@ export class CopilotRuntime implements RuntimeAdapter {
       runId,
       definition,
       agent: resolved,
-      canTalkTo: new Set(record.canTalkToAgentIds),
-      canObserve: new Set(record.canObserveAgentIds),
+      canTalkTo: new Set(canTalkTo),
+      canObserve: new Set(canObserve),
       mcpServers,
       ...(administration === undefined
         ? {}
@@ -5780,7 +5743,6 @@ export class CopilotRuntime implements RuntimeAdapter {
             ownerAgentId: administration.ownerAgentId,
             ownerSessionId: administration.ownerSessionId,
           }),
-      rulesConfigured: administration?.configured ?? true,
     };
     this.registerAgent(context);
     const transition = this.beginAgentTransition(context, "recovering its SDK session");
@@ -5833,277 +5795,6 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
   }
 
-  async updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>> {
-    await this.openPrimary();
-    return this.updateAgentForCaller(this.requirePrimary(), agentRef, update);
-  }
-
-  private async updateAgentForCaller(
-    caller: AgentContext,
-    agentRef: string,
-    update: AgentUpdate,
-  ): Promise<Record<string, unknown>> {
-    this.requireCallingPrimary(caller.agentId);
-    const context = this.requireAgent(agentRef);
-    if (context.agentId === caller.agentId) {
-      throw new Error("The primary agent definition is managed by the host bootstrap.");
-    }
-    return this.withAgentLocks(
-      [caller.agentId, context.agentId],
-      () => this.updateAgentUnlocked(caller, context, update),
-    );
-  }
-
-  private async updateAgentUnlocked(
-    caller: AgentContext,
-    context: AgentContext,
-    update: AgentUpdate,
-  ): Promise<Record<string, unknown>> {
-    this.requireCallingPrimary(caller.agentId);
-    if (this.agents.get(context.agentId) !== context) {
-      throw new Error(`Agent "${context.alias}" is no longer active.`);
-    }
-    const definition = update.definition;
-    if (definition.id !== context.alias) {
-      this.assertAliasesAvailable([definition.id], context.agentId);
-    }
-    this.assertPermissionCeiling([definition]);
-    this.assertMcpCeiling([definition], context.mcpServers);
-    const availableAliases = new Set(
-      [...this.aliasIndex.keys()].filter((alias) => alias !== context.alias),
-    );
-    availableAliases.delete(caller.alias);
-    for (const reserved of this.db.reservedAgentAliases(this.workspace)) {
-      if (reserved.agentId !== context.agentId) {
-        availableAliases.add(reserved.alias);
-      }
-    }
-    const validated = validateAgentDefinition(definition, {
-      availableAliases,
-    });
-    if (!validated.valid || !validated.agent) {
-      throw new Error(
-        `Agent "${context.alias}" update is invalid: ${validated.issues
-          .map((issue) => `${issue.path}: ${issue.message}`)
-          .join("; ")}`,
-      );
-    }
-
-    const nextCanTalkTo = this.resolveGrantSelectors(
-      validated.agent.recipientSelectors,
-      caller,
-      new Map<string, string>(),
-      context.agentId,
-    );
-    const nextCanObserve = this.resolveGrantSelectors(
-      validated.agent.observeSelectors,
-      caller,
-      new Map<string, string>(),
-      context.agentId,
-    );
-    const callerHadTalk = caller.canTalkTo.has(context.agentId);
-    const callerHadObserve = caller.canObserve.has(context.agentId);
-    const nextCallerCanTalkTo = new Set(caller.canTalkTo);
-    const nextCallerCanObserve = new Set(caller.canObserve);
-    if (update.callerCanTalk === true) {
-      nextCallerCanTalkTo.add(context.agentId);
-    } else if (update.callerCanTalk === false) {
-      nextCallerCanTalkTo.delete(context.agentId);
-    }
-    if (update.callerCanObserve === true) {
-      nextCallerCanObserve.add(context.agentId);
-    } else if (update.callerCanObserve === false) {
-      nextCallerCanObserve.delete(context.agentId);
-    }
-    const normalizedDefinition: DynamicAgentDefinition = {
-      ...definition,
-      canTalkTo: this.grantDetails(nextCanTalkTo),
-      canObserve: this.grantDetails(nextCanObserve),
-    };
-    const transition = this.beginAgentTransition(context, "updating its definition");
-    let resumeMailbox = false;
-    try {
-      const previousDefinition = context.definition;
-      const previousAgent = context.agent;
-      const previousAlias = context.alias;
-      const previousCanTalkTo = context.canTalkTo;
-      const previousCanObserve = context.canObserve;
-      try {
-        this.db.updateAgentRuns([
-          {
-            id: context.runId,
-            alias: definition.id,
-            definition: this.storedAgentJsonFor(
-              context,
-              normalizedDefinition,
-              nextCanTalkTo,
-              nextCanObserve,
-            ),
-          },
-          {
-            id: caller.runId,
-            alias: caller.alias,
-            definition: this.storedAgentJsonFor(
-              caller,
-              caller.definition,
-              nextCallerCanTalkTo,
-              nextCallerCanObserve,
-            ),
-          },
-        ]);
-      } catch (error) {
-        try {
-          await this.reconnectAgent(context, transition);
-          resumeMailbox = true;
-        } catch (restoreError) {
-          const restoreMessage =
-            restoreError instanceof Error ? restoreError.message : String(restoreError);
-          await this.failAgent(
-            context,
-            `Agent update could not restore its original live session: ${restoreMessage}`,
-            transition,
-          );
-          throw new Error(
-            `Agent "${previousAlias}" update was not persisted and its original session could ` +
-              `not be restored: ${restoreMessage}`,
-            { cause: error },
-          );
-        }
-        throw error;
-      }
-
-      if (this.aliasIndex.get(previousAlias) === context.agentId) {
-        this.aliasIndex.delete(previousAlias);
-      }
-      context.alias = definition.id;
-      this.aliasIndex.set(context.alias, context.agentId);
-      context.definition = normalizedDefinition;
-      context.agent = validated.agent;
-      context.canTalkTo = nextCanTalkTo;
-      context.canObserve = nextCanObserve;
-      caller.canTalkTo = nextCallerCanTalkTo;
-      caller.canObserve = nextCallerCanObserve;
-      const live = this.live.get(context.target);
-      if (live) {
-        live.alias = context.alias;
-      }
-      const restorePreviousState = async (cause: unknown): Promise<never> => {
-        const rollbackCallerCanTalkTo = new Set(caller.canTalkTo);
-        const rollbackCallerCanObserve = new Set(caller.canObserve);
-        if (update.callerCanTalk !== undefined) {
-          if (callerHadTalk) {
-            rollbackCallerCanTalkTo.add(context.agentId);
-          } else {
-            rollbackCallerCanTalkTo.delete(context.agentId);
-          }
-        }
-        if (update.callerCanObserve !== undefined) {
-          if (callerHadObserve) {
-            rollbackCallerCanObserve.add(context.agentId);
-          } else {
-            rollbackCallerCanObserve.delete(context.agentId);
-          }
-        }
-        try {
-          this.db.updateAgentRuns([
-            {
-              id: context.runId,
-              alias: previousAlias,
-              definition: this.storedAgentJsonFor(
-                context,
-                previousDefinition,
-                previousCanTalkTo,
-                previousCanObserve,
-              ),
-            },
-            {
-              id: caller.runId,
-              alias: caller.alias,
-              definition: this.storedAgentJsonFor(
-                caller,
-                caller.definition,
-                rollbackCallerCanTalkTo,
-                rollbackCallerCanObserve,
-              ),
-            },
-          ]);
-          this.aliasIndex.delete(context.alias);
-          context.alias = previousAlias;
-          this.aliasIndex.set(previousAlias, context.agentId);
-          context.definition = previousDefinition;
-          context.agent = previousAgent;
-          context.canTalkTo = previousCanTalkTo;
-          context.canObserve = previousCanObserve;
-          caller.canTalkTo = rollbackCallerCanTalkTo;
-          caller.canObserve = rollbackCallerCanObserve;
-          if (live) live.alias = previousAlias;
-          const currentLive = this.live.get(context.target);
-          if (currentLive) currentLive.alias = previousAlias;
-          await this.reconnectAgent(context, transition);
-          resumeMailbox = true;
-        } catch (restoreError) {
-          const restoreMessage =
-            restoreError instanceof Error ? restoreError.message : String(restoreError);
-          await this.failAgent(
-            context,
-            `Agent update rollback could not restore its durable/live state: ${restoreMessage}`,
-            transition,
-          );
-          throw new Error(
-            `Agent "${previousAlias}" update failed and its previous state could not be ` +
-              `restored: ${restoreMessage}`,
-            { cause },
-          );
-        }
-        throw cause;
-      };
-
-      let reconnected = false;
-      try {
-        reconnected = await this.reconnectIfConfigChanged(context, transition);
-      } catch (error) {
-        // The reconnect failed, so restore the previous definition durably and in
-        // memory rather than leaving a committed update the live session never
-        // received, then surface the failure.
-        return restorePreviousState(error);
-      }
-      this.emitAgentLifecycle("agent.updated", context, { reconnected });
-      resumeMailbox = true;
-      return {
-        action: "updated",
-        ...this.agentPayload(context),
-        runId: context.runId,
-        reconnected,
-      };
-    } finally {
-      this.endAgentTransition(transition, resumeMailbox);
-    }
-  }
-
-  /**
-   * Reconnects an agent whenever anything its SessionConfig is derived from changed:
-   * prompt, task, model, reasoning, permissions, MCP subset, or ACL. The session id
-   * and conversation history are preserved.
-   */
-  private async reconnectIfConfigChanged(
-    context: AgentContext,
-    transition: AgentTransition,
-  ): Promise<boolean> {
-    const live = this.live.get(context.target);
-    if (!live) {
-      return false;
-    }
-    const plan = await this.sessionConnectionPlan(context);
-    if (
-      plan.configSignature === live.configSignature &&
-      this.liveConnectionCurrent(live, true)
-    ) {
-      return false;
-    }
-    await this.reconnectAgent(context, transition, plan);
-    return true;
-  }
-
   // Reconnects one agent in place, preserving its SDK session id and history while
   // rebuilding its complete session config from the current definition. Several
   // callers can be waiting on the same in-flight connection, so each pass re-enters
@@ -6118,7 +5809,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       config: SessionConfig;
       configSignature: string;
     },
-    allowFreshUnstartedSession = false,
   ): Promise<void> {
     const target = context.target;
     let continuity: SessionContinuity | undefined;
@@ -6153,43 +5843,19 @@ export class CopilotRuntime implements RuntimeAdapter {
           "SDK session disconnect failed while reconnecting updated agent",
         );
       }
-      let connected: LiveSession;
-      try {
-        connected = await this.connectSession({
-          runId: context.runId,
-          target,
-          agentId: context.agentId,
-          alias: context.alias,
-          sessionId,
-          config: plan.config,
-          configSignature: plan.configSignature,
-          availableMcpServers: plan.availableMcpServers,
-          resumeExisting: true,
-          ...(continuity === undefined ? {} : { continuity }),
-          transition,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (
-          !allowFreshUnstartedSession ||
-          !message.includes("Session not found") ||
-          this.db.hasDeliveredUserMessage(context.runId)
-        ) {
-          throw error;
-        }
-        connected = await this.connectSession({
-          runId: context.runId,
-          target,
-          agentId: context.agentId,
-          alias: context.alias,
-          sessionId: undefined,
-          config: plan.config,
-          configSignature: plan.configSignature,
-          availableMcpServers: plan.availableMcpServers,
-          resumeExisting: false,
-          transition,
-        });
-      }
+      const connected = await this.connectSession({
+        runId: context.runId,
+        target,
+        agentId: context.agentId,
+        alias: context.alias,
+        sessionId,
+        config: plan.config,
+        configSignature: plan.configSignature,
+        availableMcpServers: plan.availableMcpServers,
+        resumeExisting: true,
+        ...(continuity === undefined ? {} : { continuity }),
+        transition,
+      });
       const verifiedPlan = await this.sessionConnectionPlan(context);
       if (connected.configSignature === verifiedPlan.configSignature) {
         return;
@@ -6235,7 +5901,6 @@ export class CopilotRuntime implements RuntimeAdapter {
       displayName: context.agent.displayName,
       description: context.agent.description,
       task: context.agent.task,
-      rulesConfigured: context.rulesConfigured,
       ...(context.ownerAgentId === undefined ? {} : { ownerAgentId: context.ownerAgentId }),
       ...(context.ownerSessionId === undefined ? {} : { ownerSessionId: context.ownerSessionId }),
       recipients: this.grantDetails(context.canTalkTo),
@@ -6296,11 +5961,6 @@ export class CopilotRuntime implements RuntimeAdapter {
 
   async sendUserPrompt(target: string, content: string): Promise<string> {
     const context = this.requireAgent(target);
-    if (context.agentId !== this.primaryAgentId && !context.rulesConfigured) {
-      throw new Error(
-        `Agent "${context.alias}" is awaiting rules and cannot receive prompts yet.`,
-      );
-    }
     const live = await this.activeSession(target);
     return this.sendUserPromptOnLive(live, content, true);
   }

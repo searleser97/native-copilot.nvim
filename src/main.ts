@@ -362,33 +362,6 @@ async function main(): Promise<void> {
         });
         return;
       }
-      case "agent.update": {
-        const agentRef =
-          typeof payload.target === "string" && payload.target.trim() !== ""
-            ? payload.target
-            : requiredString(payload, "agent", command.type);
-        if (typeof payload.definition !== "object" || payload.definition === null) {
-          throw new Error(`${command.type} requires payload.definition`);
-        }
-        const candidate = payload.definition as Record<string, unknown>;
-        const result = await runtime.updateAgent(agentRef, {
-          definition: {
-            ...candidate,
-            canObserve: Array.isArray(candidate.canObserve) ? candidate.canObserve : [],
-          } as DynamicAgentDefinition,
-          ...(typeof payload.callerCanTalk === "boolean"
-            ? { callerCanTalk: payload.callerCanTalk }
-            : {}),
-          ...(typeof payload.callerCanObserve === "boolean"
-            ? { callerCanObserve: payload.callerCanObserve }
-            : {}),
-        });
-        protocol.send("agent.updated", result, {
-          requestId: command.id,
-          done: true,
-        });
-        return;
-      }
       case "prompt.send":
         await runtime.sendUserPrompt(
           requiredString(payload, "target", command.type),

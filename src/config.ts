@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type {
   AgentCreateDefinition,
-  AgentRuleSet,
+  AgentLinkSet,
   AgentValidationResult,
   DynamicAgentDefinition,
   ResolvedAgent,
@@ -118,15 +118,15 @@ export const agentCreateSchema = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: reasoningEffort.optional(),
   reasoningSummary: reasoningSummary.optional(),
+  permissions: dynamicPermissionSchema,
+  mcpServers: stringList,
   ui: z.object({
     icon: z.string().min(1).optional(),
     color: z.string().min(1).optional(),
   }).strict().optional(),
 }).strict();
 
-export const agentRuleSetSchema = z.object({
-  permissions: dynamicPermissionSchema,
-  mcpServers: stringList,
+export const agentLinkSetSchema = z.object({
   canTalkToSessionIds: stringList,
   canObserveSessionIds: stringList,
   ownerCanTalk: z.boolean(),
@@ -142,8 +142,8 @@ export function createDefinitionToDynamic(
     description: definition.description,
     prompt: definition.prompt,
     task: "Awaiting the first authorized parent prompt.",
-    permissions: { mode: "inherit" },
-    mcpServers: [],
+    permissions: definition.permissions,
+    mcpServers: [...new Set(definition.mcpServers)],
     canTalkTo: [],
     canObserve: [],
   };
@@ -158,8 +158,8 @@ export function createDefinitionToDynamic(
   return dynamic;
 }
 
-export function parseAgentRuleSet(value: unknown): AgentRuleSet {
-  return agentRuleSetSchema.parse(value) as AgentRuleSet;
+export function parseAgentLinkSet(value: unknown): AgentLinkSet {
+  return agentLinkSetSchema.parse(value) as AgentLinkSet;
 }
 
 function addIssue(issues: ValidationIssue[], path: string, message: string): void {

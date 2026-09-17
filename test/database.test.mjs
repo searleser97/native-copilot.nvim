@@ -111,13 +111,13 @@ function seedBrokenV13(path) {
   db.close();
 }
 
-test("schema v15 reconstructs a migration-failed primary without Standard rows", (t) => {
+test("schema v16 reconstructs a migration-failed primary without Standard rows", (t) => {
   const path = databasePath(t);
   seedBrokenV13(path);
 
   const db = new AgentDatabase(path, () => false);
   const schema = db.db.prepare("SELECT version FROM schema_meta").get();
-  assert.equal(schema.version, 15);
+  assert.equal(schema.version, 16);
 
   const primary = db.stagedPrimaryRun("workspace");
   assert.ok(primary);
@@ -433,7 +433,7 @@ test("dead claim on a resumable primary releases a sessionless successor", (t) =
   db.close();
 });
 
-test("owned agents remain dormant until their immutable owner session assigns rules", (t) => {
+test("owned agent links remain controlled by the immutable owner session", (t) => {
   const path = databasePath(t);
   const db = new AgentDatabase(path, () => false);
   const childDefinition = storedDefinition("reviewer");
@@ -457,9 +457,6 @@ test("owned agents remain dormant until their immutable owner session assigns ru
     ownerAgentId: "parent-agent",
     ownerSessionId: "parent-session",
     workspace: "workspace",
-    configured: false,
-    permissionsJson: null,
-    mcpServersJson: "[]",
     canTalkToJson: "[]",
     canObserveJson: "[]",
     revision: 0,
@@ -468,13 +465,11 @@ test("owned agents remain dormant until their immutable owner session assigns ru
   });
   assert.throws(
     () =>
-      db.updateOwnedAgentRules({
+      db.updateOwnedAgentLinks({
         subjectAgentId: "reviewer-agent",
         ownerAgentId: "parent-agent",
         ownerSessionId: "different-session",
         workspace: "workspace",
-        permissionsJson: '{"mode":"inherit"}',
-        mcpServersJson: "[]",
         canTalkToJson: '["parent-agent"]',
         canObserveJson: "[]",
         runUpdates: [],
@@ -482,13 +477,11 @@ test("owned agents remain dormant until their immutable owner session assigns ru
     /does not own agent/,
   );
 
-  const configured = db.updateOwnedAgentRules({
+  const configured = db.updateOwnedAgentLinks({
     subjectAgentId: "reviewer-agent",
     ownerAgentId: "parent-agent",
     ownerSessionId: "parent-session",
     workspace: "workspace",
-    permissionsJson: '{"mode":"inherit"}',
-    mcpServersJson: "[]",
     canTalkToJson: '["parent-agent"]',
     canObserveJson: "[]",
     runUpdates: [
@@ -499,7 +492,6 @@ test("owned agents remain dormant until their immutable owner session assigns ru
       },
     ],
   });
-  assert.equal(configured.configured, true);
   assert.equal(configured.revision, 1);
   assert.equal(configured.ownerSessionId, "parent-session");
   db.close();

@@ -3284,19 +3284,6 @@ function M._on_event(message)
       refresh_member(state.selected)
     end
     return
-  elseif message.type == 'agent.updated' then
-    local target = payload.target
-    if not target then return end
-    state.agents[target] = vim.tbl_deep_extend(
-      'force',
-      state.agents[target] or {},
-      vim.deepcopy(payload)
-    )
-    state.member_meta[target] = vim.deepcopy(state.agents[target])
-    ensure_member(target, payload.displayName or payload.alias or target)
-    add_to_order(target)
-    notify(('Updated agent %s'):format(payload.alias or target))
-    return
   elseif message.type == 'agent.stopped' then
     local target = payload.target
     if not target then return end

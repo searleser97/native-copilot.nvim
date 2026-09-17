@@ -4,7 +4,7 @@ import type {
   PrimaryStartupClaim,
   StoredAgentRun,
 } from "./database.js";
-import type { AgentUpdate, RuntimeAdapter } from "./runtime-adapter.js";
+import type { RuntimeAdapter } from "./runtime-adapter.js";
 import { compactHistoryEvents } from "./runtime.js";
 import type { HistoryReplayEvent } from "./runtime.js";
 import type { SpawnAgentsRequest } from "./types.js";
@@ -1894,87 +1894,6 @@ export class ScriptedRuntime implements RuntimeAdapter {
         target: "status",
         done: true,
       });
-    } finally {
-      this.endTransition(agent, transition);
-    }
-  }
-
-  async updateAgent(agentRef: string, update: AgentUpdate): Promise<Record<string, unknown>> {
-    await this.openPrimary();
-    const caller = this.primaryAgent();
-    const agent = this.requireAgent(agentRef);
-    if (agent.primary) {
-      throw new Error("The scripted primary definition is managed by the host.");
-    }
-    const transition = this.beginTransition(agent, "updating its definition");
-    try {
-      const resolveSelectors = (selectors: string[]): string[] =>
-        selectors.map((selector) => {
-          if (selector === "caller") return caller.agentId;
-          if (selector.startsWith("agent:")) {
-            const agentId = selector.slice("agent:".length);
-            if (agentId !== agent.agentId && this.agents.has(agentId)) return agentId;
-          }
-          const recipient = [...this.agents.values()].find(
-            (candidate) => candidate.alias === selector && candidate.agentId !== agent.agentId,
-          );
-          if (!recipient) {
-            throw new Error(`Scripted agent selector "${selector}" does not resolve.`);
-          }
-          return recipient.agentId;
-        });
-      const nextAgent: ScriptedAgent = {
-        ...agent,
-        alias: update.definition.id,
-        displayName: update.definition.displayName,
-        description: update.definition.description,
-        task: update.definition.task,
-        recipients: resolveSelectors(update.definition.canTalkTo),
-        observes: resolveSelectors(update.definition.canObserve),
-      };
-      let nextCallerRecipients = [...caller.recipients];
-      let nextCallerObserves = [...caller.observes];
-      if (update.callerCanTalk === true) {
-        nextCallerRecipients = [...new Set([...nextCallerRecipients, agent.agentId])];
-      } else if (update.callerCanTalk === false) {
-        nextCallerRecipients = nextCallerRecipients.filter(
-          (agentId) => agentId !== agent.agentId,
-        );
-      }
-      if (update.callerCanObserve === true) {
-        nextCallerObserves = [...new Set([...nextCallerObserves, agent.agentId])];
-      } else if (update.callerCanObserve === false) {
-        nextCallerObserves = nextCallerObserves.filter(
-          (agentId) => agentId !== agent.agentId,
-        );
-      }
-      const nextCaller: ScriptedAgent = {
-        ...caller,
-        recipients: nextCallerRecipients,
-        observes: nextCallerObserves,
-      };
-      this.db.updateAgentRuns([
-        {
-          id: nextAgent.runId,
-          alias: nextAgent.alias,
-          definition: this.storedAgentJson(nextAgent),
-        },
-        {
-          id: nextCaller.runId,
-          alias: nextCaller.alias,
-          definition: this.storedAgentJson(nextCaller),
-        },
-      ]);
-      Object.assign(agent, nextAgent);
-      caller.recipients = nextCallerRecipients;
-      caller.observes = nextCallerObserves;
-      this.emit("agent.updated", { ...this.agentPayload(agent), reconnected: true }, {
-        runId: agent.runId,
-        memberId: agent.target,
-        target: "status",
-        done: true,
-      });
-      return { action: "updated", ...this.agentPayload(agent), reconnected: true };
     } finally {
       this.endTransition(agent, transition);
     }
