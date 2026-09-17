@@ -233,6 +233,30 @@ local function line_has_highlight(buf, row, namespace_name, highlight)
   return false
 end
 
+local function reasoning_highlight_recovers_after_extmark_loss()
+  local member_id = 'reasoning-highlight-probe'
+  local entry = buffers.ensure_member(member_id, 'Reasoning highlight probe')
+  local buf = entry.views.conversation.buf
+  buffers.begin_response(member_id, 'probe-response')
+  buffers.append_activity_delta(member_id, 'probe-reasoning', 'Partial reasoning text.')
+  local namespace = vim.api.nvim_get_namespaces().native_copilot_inline_activity
+  vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+  buffers.complete_activity(
+    member_id,
+    'probe-reasoning',
+    'Final reasoning text after replacement.'
+  )
+  local row = line_with(buf, 'Final reasoning text after replacement.')
+  local recovered = line_has_highlight(
+    buf,
+    row,
+    'native_copilot_inline_activity',
+    'Comment'
+  )
+  buffers.remove_member(member_id)
+  return recovered
+end
+
 local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
   buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
@@ -646,6 +670,12 @@ tick = function()
     if not check(
       not has_sign_on_empty_line(buf) and not has_ranged_sign(buf),
       'environment lifecycle signs remained on their owning rows'
+    ) then
+      return
+    end
+    if not check(
+      reasoning_highlight_recovers_after_extmark_loss(),
+      'reasoning completion restored a missing subdued highlight'
     ) then
       return
     end

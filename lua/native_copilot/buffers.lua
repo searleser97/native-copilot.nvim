@@ -902,27 +902,33 @@ local function replace_activity_content(view, activity, content)
 end
 
 local function refresh_activity_highlight(view, activity)
-  if not activity.extmark or not activity.body_extmark then return end
-  local highlight_position = vim.api.nvim_buf_get_extmark_by_id(
-    view.buf,
-    activity_namespace,
-    activity.extmark,
-    {}
-  )
+  if not activity.body_extmark then return end
+  local highlight_position = activity.extmark
+      and vim.api.nvim_buf_get_extmark_by_id(
+        view.buf,
+        activity_namespace,
+        activity.extmark,
+        {}
+      )
+    or {}
   local body_position = vim.api.nvim_buf_get_extmark_by_id(
     view.buf,
     activity_body_namespace,
     activity.body_extmark,
     { details = true }
   )
-  if #highlight_position == 0 or #body_position == 0 then return end
+  if #body_position == 0 then return end
+  local start_row = #highlight_position > 0
+      and highlight_position[1]
+    or activity.plain and body_position[1]
+    or math.max(0, body_position[1] - 2)
   activity.extmark = vim.api.nvim_buf_set_extmark(
     view.buf,
     activity_namespace,
-    highlight_position[1],
+    start_row,
     0,
     {
-      id = activity.extmark,
+      id = #highlight_position > 0 and activity.extmark or nil,
       end_row = body_position[3].end_row,
       end_col = 0,
       hl_group = 'Comment',
