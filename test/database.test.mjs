@@ -157,6 +157,74 @@ test("schema v16 reconstructs a migration-failed primary without Standard rows",
   db.close();
 });
 
+test("schema v16 separates legacy rules into host-only links", (t) => {
+  const path = databasePath(t);
+  const original = new AgentDatabase(path, () => false);
+  original.createOwnedAgentRun(
+    {
+      id: "worker-run",
+      agentId: "worker-agent",
+      alias: "worker",
+      definition: storedDefinition("worker"),
+      workspace: "workspace",
+      ownerPid: 4200,
+    },
+    "owner-agent",
+    "owner-session",
+  );
+  original.db.exec(`
+    DROP TABLE agent_links;
+    CREATE TABLE agent_rules (
+      agent_id TEXT PRIMARY KEY,
+      owner_agent_id TEXT NOT NULL,
+      owner_session_id TEXT NOT NULL,
+      workspace TEXT NOT NULL,
+      configured INTEGER NOT NULL DEFAULT 0,
+      permissions_json TEXT,
+      mcp_servers_json TEXT NOT NULL DEFAULT '[]',
+      can_talk_to_json TEXT NOT NULL DEFAULT '[]',
+      can_observe_json TEXT NOT NULL DEFAULT '[]',
+      revision INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO agent_rules(
+      agent_id, owner_agent_id, owner_session_id, workspace, configured,
+      permissions_json, mcp_servers_json, can_talk_to_json, can_observe_json,
+      revision, updated_at
+    ) VALUES (
+      'worker-agent', 'owner-agent', 'owner-session', 'workspace', 1,
+      '{"mode":"inherit"}', '["myworkiq"]', '["peer-agent"]', '["observer-agent"]',
+      7, '2026-09-16T00:00:00.000Z'
+    );
+    UPDATE schema_meta SET version = 15;
+  `);
+  original.close();
+
+  const migrated = new AgentDatabase(path, () => false);
+  assert.equal(migrated.db.prepare("SELECT version FROM schema_meta").get().version, 16);
+  assert.deepEqual(migrated.agentAdministration("worker-agent"), {
+    agentId: "worker-agent",
+    ownerAgentId: "owner-agent",
+    ownerSessionId: "owner-session",
+    workspace: "workspace",
+    canTalkToJson: '["peer-agent"]',
+    canObserveJson: '["observer-agent"]',
+    revision: 7,
+    createdAt: migrated.agentAdministration("worker-agent").createdAt,
+    updatedAt: "2026-09-16T00:00:00.000Z",
+  });
+  const tables = migrated.db
+    .prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name IN ('agent_links', 'agent_rules')
+       ORDER BY name`,
+    )
+    .all()
+    .map((row) => row.name);
+  assert.deepEqual(tables, ["agent_links"]);
+  migrated.close();
+});
+
 test("staged primary claim and successor creation are atomic and explicit", (t) => {
   const path = databasePath(t);
   seedBrokenV13(path);
