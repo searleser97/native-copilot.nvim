@@ -1,33 +1,171 @@
 local M = {}
 
 local active
+local helper
+local setup_process
 
-local function finish_once(state, callback, result)
-  if state.finished then return end
-  state.finished = true
-  if active == state then active = nil end
-  callback(result)
+local source = debug.getinfo(1, 'S').source:sub(2)
+local plugin_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(source)))
+local helper_path = vim.fs.joinpath(plugin_root, 'python', 'native_copilot_voice.py')
+
+local function data_root()
+  return vim.fs.joinpath(vim.fn.stdpath('data'), 'native-copilot', 'voice')
+end
+
+local function venv_python(options)
+  local root = options.venv_path and vim.fn.expand(options.venv_path)
+    or vim.fs.joinpath(data_root(), '.venv')
+  return vim.fs.joinpath(root, 'Scripts', 'python.exe'), root
+end
+
+local function finish_active(result)
+  local current = active
+  if not current then return end
+  active = nil
+  current.callback(result)
+end
+
+local function decode_event(line)
+  if line == '' then return nil end
+  local ok, event = pcall(vim.json.decode, line)
+  if ok and type(event) == 'table' then return event end
+  return nil
+end
+
+local function send(command)
+  if not helper or helper.job <= 0 then return false end
+  vim.fn.chansend(helper.job, vim.json.encode(command) .. '\n')
+  return true
+end
+
+local function handle_event(event)
+  if event.type == 'state' then
+    helper.ready = event.state == 'ready' or helper.ready
+    if event.state == 'ready' and helper.pending_start then
+      local pending = helper.pending_start
+      helper.pending_start = nil
+      send(pending)
+    end
+    if active and active.status then active.status(event) end
+    return
+  end
+  if event.type == 'partial' then
+    if active and active.status then active.status(event) end
+    return
+  end
+  if event.type == 'transcript' then
+    finish_active({ kind = 'transcript', text = event.text or '' })
+  elseif event.type == 'no_speech' then
+    finish_active({ kind = 'no_speech' })
+  elseif event.type == 'canceled' then
+    finish_active({ kind = 'canceled' })
+  elseif event.type == 'error' then
+    finish_active({ kind = 'error', message = event.message or 'Voice dictation failed.' })
+  end
+end
+
+local function consume_lines(state, data)
+  for index, chunk in ipairs(data or {}) do
+    local line = state.partial .. chunk
+    if index == #data and chunk ~= '' then
+      state.partial = line
+    else
+      state.partial = ''
+      local event = decode_event(line)
+      if event then handle_event(event) end
+    end
+  end
+end
+
+local function stop_helper()
+  if not helper then return end
+  local job = helper.job
+  helper = nil
+  if job > 0 then
+    pcall(vim.fn.chansend, job, vim.json.encode({ command = 'shutdown' }) .. '\n')
+    pcall(vim.fn.jobstop, job)
+  end
+end
+
+local function ensure_helper(options, status)
+  if helper and helper.job > 0 then return true end
+  local python = venv_python(options)
+  if vim.fn.executable(python) ~= 1 then
+    return false,
+      'Nemotron voice support is not prepared. Run :NativeCopilotVoiceSetup first.'
+  end
+  if vim.fn.filereadable(helper_path) ~= 1 then
+    return false, 'Native Copilot voice helper is missing: ' .. helper_path
+  end
+
+  local state = {
+    job = 0,
+    ready = false,
+    pending_start = nil,
+    partial = '',
+  }
+  state.job = vim.fn.jobstart({
+    python,
+    helper_path,
+    '--model',
+    options.model,
+    '--language',
+    options.language,
+  }, {
+    stdout_buffered = false,
+    stderr_buffered = true,
+    on_stdout = function(_, data)
+      vim.schedule(function()
+        if helper == state then consume_lines(state, data) end
+      end)
+    end,
+    on_stderr = function(_, data)
+      local detail = vim.trim(table.concat(data or {}, '\n'))
+      if detail ~= '' then state.stderr = detail end
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        if helper ~= state then return end
+        helper = nil
+        if active then
+          finish_active({
+            kind = 'error',
+            message = state.stderr
+              or ('Nemotron voice helper exited unexpectedly (code %d).'):format(code),
+          })
+        end
+      end)
+    end,
+  })
+  if state.job <= 0 then return false, 'Could not start the Nemotron voice helper.' end
+  helper = state
+  if status then status({ type = 'state', state = 'loading' }) end
+  return true
 end
 
 function M.is_listening()
-  return active ~= nil and not active.finished
+  return active ~= nil
 end
 
 function M.cancel()
   if not M.is_listening() then return false end
-  local state = active
-  state.process:kill(9)
-  finish_once(state, state.callback, { kind = 'canceled' })
+  if active.process then
+    active.process:kill(9)
+    finish_active({ kind = 'canceled' })
+    return true
+  end
+  if helper and not helper.ready then
+    helper.pending_start = nil
+    finish_active({ kind = 'canceled' })
+    return true
+  end
+  if not send({ command = 'cancel' }) then
+    finish_active({ kind = 'canceled' })
+  end
   return true
 end
 
-function M.start(timeout_ms, callback)
-  if M.is_listening() then return false end
-  if vim.fn.has('win32') ~= 1 then
-    callback({ kind = 'unsupported' })
-    return false
-  end
-
+local function start_system(timeout_ms, callback)
   local script = table.concat({
     "$ErrorActionPreference = 'Stop'",
     '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
@@ -44,10 +182,7 @@ function M.start(timeout_ms, callback)
     '  $recognizer.Dispose()',
     '}',
   }, '\n')
-  local state = {
-    callback = callback,
-    finished = false,
-  }
+  local state = { callback = callback }
   active = state
   state.process = vim.system({
     'powershell.exe',
@@ -58,30 +193,122 @@ function M.start(timeout_ms, callback)
     script,
   }, { text = true }, function(result)
     vim.schedule(function()
-      if result.code == 0 then
-        local transcript = vim.trim(result.stdout or '')
-        if transcript == '' then
-          finish_once(state, callback, { kind = 'no_speech' })
-        else
-          finish_once(state, callback, { kind = 'transcript', text = transcript })
-        end
+      if active ~= state then return end
+      if result.code == 0 and vim.trim(result.stdout or '') ~= '' then
+        finish_active({ kind = 'transcript', text = vim.trim(result.stdout) })
       elseif result.code == 3 then
-        finish_once(state, callback, { kind = 'no_speech' })
+        finish_active({ kind = 'no_speech' })
       else
-        local detail = vim.trim(result.stderr or '')
-        finish_once(state, callback, {
+        finish_active({
           kind = 'error',
-          message = detail ~= '' and detail or 'Voice dictation failed.',
+          message = vim.trim(result.stderr or '') ~= '' and vim.trim(result.stderr)
+            or 'Windows voice dictation failed.',
         })
       end
     end)
   end)
-  vim.defer_fn(function()
-    if state.finished then return end
-    state.process:kill(9)
-    finish_once(state, callback, { kind = 'no_speech' })
-  end, timeout_ms + 2000)
   return true
+end
+
+function M.start(options, callback, status)
+  if M.is_listening() then return false end
+  if vim.fn.has('win32') ~= 1 then
+    callback({ kind = 'unsupported' })
+    return false
+  end
+  if options.provider == 'system' then
+    return start_system(options.listen_timeout_ms, callback)
+  end
+  if options.provider ~= 'nemotron' then
+    callback({ kind = 'error', message = 'Unknown voice provider: ' .. tostring(options.provider) })
+    return false
+  end
+
+  active = { callback = callback, status = status }
+  local ok, message = ensure_helper(options, status)
+  if not ok then
+    finish_active({ kind = 'error', message = message })
+    return false
+  end
+  local command = {
+    command = 'start',
+    timeout_ms = options.listen_timeout_ms,
+  }
+  if helper.ready then
+    send(command)
+  else
+    helper.pending_start = command
+  end
+  return true
+end
+
+local function run_setup_step(command, callback)
+  setup_process = vim.system(command, { text = true }, function(result)
+    vim.schedule(function()
+      setup_process = nil
+      callback(result)
+    end)
+  end)
+end
+
+function M.prepare(options, status, callback)
+  if setup_process then
+    callback(false, 'Nemotron voice setup is already running.')
+    return
+  end
+  if vim.fn.has('win32') ~= 1 then
+    callback(false, 'Nemotron voice setup currently requires Windows.')
+    return
+  end
+  stop_helper()
+  local python, venv = venv_python(options)
+  vim.fn.mkdir(data_root(), 'p')
+  status('Creating the isolated voice environment…')
+  run_setup_step({ options.python_command, '-m', 'venv', venv }, function(venv_result)
+    if venv_result.code ~= 0 then
+      callback(false, vim.trim(venv_result.stderr or 'Could not create the voice environment.'))
+      return
+    end
+    status('Installing the Foundry Local voice runtime…')
+    run_setup_step({
+      python,
+      '-m',
+      'pip',
+      'install',
+      '--disable-pip-version-check',
+      ('foundry-local-sdk-winml==%s'):format(options.foundry_version),
+      'sounddevice',
+    }, function(install_result)
+      if install_result.code ~= 0 then
+        callback(false, vim.trim(install_result.stderr or 'Could not install voice dependencies.'))
+        return
+      end
+      status('Downloading and preparing the Nemotron speech model (~731 MB)…')
+      run_setup_step({
+        python,
+        helper_path,
+        '--prepare',
+        '--model',
+        options.model,
+        '--language',
+        options.language,
+      }, function(prepare_result)
+        if prepare_result.code ~= 0 then
+          callback(false, vim.trim(prepare_result.stderr or prepare_result.stdout or 'Model setup failed.'))
+          return
+        end
+        callback(true)
+      end)
+    end)
+  end)
+end
+
+function M.shutdown()
+  if setup_process then
+    setup_process:kill(9)
+    setup_process = nil
+  end
+  stop_helper()
 end
 
 return M

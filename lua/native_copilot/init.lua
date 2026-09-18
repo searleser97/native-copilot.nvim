@@ -88,7 +88,13 @@ local defaults = {
     capture_timeout_ms = 5000,
   },
   voice = {
+    provider = 'nemotron',
     listen_timeout_ms = 30000,
+    python_command = 'python',
+    foundry_version = '1.2.4',
+    model = 'nemotron-speech-streaming-en-0.6b',
+    language = 'en',
+    venv_path = nil,
   },
   mappings = {
     toggle = '<leader>ait',
@@ -317,7 +323,7 @@ function M.dictate_voice()
 
   local row, column = unpack(vim.api.nvim_win_get_cursor(0))
   local mark = clipboard.mark_position(state.prompt_buf, row - 1, column)
-  local started = voice.start(options.voice.listen_timeout_ms, function(result)
+  local started = voice.start(options.voice, function(result)
     if result.kind == 'transcript' then
       clipboard.insert_at_mark(state.prompt_buf, mark, result.text .. ' ')
     elseif result.kind == 'no_speech' then
@@ -332,11 +338,27 @@ function M.dictate_voice()
       clipboard.insert_at_mark(state.prompt_buf, mark, '')
       notify(result.message, vim.log.levels.ERROR)
     end
+  end, function(event)
+    if event.state == 'loading' then
+      notify('Loading the local Nemotron speech model…')
+    end
   end)
   if started then
     notify('Listening for voice dictation; press <C-g>v again to cancel.')
   end
   return started
+end
+
+function M.setup_voice()
+  voice.prepare(options.voice, function(message)
+    notify(message)
+  end, function(ok, message)
+    if ok then
+      notify('Nemotron voice dictation is ready.')
+    else
+      notify(message, vim.log.levels.ERROR)
+    end
+  end)
 end
 
 local function update_prompt_label()
@@ -3629,6 +3651,7 @@ function M.setup(user_options)
   vim.api.nvim_create_user_command('NativeCopilotAbort', M.abort, {})
   vim.api.nvim_create_user_command('NativeCopilotCancelBackground', M.cancel_background, {})
   vim.api.nvim_create_user_command('NativeCopilotReloadMcp', M.reload_mcp, {})
+  vim.api.nvim_create_user_command('NativeCopilotVoiceSetup', M.setup_voice, {})
   vim.api.nvim_create_autocmd('BufWinEnter', {
     callback = function(args) buffers.on_shown(args.buf) end,
   })
@@ -3653,11 +3676,15 @@ function M.setup(user_options)
     end,
   })
   vim.api.nvim_create_autocmd('VimLeavePre', {
-    callback = function() protocol.stop_sync(5500) end,
+    callback = function()
+      voice.shutdown()
+      protocol.stop_sync(5500)
+    end,
   })
 end
 
 function M.shutdown()
+  voice.shutdown()
   protocol.stop_sync(5500)
 end
 

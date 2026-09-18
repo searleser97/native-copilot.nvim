@@ -183,15 +183,25 @@ require("native_copilot").setup({
     capture_timeout_ms = 5000,
   },
   voice = {
+    provider = "nemotron",
     listen_timeout_ms = 30000,
+    python_command = "python",
+    model = "nemotron-speech-streaming-en-0.6b",
+    language = "en",
   },
 })
 ```
 
-On Windows, `<C-g>v` starts one-utterance dictation through the built-in `System.Speech`
-recognizer. Speak naturally and pause when finished; the recognized text is inserted at the
-cursor position where dictation started. Press `<C-g>v` again while listening to cancel. The
-recognizer uses the default Windows microphone and installed speech-recognition language.
+On Windows, run `:NativeCopilotVoiceSetup` once to create an isolated Python environment and
+download the local Nemotron streaming speech model (about 731 MB). After setup, `<C-g>v` starts
+one-utterance dictation through Foundry Local and the default microphone. The model stays loaded
+in a persistent helper between dictation sessions. Speak naturally and pause when finished; only
+the finalized transcript is inserted at the cursor position where dictation started. Press
+`<C-g>v` again while listening to cancel. Audio and transcription remain on the machine.
+
+Set `voice.provider = "system"` to explicitly use the legacy Windows `System.Speech` recognizer
+without installing Nemotron. Native Copilot does not silently fall back when the configured
+provider is unavailable.
 
 The conversation is also the chronological activity timeline. Background tasks, environment
 initialization, foreground tools, schedules, and permission decisions appear as compact timeline

@@ -809,6 +809,7 @@ tick = function()
       return vim.fn.maparg('<C-g>v', 'n', false, true).callback
         and vim.fn.maparg('<C-g>v', 'i', false, true).callback
     end)
+    local voice_setup_command = vim.fn.exists(':NativeCopilotVoiceSetup') == 2
     local image_reference = require('native_copilot.clipboard').image_reference(
       'C:\\Users\\example\\Downloads\\clipboard.png'
     )
@@ -820,6 +821,7 @@ tick = function()
         and removed_insert_mapping
         and clipboard_mappings
         and voice_mappings
+        and voice_setup_command
         and image_reference
           == '@image("C:\\Users\\example\\Downloads\\clipboard.png")',
       'prompt mappings support recipients, clipboard images, and voice dictation'
