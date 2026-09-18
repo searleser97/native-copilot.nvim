@@ -16,24 +16,15 @@ def emit(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
-def merge_transcript(existing, incoming):
-    existing = " ".join(existing.split())
-    incoming = " ".join(incoming.split())
-    if not existing:
-        return incoming
-    if not incoming or existing == incoming or existing.endswith(incoming):
-        return existing
-    if incoming.startswith(existing):
-        return incoming
-
-    existing_words = existing.split()
-    incoming_words = incoming.split()
-    for count in range(min(len(existing_words), len(incoming_words)), 0, -1):
-        if existing_words[-count:] == incoming_words[:count]:
-            return " ".join(existing_words + incoming_words[count:])
-
-    separator = "" if incoming[0] in ".,!?;:)]}" else " "
-    return existing + separator + incoming
+def join_segments(segments):
+    transcript = ""
+    for segment in segments:
+        text = " ".join(segment["text"].split())
+        if not text:
+            continue
+        separator = "" if not transcript or text[0] in ".,!?;:)]}" else " "
+        transcript += separator + text
+    return transcript
 
 
 class VoiceHelper:
@@ -48,6 +39,7 @@ class VoiceHelper:
         self.finished = True
         self.stopping = False
         self.transcript = ""
+        self.segments = []
 
     def prepare(self):
         emit({"type": "state", "state": "loading"})
@@ -71,6 +63,7 @@ class VoiceHelper:
             self.finished = False
             self.stopping = False
             self.transcript = ""
+            self.segments = []
             audio_client = self.model.get_audio_client()
             self.session = audio_client.create_live_transcription_session()
             self.session.settings.sample_rate = RATE
@@ -112,15 +105,34 @@ class VoiceHelper:
                 text = result.content[0].text.strip() if result.content else ""
                 if text:
                     with self.lock:
-                        self.transcript = merge_transcript(self.transcript, text)
+                        segment_id = getattr(result, "id", None)
+                        start_time = getattr(result, "start_time", None)
+                        key = (
+                            ("id", segment_id)
+                            if segment_id is not None
+                            else ("start", start_time)
+                            if start_time is not None
+                            else None
+                        )
+                        replacement = None
+                        if key is not None:
+                            replacement = next(
+                                (
+                                    index
+                                    for index, segment in enumerate(self.segments)
+                                    if segment["key"] == key
+                                ),
+                                None,
+                            )
+                        segment = {"key": key, "text": text}
+                        if replacement is None:
+                            self.segments.append(segment)
+                        else:
+                            self.segments[replacement] = segment
+                        self.transcript = join_segments(self.segments)
                         transcript = self.transcript
                 else:
                     transcript = ""
-                if result.is_final and transcript:
-                    threading.Thread(
-                        target=lambda: self.finish("transcript", transcript), daemon=True
-                    ).start()
-                    return
                 if transcript:
                     emit({"type": "partial", "text": transcript})
             with self.lock:
