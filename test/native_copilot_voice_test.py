@@ -98,7 +98,7 @@ class VoiceHelperTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
-            helper.start(30_000)
+            helper.start()
             session.results.put(Result("final", segment_id="segment-1"))
             self.wait_for(events, "partial")
             helper.stop()
@@ -115,7 +115,7 @@ class VoiceHelperTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
-            helper.start(30_000)
+            helper.start()
             session.results.put(Result("this is", segment_id="segment-1"))
             self.wait_for(events, "partial")
             session.results.put(Result(" a", segment_id="segment-2"))
@@ -149,7 +149,7 @@ class VoiceHelperTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
-            helper.start(30_000)
+            helper.start()
             session.results.put(Result("very", segment_id="segment-1", start_time=0.0))
             self.wait_for(events, "partial")
             session.results.put(Result(" very", segment_id="segment-2", start_time=0.5))
@@ -174,7 +174,7 @@ class VoiceHelperTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
-            helper.start(30_000)
+            helper.start()
             session.results.put(Result("ag", segment_id="segment-1", start_time=0.0))
             self.wait_for(events, "partial")
             session.results.put(Result("ent", segment_id="segment-2", start_time=0.2))
@@ -201,7 +201,7 @@ class VoiceHelperTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
-            helper.start(30_000)
+            helper.start()
             session.results.put(Result("Testing the aud", segment_id="segment-1", start_time=0.0))
             self.wait_for(events, "partial")
             session.results.put(Result("io and my ag", segment_id="segment-2", start_time=0.5))
@@ -223,11 +223,32 @@ class VoiceHelperTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
-            helper.start(30_000)
+            helper.start()
             helper.finish("canceled")
             self.wait_for(events, "canceled")
 
         self.assertFalse(any(event["type"] == "transcript" for event in events))
+
+    def test_listening_continues_until_explicit_stop(self):
+        helper, session = self.helper(Result("explicit final", segment_id="final"))
+        events = []
+        stream = Stream()
+        sounddevice = types.SimpleNamespace(RawInputStream=lambda **_kwargs: stream)
+        with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
+            voice, "emit", events.append
+        ):
+            helper.start()
+            session.results.put(Result("still listening", segment_id="segment-1"))
+            self.wait_for(events, "partial")
+            time.sleep(0.05)
+
+            self.assertFalse(helper.finished)
+            self.assertFalse(any(event["type"] == "transcript" for event in events))
+
+            helper.stop()
+            final = self.wait_for(events, "transcript")
+
+        self.assertEqual(final["text"], "explicit final")
 
 
 if __name__ == "__main__":

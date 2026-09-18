@@ -261,7 +261,10 @@ function M.start(options, callback, status)
   end
   if options.provider == 'system' then
     if status then status({ type = 'state', state = 'listening' }) end
-    return start_system(options.listen_timeout_ms, callback)
+    return start_system(
+      options.system_listen_timeout_ms or options.listen_timeout_ms or 30000,
+      callback
+    )
   end
   if options.provider ~= 'nemotron' then
     callback({ kind = 'error', message = 'Unknown voice provider: ' .. tostring(options.provider) })
@@ -274,10 +277,7 @@ function M.start(options, callback, status)
     finish_active({ kind = 'error', message = message })
     return false
   end
-  local command = {
-    command = 'start',
-    timeout_ms = options.listen_timeout_ms,
-  }
+  local command = { command = 'start' }
   if helper.ready then
     send(command)
   else

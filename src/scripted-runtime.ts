@@ -284,8 +284,17 @@ export class ScriptedRuntime implements RuntimeAdapter {
     });
   }
 
-  private emitMessage(target: string, messageId: string, content: string): void {
-    this.emit("conversation.message", { messageId, content }, this.fields(target, true));
+  private emitMessage(
+    target: string,
+    messageId: string,
+    content: string,
+    responseId = messageId,
+  ): void {
+    this.emit(
+      "conversation.message",
+      { messageId, responseId, content },
+      this.fields(target, true),
+    );
   }
 
   private async taskDeferral(target: string): Promise<void> {
@@ -352,6 +361,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
     }, { memberId: target, target: "status", done: true });
     this.emit("conversation.delta", {
       messageId,
+      responseId: messageId,
       content:
         "I started the workspace validation in the background. While it runs, " +
         "I'll explain how the foreground response remains uninterrupted",
@@ -369,17 +379,19 @@ export class ScriptedRuntime implements RuntimeAdapter {
     await delay(30);
     this.emit("conversation.delta", {
       messageId,
+      responseId: messageId,
       content:
         ". Once the response is complete, the background result can appear " +
         "without splitting this message.",
     }, this.fields(target));
     this.emitMessage(
       target,
-      messageId,
+      `${messageId}-final`,
       "I started the workspace validation in the background. While it runs, " +
         "I'll explain how the foreground response remains uninterrupted. " +
         "Once the response is complete, the background result can appear " +
         "without splitting this message.",
+      messageId,
     );
     this.emitIdle(target);
   }

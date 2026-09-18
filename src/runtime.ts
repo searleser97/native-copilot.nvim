@@ -234,6 +234,7 @@ interface LiveSession {
   foregroundCompleteTurnId: string | undefined;
   foregroundTurnHasToolRequests: boolean;
   foregroundAbortSequence: number | undefined;
+  responseCorrelation: AssistantResponseCorrelation;
   sequence: number;
   taskRefresh: number;
   seenEventIds: Set<string>;
@@ -283,9 +284,64 @@ interface SessionContinuity {
   foregroundCompleteTurnId: string | undefined;
   foregroundTurnHasToolRequests: boolean;
   foregroundAbortSequence: number | undefined;
+  responseCorrelation: AssistantResponseSnapshot | undefined;
   sequence: number;
   idleCycle: number;
   mailboxDrainCycle: number;
+}
+
+export interface AssistantResponseSnapshot {
+  responseId: string;
+  turnId: string | undefined;
+}
+
+export interface AssistantResponseResolution {
+  responseId: string;
+  render: boolean;
+}
+
+export class AssistantResponseCorrelation {
+  private active: AssistantResponseSnapshot | undefined;
+
+  constructor(snapshot?: AssistantResponseSnapshot) {
+    this.active = snapshot ? { ...snapshot } : undefined;
+  }
+
+  delta(messageId: string, turnId: string | undefined): string {
+    if (!this.active || !this.matchesTurn(turnId)) {
+      this.active = { responseId: messageId, turnId };
+    }
+    return this.active.responseId;
+  }
+
+  message(
+    messageId: string,
+    turnId: string | undefined,
+    content: string,
+  ): AssistantResponseResolution {
+    const responseId = this.active && this.matchesTurn(turnId)
+      ? this.active.responseId
+      : messageId;
+    if (content === "") {
+      return { responseId, render: false };
+    }
+    this.active = undefined;
+    return { responseId, render: true };
+  }
+
+  reset(): void {
+    this.active = undefined;
+  }
+
+  snapshot(): AssistantResponseSnapshot | undefined {
+    return this.active ? { ...this.active } : undefined;
+  }
+
+  private matchesTurn(turnId: string | undefined): boolean {
+    return this.active?.turnId === undefined
+      || turnId === undefined
+      || this.active.turnId === turnId;
+  }
 }
 
 interface SessionConnectionOptions {
@@ -1814,6 +1870,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       foregroundCompleteTurnId: live.foregroundCompleteTurnId,
       foregroundTurnHasToolRequests: live.foregroundTurnHasToolRequests,
       foregroundAbortSequence: live.foregroundAbortSequence,
+      responseCorrelation: live.responseCorrelation.snapshot(),
       sequence: live.sequence,
       idleCycle: live.idleCycle,
       mailboxDrainCycle: live.mailboxDrainCycle,
@@ -4117,6 +4174,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         foregroundCompleteTurnId: continuity?.foregroundCompleteTurnId,
         foregroundTurnHasToolRequests: continuity?.foregroundTurnHasToolRequests ?? false,
         foregroundAbortSequence: continuity?.foregroundAbortSequence,
+        responseCorrelation: new AssistantResponseCorrelation(
+          continuity?.responseCorrelation,
+        ),
         sequence: continuity?.sequence ?? 0,
         taskRefresh: 0,
         seenEventIds: new Set(continuity?.seenEventIds ?? []),
@@ -4423,11 +4483,21 @@ export class CopilotRuntime implements RuntimeAdapter {
         });
         break;
       case "assistant.message_delta":
-        this.emit(
-          "conversation.delta",
-          { content: event.data.deltaContent, messageId: event.data.messageId },
-          { ...fields, target: "conversation", done: false },
-        );
+        {
+          const responseId = live.responseCorrelation.delta(
+            event.data.messageId,
+            live.foregroundTurnId,
+          );
+          this.emit(
+            "conversation.delta",
+            {
+              content: event.data.deltaContent,
+              messageId: event.data.messageId,
+              responseId,
+            },
+            { ...fields, target: "conversation", done: false },
+          );
+        }
         break;
       case "assistant.message":
         if (event.agentId === undefined) {
@@ -4441,11 +4511,21 @@ export class CopilotRuntime implements RuntimeAdapter {
             }
           }
         }
-        this.emit(
-          "conversation.message",
-          event.data,
-          { ...fields, target: "conversation", done: true },
-        );
+        {
+          const turnId = event.data.turnId ?? live.foregroundTurnId;
+          const resolution = live.responseCorrelation.message(
+            event.data.messageId,
+            turnId,
+            event.data.content,
+          );
+          if (resolution.render) {
+            this.emit(
+              "conversation.message",
+              { ...event.data, responseId: resolution.responseId },
+              { ...fields, target: "conversation", done: true },
+            );
+          }
+        }
         break;
       case "assistant.reasoning_delta":
         this.emit(
@@ -4483,6 +4563,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
         live.foregroundCompleteTurnId = undefined;
         live.foregroundTurnHasToolRequests = false;
+        live.responseCorrelation.reset();
         this.emit("member.state", { state: "busy", ...event.data }, { ...fields, target: "status" });
         break;
       case "assistant.turn_end":
@@ -4499,6 +4580,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         }
         {
           const foregroundComplete = live.foregroundCompleteTurnId === event.data.turnId;
+          live.responseCorrelation.reset();
           live.foregroundTurnId = undefined;
           live.foregroundCompleteTurnId = undefined;
           live.foregroundTurnHasToolRequests = false;
@@ -4529,6 +4611,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           live.foregroundCompleteTurnId = undefined;
           live.foregroundTurnHasToolRequests = false;
           live.foregroundAbortSequence = undefined;
+          live.responseCorrelation.reset();
           this.emit(
             "member.foreground_idle",
             { state: "idle", aborted: true },
@@ -4543,6 +4626,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         live.foregroundCompleteTurnId = undefined;
         live.foregroundTurnHasToolRequests = false;
         live.foregroundAbortSequence = undefined;
+        live.responseCorrelation.reset();
         live.idleCycle += 1;
         this.emit("member.state", { state: "idle", ...event.data }, { ...fields, target: "status" });
         if (

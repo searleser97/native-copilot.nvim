@@ -90,7 +90,7 @@ local defaults = {
   voice = {
     provider = 'nemotron',
     preload = true,
-    listen_timeout_ms = 30000,
+    system_listen_timeout_ms = 30000,
     python_command = 'python',
     foundry_version = '1.2.4',
     model = 'nemotron-speech-streaming-en-0.6b',
@@ -3534,12 +3534,16 @@ function M._on_event(message)
     -- The user turn is rendered immediately; writing starts only with the SDK turn-start event.
   elseif message.type == 'conversation.delta' then
     set_member_activity(member_id, 'Writing', true)
-    buffers.append_conversation_delta(member_id, payload.messageId or message.id, payload.content or '')
+    buffers.append_conversation_delta(
+      member_id,
+      payload.responseId or payload.messageId or message.id,
+      payload.content or ''
+    )
   elseif message.type == 'conversation.message' then
     set_member_activity(member_id, 'Writing', true)
     buffers.complete_conversation(
       member_id,
-      payload.messageId or message.id,
+      payload.responseId or payload.messageId or message.id,
       payload.content or ''
     )
   elseif message.type == 'activity.delta' then

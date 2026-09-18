@@ -31,7 +31,6 @@ class VoiceHelper:
         self.lock = threading.Lock()
         self.session = None
         self.stream = None
-        self.timer = None
         self.finished = True
         self.stopping = False
         self.transcript = ""
@@ -50,7 +49,7 @@ class VoiceHelper:
         self.model.load()
         emit({"type": "state", "state": "ready"})
 
-    def start(self, timeout_ms):
+    def start(self):
         import sounddevice
 
         with self.lock:
@@ -87,9 +86,6 @@ class VoiceHelper:
                 callback=capture,
             )
             self.stream.start()
-            self.timer = threading.Timer(timeout_ms / 1000, self.stop)
-            self.timer.daemon = True
-            self.timer.start()
             threading.Thread(target=self.read_results, daemon=True).start()
         emit({"type": "state", "state": "listening"})
 
@@ -147,10 +143,8 @@ class VoiceHelper:
             if self.finished or self.stopping:
                 return
             self.stopping = True
-            timer, stream, session = self.timer, self.stream, self.session
-            self.timer = self.stream = None
-        if timer:
-            timer.cancel()
+            stream, session = self.stream, self.session
+            self.stream = None
         if stream:
             stream.stop()
             stream.close()
@@ -163,10 +157,8 @@ class VoiceHelper:
                 return
             self.finished = True
             self.stopping = False
-            timer, stream, session = self.timer, self.stream, self.session
-            self.timer = self.stream = self.session = None
-        if timer:
-            timer.cancel()
+            stream, session = self.stream, self.session
+            self.stream = self.session = None
         if stream:
             stream.stop()
             stream.close()
@@ -187,7 +179,7 @@ class VoiceHelper:
             name = command.get("command")
             try:
                 if name == "start":
-                    self.start(int(command.get("timeout_ms", 30000)))
+                    self.start()
                 elif name == "stop":
                     self.stop()
                 elif name == "cancel":

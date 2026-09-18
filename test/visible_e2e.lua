@@ -271,26 +271,6 @@ local function reasoning_highlight_recovers_after_extmark_loss()
   return recovered
 end
 
-local function final_message_reconciles_stream_with_changed_id()
-  local member_id = 'message-reconciliation-probe'
-  local entry = buffers.ensure_member(member_id, 'Message reconciliation probe')
-  local content = 'Streaming commentary before a background tool.'
-  buffers.begin_response(member_id, 'probe-response')
-  buffers.append_conversation_delta(member_id, 'stream-message', content)
-  buffers.upsert_timeline(member_id, 'probe-tool', {
-    kind = 'tool',
-    label = 'powershell',
-    status = 'completed',
-    detail = 'background completion',
-    copilot_owned = true,
-  })
-  buffers.complete_conversation(member_id, 'final-message', content)
-  local rendered = text(entry.views.conversation.buf)
-  local _, count = rendered:gsub(content:gsub('([^%w])', '%%%1'), '')
-  buffers.remove_member(member_id)
-  return count == 1
-end
-
 local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
   buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
@@ -713,12 +693,6 @@ tick = function()
     ) then
       return
     end
-    if not check(
-      final_message_reconciles_stream_with_changed_id(),
-      'final message reconciled streamed commentary after an SDK message ID change'
-    ) then
-      return
-    end
     if not timeline_recovery_checked then
       timeline_recovery_checked = true
       if not check(
@@ -1014,6 +988,18 @@ tick = function()
       return
     end
     if not check(stream_begin < stream_end and stream_end < task_complete, 'task completion deferred after reply') then
+      return
+    end
+    if not check(
+      select(
+        2,
+        content:gsub(
+          vim.pesc('I started the workspace validation in the background.'),
+          ''
+        )
+      ) == 1,
+      'logical response identity reconciled changed SDK message IDs'
+    ) then
       return
     end
     if not check(
