@@ -2781,6 +2781,72 @@ export class AgentDatabase {
     return [...bySession.keys()];
   }
 
+  /**
+   * Releases an inactive managed session so the primary can explicitly resume it.
+   * Cross-workspace and active sessions remain non-transferable.
+   */
+  releaseSession(sessionId: string, workspace: string): string[] {
+    return this.transaction(() => {
+      const rows = this.sessionOwnershipRows(sessionId);
+      if (rows.length === 0) {
+        return [];
+      }
+      if (rows.some((row) => row.workspace !== workspace)) {
+        throw new Error(
+          `SDK session "${sessionId}" is not transferable history for workspace ` +
+            `"${workspace}".`,
+        );
+      }
+      const runIds = [...new Set(rows.map((row) => row.runId))];
+      const placeholders = runIds.map(() => "?").join(", ");
+      const released = this.db
+        .prepare(
+          `UPDATE runs
+           SET recovery_eligible = 0
+           WHERE id IN (${placeholders}) AND mode = 'agent'
+             AND workspace = ? AND status != 'active'`,
+        )
+        .run(...runIds, workspace);
+      if (released.changes !== runIds.length) {
+        throw new Error(
+          `SDK session "${sessionId}" could not be released from its historical runs.`,
+        );
+      }
+      return runIds;
+    });
+  }
+
+  restoreSessionOwnership(
+    sessionId: string,
+    workspace: string,
+    runIds: readonly string[],
+  ): void {
+    if (runIds.length === 0) {
+      return;
+    }
+    this.transaction(() => {
+      const placeholders = runIds.map(() => "?").join(", ");
+      const restored = this.db
+        .prepare(
+          `UPDATE runs
+           SET recovery_eligible = 1
+           WHERE id IN (${placeholders}) AND mode = 'agent'
+             AND workspace = ? AND status != 'active' AND startup_state = 'ready'
+             AND EXISTS (
+               SELECT 1 FROM agent_sessions
+               WHERE agent_sessions.run_id = runs.id
+                 AND agent_sessions.session_id = ?
+             )`,
+        )
+        .run(...runIds, workspace, sessionId);
+      if (restored.changes !== runIds.length) {
+        throw new Error(
+          `SDK session "${sessionId}" could not restore its historical ownership.`,
+        );
+      }
+    });
+  }
+
   private ownerPidIsAlive(pid: number, ownerIsAlive: OwnerIsAlive): boolean {
     try {
       return ownerIsAlive(pid);

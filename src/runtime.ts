@@ -1661,20 +1661,13 @@ export class CopilotRuntime implements RuntimeAdapter {
     Array<SessionMetadata & { inUse: boolean; modifiedAgoSeconds: number }>
   > {
     const client = await this.ensureClient();
-    const activeSessionIds = new Set([...this.live.values()].map((live) => live.session.sessionId));
-    const ownedSessionIds = new Set(this.db.ownedSessionIds());
     const listed = await client.rpc.sessions.list({
       source: "local",
       metadataLimit: 0,
       filter: { cwd: this.workspace },
     });
     const resumable = listed.sessions
-      .filter((session) => session.isRemote === false)
-      .filter(
-        (session) =>
-          !activeSessionIds.has(session.sessionId) &&
-          !ownedSessionIds.has(session.sessionId),
-      );
+      .filter((session) => session.isRemote === false);
     const enriched = resumable.length === 0
       ? []
       : (await client.rpc.sessions.enrichMetadata({ sessions: resumable })).sessions;
@@ -4945,24 +4938,8 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (!available.some((session) => session.sessionId === sessionId)) {
       throw new Error(`Session "${sessionId}" was not found for this workspace.`);
     }
-    const currentPrimary =
-      this.primaryAgentId === undefined
-        ? undefined
-        : this.agents.get(this.primaryAgentId);
-    const resumablePrimary =
-      currentPrimary === undefined
-        ? this.db.resumablePrimaryRun(this.workspace)
-        : undefined;
-    const intendedPrimaryAgentId = currentPrimary?.agentId ?? resumablePrimary?.agentId;
     const owner = this.db.sessionOwner(sessionId);
-    if (
-      owner &&
-      (
-        intendedPrimaryAgentId === undefined ||
-        owner.agentId !== intendedPrimaryAgentId ||
-        owner.workspace !== this.workspace
-      )
-    ) {
+    if (owner && owner.workspace !== this.workspace) {
       throw new Error(
         `Session "${sessionId}" belongs to durable agent "${owner.agentId}" in workspace ` +
           `"${owner.workspace}" and cannot be selected for this primary agent.`,
@@ -5017,6 +4994,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       let resumeMailbox = false;
       let newRunCreated = false;
       let replacementActivated = false;
+      let releasedOwnerRunIds: string[] = [];
       try {
         if (claimedContext) {
           this.emitAgentLifecycle("agent.loading", primaryContext, { recovered: true });
@@ -5044,6 +5022,9 @@ export class CopilotRuntime implements RuntimeAdapter {
             oldLive,
             "Previous primary SDK session disconnect failed during replacement",
           );
+        }
+        if (owner && owner.agentId !== primaryContext.agentId) {
+          releasedOwnerRunIds = this.db.releaseSession(sessionId, this.workspace);
         }
         primaryContext.runId = runId;
         this.db.createAgentRun(
@@ -5126,6 +5107,13 @@ export class CopilotRuntime implements RuntimeAdapter {
               );
             }
             durableRollbackCompleted = true;
+          }
+          if (releasedOwnerRunIds.length > 0) {
+            this.db.restoreSessionOwnership(
+              sessionId,
+              this.workspace,
+              releasedOwnerRunIds,
+            );
           }
           if (oldSessionId === undefined) {
             throw new Error(

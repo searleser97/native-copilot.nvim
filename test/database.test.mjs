@@ -488,6 +488,74 @@ test("latest inactive primary is selected while another host is active", (t) => 
   db.close();
 });
 
+test("managed primary and worker sessions can transfer for explicit resume", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, () => false);
+
+  db.createAgentRun(
+    "historical-primary",
+    "historical-primary-agent",
+    "copilot",
+    storedDefinition("copilot"),
+    "workspace",
+    7401,
+    true,
+  );
+  db.upsertSession("historical-primary", "historical-primary-session", "connected");
+  db.completePrimaryStartup(
+    "historical-primary",
+    "workspace",
+    "historical-primary-agent",
+    "agent:historical-primary-agent",
+  );
+  db.finishRun("historical-primary", "interrupted", "Host exited");
+
+  db.createAgentRun(
+    "worker-run",
+    "worker-agent",
+    "worker",
+    storedDefinition("worker"),
+    "workspace",
+    7402,
+  );
+  db.upsertSession("worker-run", "worker-session", "connected");
+  db.db.prepare(
+    `INSERT INTO messages(
+       id, run_id, source, target, kind, content, status, sequence, created_at, updated_at
+     ) VALUES (
+       'worker-initial-task', 'worker-run', 'user', 'agent:worker-agent', 'user',
+       'Implement the task', 'delivered', 1,
+       '2026-09-18T00:00:00.000Z', '2026-09-18T00:00:00.000Z'
+     )`,
+  ).run();
+  db.completeRunStartup("worker-run");
+  db.finishRun("worker-run", "interrupted", "Host exited");
+
+  assert.deepEqual(
+    new Set(db.ownedSessionIds("workspace")),
+    new Set(["historical-primary-session", "worker-session"]),
+  );
+
+  let released = db.releaseSession("historical-primary-session", "workspace");
+  assert.deepEqual(released, ["historical-primary"]);
+  assert.equal(db.sessionOwner("historical-primary-session"), undefined);
+  db.restoreSessionOwnership(
+    "historical-primary-session",
+    "workspace",
+    released,
+  );
+  assert.equal(
+    db.sessionOwner("historical-primary-session")?.agentId,
+    "historical-primary-agent",
+  );
+  released = db.releaseSession("worker-session", "workspace");
+  assert.deepEqual(released, ["worker-run"]);
+  assert.equal(db.sessionOwner("worker-session"), undefined);
+  db.restoreSessionOwnership("worker-session", "workspace", released);
+  assert.equal(db.sessionOwner("worker-session")?.agentId, "worker-agent");
+  db.close();
+});
+
 test("dead claim on a resumable primary releases a sessionless successor", (t) => {
   const path = databasePath(t);
   const db = new AgentDatabase(path, () => false);
