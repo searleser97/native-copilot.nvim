@@ -3829,21 +3829,10 @@ export class AgentDatabase {
                  )
                )
              )
-           ORDER BY started_at DESC, id DESC`,
+             ORDER BY started_at DESC, id DESC
+             LIMIT 1`,
           workspace,
         );
-        const predecessorAgentIds = new Set(
-          predecessorRuns.map((run) => run.agentId),
-        );
-        if (predecessorAgentIds.size > 1) {
-          const details = predecessorRuns
-            .map((run) => `"${run.id}" / agent "${run.agentId}"`)
-            .join(", ");
-          throw new Error(
-            `Workspace "${workspace}" has multiple claimable primary identities (${details}); ` +
-              "the claim is ambiguous.",
-          );
-        }
         const predecessor = predecessorRuns[0];
         const reservedWorkerAliases = new Set(
           (
@@ -4509,6 +4498,7 @@ export class AgentDatabase {
          AND id = (
            SELECT id FROM runs AS latest
            WHERE latest.workspace = ? AND latest.mode = 'agent' AND latest.is_primary = 1
+             AND latest.status != 'active'
              AND latest.recovery_eligible = 1
              AND latest.startup_state = 'ready'
              AND EXISTS (

@@ -435,6 +435,59 @@ test("ready primary identity starts a fresh successor conversation", (t) => {
   db.close();
 });
 
+test("latest inactive primary is selected while another host is active", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, (pid) => pid === 7303);
+
+  const createReadyPrimary = (runId, agentId, ownerPid) => {
+    db.createAgentRun(
+      runId,
+      agentId,
+      "copilot",
+      storedDefinition("copilot"),
+      "workspace",
+      ownerPid,
+      true,
+    );
+    db.upsertSession(runId, `${runId}-session`, "connected");
+    db.completePrimaryStartup(runId, "workspace", agentId, `agent:${agentId}`);
+  };
+
+  createReadyPrimary("older-inactive-primary", "older-agent", 7301);
+  db.finishRun("older-inactive-primary", "interrupted", "Older host exited");
+  createReadyPrimary("latest-inactive-primary", "latest-agent", 7302);
+  db.finishRun("latest-inactive-primary", "interrupted", "Latest host exited");
+  createReadyPrimary("active-primary", "active-agent", 7303);
+  db.db.exec(`
+    UPDATE runs SET started_at = '2026-09-18T01:00:00.000Z'
+      WHERE id = 'older-inactive-primary';
+    UPDATE runs SET started_at = '2026-09-18T02:00:00.000Z'
+      WHERE id = 'latest-inactive-primary';
+    UPDATE runs SET started_at = '2026-09-18T03:00:00.000Z'
+      WHERE id = 'active-primary';
+  `);
+
+  const resumable = db.resumablePrimaryRun("workspace");
+  assert.ok(resumable);
+  assert.equal(resumable.id, "latest-inactive-primary");
+  assert.equal(resumable.agentId, "latest-agent");
+
+  const claimed = db.claimPrimaryRun(
+    "successor-primary",
+    "unused-fresh-agent",
+    "workspace",
+    7304,
+    claimedDefinition,
+  );
+  assert.equal(claimed.run.agentId, "latest-agent");
+  assert.equal(claimed.run.alias, "copilot");
+  assert.deepEqual(claimed.claim, {
+    predecessorRunId: "latest-inactive-primary",
+    token: claimed.run.primaryClaimToken,
+  });
+  db.close();
+});
+
 test("dead claim on a resumable primary releases a sessionless successor", (t) => {
   const path = databasePath(t);
   const db = new AgentDatabase(path, () => false);
