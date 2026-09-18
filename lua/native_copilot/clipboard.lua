@@ -78,6 +78,20 @@ function M.mark_position(buf, row, column)
   })
 end
 
+function M.preview_at_mark(buf, mark, text)
+  if not vim.api.nvim_buf_is_valid(buf) then return false end
+  local position = vim.api.nvim_buf_get_extmark_by_id(buf, namespace, mark, {})
+  if #position ~= 2 then return false end
+  text = vim.trim((text or ''):gsub('[\r\n]+', ' '))
+  vim.api.nvim_buf_set_extmark(buf, namespace, position[1], position[2], {
+    id = mark,
+    right_gravity = false,
+    virt_text = text == '' and {} or { { text, 'Comment' } },
+    virt_text_pos = 'inline',
+  })
+  return true
+end
+
 function M.insert_at_mark(buf, mark, text)
   if not vim.api.nvim_buf_is_valid(buf) then return false end
   local position = vim.api.nvim_buf_get_extmark_by_id(buf, namespace, mark, {})

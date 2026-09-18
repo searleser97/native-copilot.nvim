@@ -89,6 +89,7 @@ local defaults = {
   },
   voice = {
     provider = 'nemotron',
+    preload = true,
     listen_timeout_ms = 30000,
     python_command = 'python',
     foundry_version = '1.2.4',
@@ -339,14 +340,29 @@ function M.dictate_voice()
       notify(result.message, vim.log.levels.ERROR)
     end
   end, function(event)
-    if event.state == 'loading' then
+    if event.type == 'partial' then
+      clipboard.preview_at_mark(state.prompt_buf, mark, event.text)
+    elseif event.state == 'loading' then
       notify('Loading the local Nemotron speech model…')
+    elseif event.state == 'listening' then
+      notify('Listening for voice dictation; press <C-g>v again to cancel.')
+    elseif event.state == 'audio_warning' then
+      notify(event.message or 'The microphone reported an audio warning.', vim.log.levels.WARN)
     end
   end)
-  if started then
-    notify('Listening for voice dictation; press <C-g>v again to cancel.')
-  end
   return started
+end
+
+local function prewarm_voice()
+  if not options.voice.preload then return end
+  local ok, message = voice.warmup(options.voice, function(event)
+    if event.type == 'error' then
+      notify(event.message or 'Could not preload Nemotron voice dictation.', vim.log.levels.ERROR)
+    end
+  end)
+  if not ok and not (message or ''):find('not prepared', 1, true) then
+    notify(message or 'Could not preload Nemotron voice dictation.', vim.log.levels.ERROR)
+  end
 end
 
 function M.setup_voice()
@@ -355,6 +371,7 @@ function M.setup_voice()
   end, function(ok, message)
     if ok then
       notify('Nemotron voice dictation is ready.')
+      prewarm_voice()
     else
       notify(message, vim.log.levels.ERROR)
     end
@@ -1846,6 +1863,7 @@ end
 local function ensure_ui(reuse_current_tab)
   if is_ui_open() then
     vim.api.nvim_set_current_tabpage(state.tab)
+    prewarm_voice()
     return
   end
   if not reuse_current_tab then vim.cmd('tabnew') end
@@ -1895,6 +1913,7 @@ local function ensure_ui(reuse_current_tab)
   update_prompt_label()
   refresh_prompt_queue()
   vim.api.nvim_set_current_win(state.prompt_win)
+  prewarm_voice()
 end
 
 local function start_host()

@@ -95,6 +95,7 @@ native.setup({
   database_path = database_path,
   runtime_command_resolver = nil,
   frontend = { completion = 'native', picker = 'native' },
+  voice = { preload = false },
 })
 native.open({ reuse_current_tab = true })
 
@@ -813,6 +814,28 @@ tick = function()
     local image_reference = require('native_copilot.clipboard').image_reference(
       'C:\\Users\\example\\Downloads\\clipboard.png'
     )
+    local clipboard = require('native_copilot.clipboard')
+    local preview_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, { 'voice: ' })
+    local preview_mark = clipboard.mark_position(preview_buf, 0, 7)
+    local preview_added = clipboard.preview_at_mark(preview_buf, preview_mark, 'draft transcript')
+    local preview_visible = false
+    for _, extmark in ipairs(vim.api.nvim_buf_get_extmarks(
+      preview_buf,
+      -1,
+      { 0, 0 },
+      { -1, -1 },
+      { details = true }
+    )) do
+      local details = extmark[4] or {}
+      preview_visible = preview_visible
+        or details.virt_text
+          and details.virt_text[1]
+          and details.virt_text[1][1] == 'draft transcript'
+    end
+    local preview_finalized = clipboard.insert_at_mark(preview_buf, preview_mark, 'final transcript')
+      and text(preview_buf) == 'voice: final transcript'
+    vim.api.nvim_buf_delete(preview_buf, { force = true })
     if not check(
       normal_target == 'agent:e2e-recipient-cycle-planner'
         and public_api_target == 'agent:e2e-recipient-cycle-reviewer'
@@ -822,6 +845,9 @@ tick = function()
         and clipboard_mappings
         and voice_mappings
         and voice_setup_command
+        and preview_added
+        and preview_visible
+        and preview_finalized
         and image_reference
           == '@image("C:\\Users\\example\\Downloads\\clipboard.png")',
       'prompt mappings support recipients, clipboard images, and voice dictation'

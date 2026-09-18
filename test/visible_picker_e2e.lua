@@ -107,6 +107,7 @@ native._on_event = function(message)
   return on_event(message)
 end
 native.setup({
+  voice = { preload = false },
   workspace = root,
   database_path = database_path,
   runtime_command_resolver = nil,

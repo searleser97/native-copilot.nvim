@@ -38,6 +38,15 @@ local function send(command)
   return true
 end
 
+local function report_active(event)
+  if not active or not active.status then return end
+  if event.type == 'state' then
+    if active.last_state == event.state then return end
+    active.last_state = event.state
+  end
+  active.status(event)
+end
+
 local function handle_event(event)
   if event.type == 'state' then
     helper.ready = event.state == 'ready' or helper.ready
@@ -46,11 +55,12 @@ local function handle_event(event)
       helper.pending_start = nil
       send(pending)
     end
-    if active and active.status then active.status(event) end
+    if helper.observer then helper.observer(event) end
+    report_active(event)
     return
   end
   if event.type == 'partial' then
-    if active and active.status then active.status(event) end
+    report_active(event)
     return
   end
   if event.type == 'transcript' then
@@ -60,7 +70,13 @@ local function handle_event(event)
   elseif event.type == 'canceled' then
     finish_active({ kind = 'canceled' })
   elseif event.type == 'error' then
-    finish_active({ kind = 'error', message = event.message or 'Voice dictation failed.' })
+    local observer = helper and helper.observer or nil
+    if helper then helper.observer = nil end
+    if active then
+      finish_active({ kind = 'error', message = event.message or 'Voice dictation failed.' })
+    elseif observer then
+      observer(event)
+    end
   end
 end
 
@@ -87,7 +103,7 @@ local function stop_helper()
   end
 end
 
-local function ensure_helper(options, status)
+local function ensure_helper(options)
   if helper and helper.job > 0 then return true end
   local python = venv_python(options)
   if vim.fn.executable(python) ~= 1 then
@@ -103,6 +119,7 @@ local function ensure_helper(options, status)
     ready = false,
     pending_start = nil,
     partial = '',
+    observer = nil,
   }
   state.job = vim.fn.jobstart({
     python,
@@ -133,13 +150,18 @@ local function ensure_helper(options, status)
             message = state.stderr
               or ('Nemotron voice helper exited unexpectedly (code %d).'):format(code),
           })
+        elseif state.observer then
+          state.observer({
+            type = 'error',
+            message = state.stderr
+              or ('Nemotron voice helper exited unexpectedly (code %d).'):format(code),
+          })
         end
       end)
     end,
   })
   if state.job <= 0 then return false, 'Could not start the Nemotron voice helper.' end
   helper = state
-  if status then status({ type = 'state', state = 'loading' }) end
   return true
 end
 
@@ -217,6 +239,7 @@ function M.start(options, callback, status)
     return false
   end
   if options.provider == 'system' then
+    if status then status({ type = 'state', state = 'listening' }) end
     return start_system(options.listen_timeout_ms, callback)
   end
   if options.provider ~= 'nemotron' then
@@ -225,7 +248,7 @@ function M.start(options, callback, status)
   end
 
   active = { callback = callback, status = status }
-  local ok, message = ensure_helper(options, status)
+  local ok, message = ensure_helper(options)
   if not ok then
     finish_active({ kind = 'error', message = message })
     return false
@@ -238,6 +261,24 @@ function M.start(options, callback, status)
     send(command)
   else
     helper.pending_start = command
+    report_active({ type = 'state', state = 'loading' })
+  end
+  return true
+end
+
+function M.warmup(options, observer)
+  if options.provider ~= 'nemotron' then return true end
+  if vim.fn.has('win32') ~= 1 then
+    return false, 'Nemotron voice dictation currently requires Windows.'
+  end
+  local ok, message = ensure_helper(options)
+  if not ok then return false, message end
+  helper.observer = observer
+  if observer then
+    observer({
+      type = 'state',
+      state = helper.ready and 'ready' or 'loading',
+    })
   end
   return true
 end
