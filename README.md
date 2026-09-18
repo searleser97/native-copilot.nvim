@@ -202,7 +202,8 @@ a persistent helper between dictation sessions. Nemotron keeps listening until y
 it. Partial recognition appears as temporary inline text while speaking, then the finalized
 transcript replaces it with editable prompt text at the cursor position where dictation started.
 Press `<C-g>v` again while listening to stop recording and commit the final transcript. Audio and
-transcription remain on the machine.
+transcription remain on the machine. The prompt winbar also provides a clickable voice control
+whose label shows whether dictation is idle, loading, listening, or finalizing.
 
 Set `voice.provider = "system"` to explicitly use the legacy Windows `System.Speech` recognizer
 without installing Nemotron. Native Copilot does not silently fall back when the configured

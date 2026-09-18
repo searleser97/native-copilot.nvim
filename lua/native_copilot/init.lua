@@ -125,6 +125,7 @@ local state = {
   loading_generation = 0,
   loading_step = 1,
   loading_target = nil,
+  voice_status = 'idle',
   selected = nil,
   primary_target = nil,
   primary_agent_id = nil,
@@ -157,6 +158,13 @@ local state = {
   resume_cursor_animation_restore = nil,
   session_replacing = nil,
 }
+
+local update_prompt_label
+
+local function set_voice_status(status)
+  state.voice_status = status
+  if update_prompt_label then update_prompt_label() end
+end
 
 local function update_conversation_label(member_id)
   local entry = buffers.get_member(member_id)
@@ -305,8 +313,16 @@ function M.paste_clipboard()
 end
 
 function M.dictate_voice()
+  if state.voice_status == 'finalizing' then
+    notify('Voice dictation is already being finalized.')
+    return false
+  end
   if voice.is_listening() then
-    voice.stop()
+    set_voice_status('finalizing')
+    if not voice.stop() then
+      set_voice_status('idle')
+      return false
+    end
     notify('Finalizing voice dictation…')
     return true
   end
@@ -324,7 +340,9 @@ function M.dictate_voice()
 
   local row, column = unpack(vim.api.nvim_win_get_cursor(0))
   local mark = clipboard.mark_position(state.prompt_buf, row - 1, column)
+  set_voice_status('starting')
   local started = voice.start(options.voice, function(result)
+    set_voice_status('idle')
     if result.kind == 'transcript' then
       clipboard.insert_at_mark(state.prompt_buf, mark, result.text .. ' ')
     elseif result.kind == 'no_speech' then
@@ -343,14 +361,21 @@ function M.dictate_voice()
     if event.type == 'partial' then
       clipboard.preview_at_mark(state.prompt_buf, mark, event.text)
     elseif event.state == 'loading' then
+      set_voice_status('loading')
       notify('Loading the local Nemotron speech model…')
     elseif event.state == 'listening' then
+      set_voice_status('listening')
       notify('Listening for voice dictation; press <C-g>v again to finish.')
     elseif event.state == 'audio_warning' then
       notify(event.message or 'The microphone reported an audio warning.', vim.log.levels.WARN)
     end
   end)
+  if not started then set_voice_status('idle') end
   return started
+end
+
+_G.NativeCopilotPromptVoiceToggle = function()
+  vim.schedule(M.dictate_voice)
 end
 
 local function prewarm_voice()
@@ -378,15 +403,29 @@ function M.setup_voice()
   end)
 end
 
-local function update_prompt_label()
+update_prompt_label = function()
   if not state.prompt_win or not vim.api.nvim_win_is_valid(state.prompt_win) then return end
   local entry = buffers.get_member(state.selected)
   local target = entry and entry.display_name or state.selected or 'Copilot (starting…)'
+  local voice_control
+  if state.voice_status == 'finalizing' then
+    voice_control = '[Voice: Finalizing…]'
+  else
+    local voice_label = ({
+      idle = 'Start voice',
+      starting = 'Cancel voice · Starting…',
+      loading = 'Cancel voice · Loading…',
+      listening = 'Stop voice · Listening',
+    })[state.voice_status] or 'Start voice'
+    voice_control =
+      '%@v:lua.NativeCopilotPromptVoiceToggle@[' .. voice_label .. ']%X'
+  end
   if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
     vim.b[state.prompt_buf].native_copilot_target = state.selected
   end
   vim.wo[state.prompt_win].winbar =
-    (' To: %s  |  <Enter> send  |  / commands  |  <Tab> complete '):format(target)
+    (' To: %s  |  %s  |  <Enter> send  |  / commands  |  <Tab> complete ')
+      :format(target, voice_control)
   if options.frontend.completion == 'blink' and M.ensure_commands and state.selected then
     if not commands.catalog(state.selected) then
       commands.set_catalog(state.selected, client_commands())

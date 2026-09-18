@@ -271,6 +271,77 @@ local function reasoning_highlight_recovers_after_extmark_loss()
   return recovered
 end
 
+local function prompt_voice_status_follows_lifecycle()
+  local prompt_buf = prompt()
+  local prompt_win = prompt_buf and vim.fn.win_findbuf(prompt_buf)[1]
+  if not prompt_win then return false end
+  local voice = require('native_copilot.voice')
+  local original_is_listening = voice.is_listening
+  local original_start = voice.start
+  local original_stop = voice.stop
+  local original_notify = vim.notify
+  local current_win = vim.api.nvim_get_current_win()
+  local listening = false
+  local complete
+  local loading_label
+  local listening_label
+  local finalizing_label
+  local idle_label
+  local started_value
+  local stopped_value
+  local listening_before_stop
+
+  local ok, result = xpcall(function()
+    vim.notify = function() end
+    voice.is_listening = function() return listening end
+    voice.start = function(_, callback, status)
+      listening = true
+      complete = callback
+      status({ type = 'state', state = 'loading' })
+      loading_label = vim.wo[prompt_win].winbar
+      status({ type = 'state', state = 'listening' })
+      listening_label = vim.wo[prompt_win].winbar
+      return true
+    end
+    voice.stop = function()
+      listening = false
+      return true
+    end
+
+    vim.api.nvim_set_current_win(prompt_win)
+    started_value = native.dictate_voice()
+    listening_before_stop = voice.is_listening()
+    stopped_value = native.dictate_voice()
+    finalizing_label = vim.wo[prompt_win].winbar
+    complete({ kind = 'no_speech' })
+    idle_label = vim.wo[prompt_win].winbar
+    return started_value
+      and stopped_value
+      and loading_label:find('[Cancel voice · Loading…]', 1, true) ~= nil
+      and listening_label:find('[Stop voice · Listening]', 1, true) ~= nil
+      and finalizing_label:find('[Voice: Finalizing…]', 1, true) ~= nil
+      and not finalizing_label:find('NativeCopilotPromptVoiceToggle', 1, true)
+      and idle_label:find('[Start voice]', 1, true) ~= nil
+      and idle_label:find('NativeCopilotPromptVoiceToggle', 1, true) ~= nil
+  end, debug.traceback)
+
+  voice.is_listening = original_is_listening
+  voice.start = original_start
+  voice.stop = original_stop
+  vim.notify = original_notify
+  if vim.api.nvim_win_is_valid(current_win) then vim.api.nvim_set_current_win(current_win) end
+  return ok and result == true, table.concat({
+    'loading=' .. tostring(loading_label),
+    'listening=' .. tostring(listening_label),
+    'finalizing=' .. tostring(finalizing_label),
+    'idle=' .. tostring(idle_label),
+    'started=' .. tostring(started_value),
+    'listeningBeforeStop=' .. tostring(listening_before_stop),
+    'stopped=' .. tostring(stopped_value),
+    'error=' .. (ok and 'none' or tostring(result)),
+  }, '; ')
+end
+
 local function timeline_recovers_without_anchor_extmark(buf)
   local started_at = os.time()
   buffers.upsert_timeline(primary_target, 'e2e-timeline-recovery', {
@@ -769,6 +840,13 @@ tick = function()
       return
     end
     local prompt_buf = assert(prompt(), 'prompt buffer was not found')
+    local voice_status_ok, voice_status_detail = prompt_voice_status_follows_lifecycle()
+    if not check(
+      voice_status_ok,
+      'prompt header follows the voice listening lifecycle: ' .. voice_status_detail
+    ) then
+      return
+    end
     local draft = 'Keep this draft while changing recipients.'
     vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { draft })
     native._on_event({
