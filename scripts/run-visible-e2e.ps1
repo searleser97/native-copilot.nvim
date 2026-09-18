@@ -4,8 +4,7 @@ param(
         'allow-all',
         'allow-all-mcp',
         'manual-permissions',
-        'telescope',
-        'telescope-no-smear'
+        'telescope'
     )]
     [string]$Profile = 'all',
     [switch]$Observe
@@ -18,7 +17,7 @@ if ($Observe -and $Profile -eq 'all') {
 $root = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $root '.e2e-artifacts'
 $profiles = if ($Profile -eq 'all') {
-    @('allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope', 'telescope-no-smear')
+    @('allow-all', 'allow-all-mcp', 'manual-permissions', 'telescope')
 } else {
     @($Profile)
 }
