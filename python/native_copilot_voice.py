@@ -17,14 +17,10 @@ def emit(event):
 
 
 def join_segments(segments):
-    transcript = ""
-    for segment in segments:
-        text = " ".join(segment["text"].split())
-        if not text:
-            continue
-        separator = "" if not transcript or text[0] in ".,!?;:)]}" else " "
-        transcript += separator + text
-    return transcript
+    return " ".join(
+        "".join(segment["text"].replace("\r", " ").replace("\n", " ") for segment in segments)
+        .split()
+    )
 
 
 class VoiceHelper:
@@ -100,11 +96,15 @@ class VoiceHelper:
     def read_results(self):
         with self.lock:
             session = self.session
+        stop_result = ""
         try:
             for result in session.get_stream():
-                text = result.content[0].text.strip() if result.content else ""
-                if text:
+                text = result.content[0].text if result.content else ""
+                if text.strip():
                     with self.lock:
+                        if self.stopping:
+                            stop_result = text.strip()
+                            continue
                         segment_id = getattr(result, "id", None)
                         start_time = getattr(result, "start_time", None)
                         key = (
@@ -136,7 +136,7 @@ class VoiceHelper:
                 if transcript:
                     emit({"type": "partial", "text": transcript})
             with self.lock:
-                text = self.transcript
+                text = stop_result or self.transcript
             self.finish("transcript" if text else "no_speech", text or None)
         except Exception as error:
             if not self.finished:

@@ -109,7 +109,7 @@ class VoiceHelperTest(unittest.TestCase):
         self.assertTrue(helper.finished)
 
     def test_partial_segments_accumulate_without_duplicating_revisions(self):
-        helper, session = self.helper(Result("test", segment_id="segment-3"))
+        helper, session = self.helper(Result("this was a test", segment_id="stop-result"))
         events = []
         sounddevice = types.SimpleNamespace(RawInputStream=lambda **_kwargs: Stream())
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
@@ -118,7 +118,7 @@ class VoiceHelperTest(unittest.TestCase):
             helper.start(30_000)
             session.results.put(Result("this is", segment_id="segment-1"))
             self.wait_for(events, "partial")
-            session.results.put(Result("a", segment_id="segment-2"))
+            session.results.put(Result(" a", segment_id="segment-2"))
             deadline = time.monotonic() + 1
             while time.monotonic() < deadline:
                 partials = [event for event in events if event["type"] == "partial"]
@@ -152,7 +152,7 @@ class VoiceHelperTest(unittest.TestCase):
             helper.start(30_000)
             session.results.put(Result("very", segment_id="segment-1", start_time=0.0))
             self.wait_for(events, "partial")
-            session.results.put(Result("very", segment_id="segment-2", start_time=0.5))
+            session.results.put(Result(" very", segment_id="segment-2", start_time=0.5))
             deadline = time.monotonic() + 1
             while time.monotonic() < deadline:
                 partials = [event for event in events if event["type"] == "partial"]
@@ -164,6 +164,57 @@ class VoiceHelperTest(unittest.TestCase):
 
         self.assertEqual(partials[-1]["text"], "very very")
         self.assertEqual(final["text"], "very very")
+
+    def test_subword_fragments_keep_model_spacing(self):
+        helper, session = self.helper(
+            Result("agent audio", segment_id="final", start_time=0.0)
+        )
+        events = []
+        sounddevice = types.SimpleNamespace(RawInputStream=lambda **_kwargs: Stream())
+        with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
+            voice, "emit", events.append
+        ):
+            helper.start(30_000)
+            session.results.put(Result("ag", segment_id="segment-1", start_time=0.0))
+            self.wait_for(events, "partial")
+            session.results.put(Result("ent", segment_id="segment-2", start_time=0.2))
+            session.results.put(Result(" aud", segment_id="segment-3", start_time=0.4))
+            session.results.put(Result("io", segment_id="segment-4", start_time=0.6))
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                partials = [event for event in events if event["type"] == "partial"]
+                if len(partials) == 4:
+                    break
+                time.sleep(0.01)
+            helper.stop()
+            final = self.wait_for(events, "transcript")
+
+        self.assertEqual(partials[-1]["text"], "agent audio")
+        self.assertEqual(final["text"], "agent audio")
+
+    def test_stop_does_not_append_duplicate_full_transcript(self):
+        helper, session = self.helper(
+            Result("Testing the audio and my agent.", segment_id="stop-result", start_time=0.0)
+        )
+        events = []
+        sounddevice = types.SimpleNamespace(RawInputStream=lambda **_kwargs: Stream())
+        with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
+            voice, "emit", events.append
+        ):
+            helper.start(30_000)
+            session.results.put(Result("Testing the aud", segment_id="segment-1", start_time=0.0))
+            self.wait_for(events, "partial")
+            session.results.put(Result("io and my ag", segment_id="segment-2", start_time=0.5))
+            session.results.put(Result("ent", segment_id="segment-3", start_time=0.8))
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                if len([event for event in events if event["type"] == "partial"]) == 3:
+                    break
+                time.sleep(0.01)
+            helper.stop()
+            final = self.wait_for(events, "transcript")
+
+        self.assertEqual(final["text"], "Testing the audio and my agent.")
 
     def test_cancel_discards_transcript(self):
         helper, _session = self.helper()
