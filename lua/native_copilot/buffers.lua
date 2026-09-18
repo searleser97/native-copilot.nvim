@@ -312,6 +312,7 @@ local function create_buffer(name, member_id, view_id)
     streaming = false,
     activity_streaming = false,
     active_message = nil,
+    active_message_content = '',
     response_active = false,
     response_started_at = nil,
     response_line_start = true,
@@ -395,6 +396,7 @@ function M.prepare_history(member_id, event_time)
   view.streaming = false
   view.activity_streaming = false
   view.active_message = nil
+  view.active_message_content = ''
   view.response_active = false
   view.response_started_at = nil
   view.response_line_start = true
@@ -1704,6 +1706,7 @@ local function begin_response(view, response_id, event_time)
     actor_sign(options.conversation.copilot_label, '🤖')
   )
   view.awaiting_response = response_id or true
+  view.active_message_content = ''
   view.response_active = true
   view.response_message_completed = false
   view.last_block_kind = 'header'
@@ -1740,6 +1743,7 @@ end
 function M.append_conversation_delta(member_id, message_id, content)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  local normalized_content = content:gsub('\r\n', '\n'):gsub('\r', '\n')
   continue_copilot_actor(view)
   if view.active_activity then
     view.pending = view.pending .. '\n'
@@ -1751,6 +1755,7 @@ function M.append_conversation_delta(member_id, message_id, content)
   if view.active_message ~= message_id then
     flush(view)
     view.active_message = message_id
+    view.active_message_content = ''
     if view.awaiting_response then
       view.awaiting_response = nil
       first_visible_delta = true
@@ -1773,6 +1778,7 @@ function M.append_conversation_delta(member_id, message_id, content)
     content = content:gsub('^[ \t]+', '')
     if content ~= '' then view.response_resume_after_actor = false end
   end
+  view.active_message_content = view.active_message_content .. normalized_content
   append(view, indent_response_delta(view, content), false)
   view.last_block_kind = 'message'
 end
@@ -1784,6 +1790,7 @@ function M.fail_response(member_id, detail)
   touch_message_heading(view, 'failed', detail or 'failed')
   view.awaiting_response = nil
   view.active_message = nil
+  view.active_message_content = ''
   view.response_active = false
   view.response_started_at = nil
   view.response_line_start = true
@@ -1798,6 +1805,7 @@ end
 function M.complete_conversation(member_id, message_id, content, event_time)
   local entry = M.ensure_member(member_id)
   local view = entry.views.conversation
+  local normalized_content = content:gsub('\r\n', '\n'):gsub('\r', '\n')
   continue_copilot_actor(view, event_time)
   if view.awaiting_response and content == '' then
     return
@@ -1812,7 +1820,12 @@ function M.complete_conversation(member_id, message_id, content, event_time)
     append(view, indent_response_delta(view, content) .. '\n', true)
     view.awaiting_response = nil
     touch_message_heading(view, 'completed', nil, event_time)
-  elseif view.active_message == message_id then
+  elseif view.active_message == message_id
+    or (
+      view.active_message
+      and view.active_message_content == normalized_content
+    )
+  then
     append(view, '\n', true)
     touch_message_heading(view, 'completed', nil, event_time)
   elseif view.response_active and view.message_heading then
@@ -1823,6 +1836,7 @@ function M.complete_conversation(member_id, message_id, content, event_time)
     M.append_block(member_id, 'conversation', 'Copilot', content, event_time)
   end
   view.active_message = nil
+  view.active_message_content = ''
   view.response_message_completed = true
   view.response_line_start = true
   view.response_resume_after_actor = false
@@ -1850,6 +1864,7 @@ function M.finish_response(member_id, event_time)
   end
   view.awaiting_response = nil
   view.active_message = nil
+  view.active_message_content = ''
   view.response_active = false
   view.response_message_completed = false
   view.response_started_at = nil
