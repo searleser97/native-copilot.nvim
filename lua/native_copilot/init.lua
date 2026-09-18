@@ -2,6 +2,7 @@ local protocol = require('native_copilot.protocol')
 local buffers = require('native_copilot.buffers')
 local commands = require('native_copilot.commands')
 local clipboard = require('native_copilot.clipboard')
+local voice = require('native_copilot.voice')
 
 local M = {}
 local data_root = vim.fn.stdpath('data')
@@ -85,6 +86,9 @@ local defaults = {
   clipboard = {
     image_directory = '~/Downloads',
     capture_timeout_ms = 5000,
+  },
+  voice = {
+    listen_timeout_ms = 30000,
   },
   mappings = {
     toggle = '<leader>ait',
@@ -291,6 +295,48 @@ function M.paste_clipboard()
     end
   )
   return true
+end
+
+function M.dictate_voice()
+  if voice.is_listening() then
+    voice.cancel()
+    notify('Voice dictation canceled.')
+    return true
+  end
+  if
+    not state.prompt_buf
+    or not vim.api.nvim_buf_is_valid(state.prompt_buf)
+    or vim.api.nvim_get_current_buf() ~= state.prompt_buf
+  then
+    notify(
+      'Voice dictation is only available from the Native Copilot prompt buffer.',
+      vim.log.levels.WARN
+    )
+    return false
+  end
+
+  local row, column = unpack(vim.api.nvim_win_get_cursor(0))
+  local mark = clipboard.mark_position(state.prompt_buf, row - 1, column)
+  local started = voice.start(options.voice.listen_timeout_ms, function(result)
+    if result.kind == 'transcript' then
+      clipboard.insert_at_mark(state.prompt_buf, mark, result.text .. ' ')
+    elseif result.kind == 'no_speech' then
+      clipboard.insert_at_mark(state.prompt_buf, mark, '')
+      notify('No speech was recognized.', vim.log.levels.WARN)
+    elseif result.kind == 'unsupported' then
+      clipboard.insert_at_mark(state.prompt_buf, mark, '')
+      notify('Voice dictation currently requires Windows.', vim.log.levels.WARN)
+    elseif result.kind == 'canceled' then
+      clipboard.insert_at_mark(state.prompt_buf, mark, '')
+    else
+      clipboard.insert_at_mark(state.prompt_buf, mark, '')
+      notify(result.message, vim.log.levels.ERROR)
+    end
+  end)
+  if started then
+    notify('Listening for voice dictation; press <C-g>v again to cancel.')
+  end
+  return started
 end
 
 local function update_prompt_label()
@@ -627,6 +673,10 @@ local function ensure_prompt_buffer()
   vim.keymap.set({ 'n', 'i' }, '<F24>', M.paste_clipboard, {
     buffer = buf,
     desc = 'Handle terminal clipboard image signal',
+  })
+  vim.keymap.set({ 'n', 'i' }, '<C-g>v', M.dictate_voice, {
+    buffer = buf,
+    desc = 'Start or cancel voice dictation',
   })
   vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,

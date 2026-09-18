@@ -805,6 +805,10 @@ tick = function()
         and vim.fn.maparg('<F24>', 'n', false, true).callback
         and vim.fn.maparg('<F24>', 'i', false, true).callback
     end)
+    local voice_mappings = vim.api.nvim_buf_call(prompt_buf, function()
+      return vim.fn.maparg('<C-g>v', 'n', false, true).callback
+        and vim.fn.maparg('<C-g>v', 'i', false, true).callback
+    end)
     local image_reference = require('native_copilot.clipboard').image_reference(
       'C:\\Users\\example\\Downloads\\clipboard.png'
     )
@@ -815,9 +819,10 @@ tick = function()
         and public_api_preserved
         and removed_insert_mapping
         and clipboard_mappings
+        and voice_mappings
         and image_reference
           == '@image("C:\\Users\\example\\Downloads\\clipboard.png")',
-      'prompt mappings support recipient cycling and clipboard image references'
+      'prompt mappings support recipients, clipboard images, and voice dictation'
     ) then
       return
     end

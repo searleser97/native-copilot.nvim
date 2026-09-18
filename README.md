@@ -123,6 +123,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `<C-v>` in `AI Prompt` | Paste text, or save and attach a Windows clipboard image |
 | `<F24>` in `AI Prompt` | Handle an image-paste signal forwarded by a terminal |
+| `<C-g>v` in `AI Prompt` | Start voice dictation; press again to cancel |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
@@ -181,8 +182,16 @@ require("native_copilot").setup({
     image_directory = "~/Downloads",
     capture_timeout_ms = 5000,
   },
+  voice = {
+    listen_timeout_ms = 30000,
+  },
 })
 ```
+
+On Windows, `<C-g>v` starts one-utterance dictation through the built-in `System.Speech`
+recognizer. Speak naturally and pause when finished; the recognized text is inserted at the
+cursor position where dictation started. Press `<C-g>v` again while listening to cancel. The
+recognizer uses the default Windows microphone and installed speech-recognition language.
 
 The conversation is also the chronological activity timeline. Background tasks, environment
 initialization, foreground tools, schedules, and permission decisions appear as compact timeline
