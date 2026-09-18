@@ -187,6 +187,27 @@ function M.cancel()
   return true
 end
 
+function M.stop()
+  if not M.is_listening() then return false end
+  if active.process then
+    active.process:kill(9)
+    finish_active({ kind = 'canceled' })
+    return true
+  end
+  if helper and not helper.ready then
+    helper.pending_start = nil
+    finish_active({ kind = 'canceled' })
+    return true
+  end
+  if not send({ command = 'stop' }) then
+    finish_active({
+      kind = 'error',
+      message = 'Could not finalize voice dictation because the voice helper is unavailable.',
+    })
+  end
+  return true
+end
+
 local function start_system(timeout_ms, callback)
   local script = table.concat({
     "$ErrorActionPreference = 'Stop'",

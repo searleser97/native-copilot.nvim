@@ -306,8 +306,8 @@ end
 
 function M.dictate_voice()
   if voice.is_listening() then
-    voice.cancel()
-    notify('Voice dictation canceled.')
+    voice.stop()
+    notify('Finalizing voice dictation…')
     return true
   end
   if
@@ -345,7 +345,7 @@ function M.dictate_voice()
     elseif event.state == 'loading' then
       notify('Loading the local Nemotron speech model…')
     elseif event.state == 'listening' then
-      notify('Listening for voice dictation; press <C-g>v again to cancel.')
+      notify('Listening for voice dictation; press <C-g>v again to finish.')
     elseif event.state == 'audio_warning' then
       notify(event.message or 'The microphone reported an audio warning.', vim.log.levels.WARN)
     end
@@ -715,7 +715,7 @@ local function ensure_prompt_buffer()
   })
   vim.keymap.set({ 'n', 'i' }, '<C-g>v', M.dictate_voice, {
     buffer = buf,
-    desc = 'Start or cancel voice dictation',
+    desc = 'Start or finish voice dictation',
   })
   vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,

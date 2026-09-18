@@ -1,5 +1,6 @@
 node_modules/
 dist/
+__pycache__/
 .e2e-artifacts/
 coverage/
 *.log

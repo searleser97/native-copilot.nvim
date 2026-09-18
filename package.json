@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/database.test.mjs && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1",
+    "test": "npm run build && node --test test/database.test.mjs && python test/native_copilot_voice_test.py && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1",
+    "test:voice": "python test/native_copilot_voice_test.py",
     "test:database": "npm run build && node --test test/database.test.mjs test/fleet-tools.test.mjs",
     "test:e2e": "npm run test",
     "test:e2e:observe": "npm run build && pwsh -NoLogo -NoProfile -File scripts/run-visible-e2e.ps1 -Profile allow-all -Observe",

@@ -26,6 +26,8 @@ class VoiceHelper:
         self.stream = None
         self.timer = None
         self.finished = True
+        self.stopping = False
+        self.latest_text = ""
 
     def prepare(self):
         emit({"type": "state", "state": "loading"})
@@ -47,6 +49,8 @@ class VoiceHelper:
             if not self.finished:
                 raise RuntimeError("Voice dictation is already active.")
             self.finished = False
+            self.stopping = False
+            self.latest_text = ""
             audio_client = self.model.get_audio_client()
             self.session = audio_client.create_live_transcription_session()
             self.session.settings.sample_rate = RATE
@@ -58,7 +62,11 @@ class VoiceHelper:
                 if status:
                     emit({"type": "state", "state": "audio_warning", "message": str(status)})
                 with self.lock:
-                    session = self.session if not self.finished else None
+                    session = (
+                        self.session
+                        if not self.finished and not self.stopping
+                        else None
+                    )
                 if session is not None:
                     session.append(bytes(indata))
 
@@ -70,16 +78,21 @@ class VoiceHelper:
                 callback=capture,
             )
             self.stream.start()
-            self.timer = threading.Timer(timeout_ms / 1000, lambda: self.finish("no_speech"))
+            self.timer = threading.Timer(timeout_ms / 1000, self.stop)
             self.timer.daemon = True
             self.timer.start()
             threading.Thread(target=self.read_results, daemon=True).start()
         emit({"type": "state", "state": "listening"})
 
     def read_results(self):
+        with self.lock:
+            session = self.session
         try:
-            for result in self.session.get_stream():
+            for result in session.get_stream():
                 text = result.content[0].text.strip() if result.content else ""
+                if text:
+                    with self.lock:
+                        self.latest_text = text
                 if result.is_final and text:
                     threading.Thread(
                         target=lambda: self.finish("transcript", text), daemon=True
@@ -87,17 +100,34 @@ class VoiceHelper:
                     return
                 if text:
                     emit({"type": "partial", "text": text})
+            with self.lock:
+                text = self.latest_text
+            self.finish("transcript" if text else "no_speech", text or None)
         except Exception as error:
-            if self.finished:
-                emit({"type": "error", "message": str(error)})
-            else:
+            if not self.finished:
                 self.finish("error", message=str(error))
+
+    def stop(self):
+        with self.lock:
+            if self.finished or self.stopping:
+                return
+            self.stopping = True
+            timer, stream, session = self.timer, self.stream, self.session
+            self.timer = self.stream = None
+        if timer:
+            timer.cancel()
+        if stream:
+            stream.stop()
+            stream.close()
+        if session:
+            session.stop()
 
     def finish(self, kind, text=None, message=None):
         with self.lock:
             if self.finished:
                 return
             self.finished = True
+            self.stopping = False
             timer, stream, session = self.timer, self.stream, self.session
             self.timer = self.stream = self.session = None
         if timer:
@@ -123,6 +153,8 @@ class VoiceHelper:
             try:
                 if name == "start":
                     self.start(int(command.get("timeout_ms", 30000)))
+                elif name == "stop":
+                    self.stop()
                 elif name == "cancel":
                     self.finish("canceled")
                 elif name == "shutdown":

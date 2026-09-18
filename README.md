@@ -123,7 +123,7 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `<C-p>` in `AI Prompt` | Open the existing prompt-snippet picker |
 | `<C-v>` in `AI Prompt` | Paste text, or save and attach a Windows clipboard image |
 | `<F24>` in `AI Prompt` | Handle an image-paste signal forwarded by a terminal |
-| `<C-g>v` in `AI Prompt` | Start voice dictation; press again to cancel |
+| `<C-g>v` in `AI Prompt` | Start voice dictation; press again to finish |
 | `/` in an empty `AI Prompt` | Browse commands from the active Copilot session |
 | `/resume` | Resume a previous Copilot session from the current workspace |
 | `<Tab>` in `AI Prompt` | Complete slash-command names, aliases, choices, or directories |
@@ -200,7 +200,8 @@ Native Copilot UI starts loading the model in the background so the first dictat
 the full startup cost; set `voice.preload = false` to load it on first use instead. The model stays
 loaded in a persistent helper between dictation sessions. Partial recognition appears as temporary
 inline text while speaking, then the finalized transcript replaces it with editable prompt text at
-the cursor position where dictation started. Press `<C-g>v` again while listening to cancel. Audio
+the cursor position where dictation started. Press `<C-g>v` again while listening to stop recording
+and commit the final transcript. Audio
 and transcription remain on the machine.
 
 Set `voice.provider = "system"` to explicitly use the legacy Windows `System.Speech` recognizer
