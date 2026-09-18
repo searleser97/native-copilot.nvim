@@ -29,10 +29,11 @@ class Result:
 
 
 class Session:
-    def __init__(self):
+    def __init__(self, final_text="final transcript"):
         self.settings = types.SimpleNamespace()
         self.results = queue.Queue()
         self.stopped = False
+        self.final_text = final_text
 
     def start(self):
         pass
@@ -51,7 +52,7 @@ class Session:
         if self.stopped:
             return
         self.stopped = True
-        self.results.put(Result("final transcript", True))
+        self.results.put(Result(self.final_text, True))
         self.results.put(None)
 
 
@@ -67,9 +68,9 @@ class Stream:
 
 
 class VoiceHelperTest(unittest.TestCase):
-    def helper(self):
+    def helper(self, final_text="final transcript"):
         helper = voice.VoiceHelper("model", "en")
-        session = Session()
+        session = Session(final_text)
         helper.model = types.SimpleNamespace(
             get_audio_client=lambda: types.SimpleNamespace(
                 create_live_transcription_session=lambda: session
@@ -87,14 +88,14 @@ class VoiceHelperTest(unittest.TestCase):
         self.fail(f"Timed out waiting for {event_type}: {events}")
 
     def test_stop_flushes_final_transcript(self):
-        helper, session = self.helper()
+        helper, session = self.helper("final transcript")
         events = []
         sounddevice = types.SimpleNamespace(RawInputStream=lambda **_kwargs: Stream())
         with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
             voice, "emit", events.append
         ):
             helper.start(30_000)
-            session.results.put(Result("draft transcript", False))
+            session.results.put(Result("final", False))
             self.wait_for(events, "partial")
             helper.stop()
             final = self.wait_for(events, "transcript")
@@ -102,6 +103,40 @@ class VoiceHelperTest(unittest.TestCase):
         self.assertEqual(final["text"], "final transcript")
         self.assertFalse(any(event["type"] == "canceled" for event in events))
         self.assertTrue(helper.finished)
+
+    def test_partial_segments_accumulate_without_duplicating_revisions(self):
+        helper, session = self.helper("test")
+        events = []
+        sounddevice = types.SimpleNamespace(RawInputStream=lambda **_kwargs: Stream())
+        with mock.patch.dict(sys.modules, {"sounddevice": sounddevice}), mock.patch.object(
+            voice, "emit", events.append
+        ):
+            helper.start(30_000)
+            session.results.put(Result("this is", False))
+            self.wait_for(events, "partial")
+            session.results.put(Result("is a", False))
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                partials = [event for event in events if event["type"] == "partial"]
+                if len(partials) == 2:
+                    break
+                time.sleep(0.01)
+            session.results.put(Result("this is a", False))
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                partials = [event for event in events if event["type"] == "partial"]
+                if len(partials) == 3:
+                    break
+                time.sleep(0.01)
+            helper.stop()
+            final = self.wait_for(events, "transcript")
+
+        self.assertEqual([event["text"] for event in partials], [
+            "this is",
+            "this is a",
+            "this is a",
+        ])
+        self.assertEqual(final["text"], "this is a test")
 
     def test_cancel_discards_transcript(self):
         helper, _session = self.helper()

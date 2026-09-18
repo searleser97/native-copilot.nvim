@@ -16,6 +16,26 @@ def emit(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
+def merge_transcript(existing, incoming):
+    existing = " ".join(existing.split())
+    incoming = " ".join(incoming.split())
+    if not existing:
+        return incoming
+    if not incoming or existing == incoming or existing.endswith(incoming):
+        return existing
+    if incoming.startswith(existing):
+        return incoming
+
+    existing_words = existing.split()
+    incoming_words = incoming.split()
+    for count in range(min(len(existing_words), len(incoming_words)), 0, -1):
+        if existing_words[-count:] == incoming_words[:count]:
+            return " ".join(existing_words + incoming_words[count:])
+
+    separator = "" if incoming[0] in ".,!?;:)]}" else " "
+    return existing + separator + incoming
+
+
 class VoiceHelper:
     def __init__(self, model_alias, language):
         self.model_alias = model_alias
@@ -27,7 +47,7 @@ class VoiceHelper:
         self.timer = None
         self.finished = True
         self.stopping = False
-        self.latest_text = ""
+        self.transcript = ""
 
     def prepare(self):
         emit({"type": "state", "state": "loading"})
@@ -50,7 +70,7 @@ class VoiceHelper:
                 raise RuntimeError("Voice dictation is already active.")
             self.finished = False
             self.stopping = False
-            self.latest_text = ""
+            self.transcript = ""
             audio_client = self.model.get_audio_client()
             self.session = audio_client.create_live_transcription_session()
             self.session.settings.sample_rate = RATE
@@ -92,16 +112,19 @@ class VoiceHelper:
                 text = result.content[0].text.strip() if result.content else ""
                 if text:
                     with self.lock:
-                        self.latest_text = text
-                if result.is_final and text:
+                        self.transcript = merge_transcript(self.transcript, text)
+                        transcript = self.transcript
+                else:
+                    transcript = ""
+                if result.is_final and transcript:
                     threading.Thread(
-                        target=lambda: self.finish("transcript", text), daemon=True
+                        target=lambda: self.finish("transcript", transcript), daemon=True
                     ).start()
                     return
-                if text:
-                    emit({"type": "partial", "text": text})
+                if transcript:
+                    emit({"type": "partial", "text": transcript})
             with self.lock:
-                text = self.latest_text
+                text = self.transcript
             self.finish("transcript" if text else "no_speech", text or None)
         except Exception as error:
             if not self.finished:
