@@ -29,7 +29,7 @@ class VoiceHelper:
 
     def prepare(self):
         emit({"type": "state", "state": "loading"})
-        config = Configuration(app_name="native-copilot.nvim")
+        config = Configuration(app_name="native-copilot-nvim")
         FoundryLocalManager.initialize(config)
         manager = FoundryLocalManager.instance
         manager.download_and_register_eps()
