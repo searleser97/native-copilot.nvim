@@ -3002,20 +3002,26 @@ function M._on_event(message)
         then
           return
         end
-        if active_picker.manager:num_results() == 0 then return end
-        local row = active_picker:get_reset_row()
-        local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
-        if line_count <= row then
-          local padding = {}
-          for _ = line_count, row do table.insert(padding, '') end
-          vim.api.nvim_buf_set_lines(
-            active_picker.results_bufnr,
-            -1,
-            -1,
-            false,
-            padding
+        local result_count = active_picker.manager:num_results()
+        if result_count == 0 then return end
+        local blank_rows = {}
+        for _ = 1, active_picker.max_results do table.insert(blank_rows, '') end
+        vim.api.nvim_buf_set_lines(
+          active_picker.results_bufnr,
+          0,
+          -1,
+          false,
+          blank_rows
+        )
+        for index = 1, result_count do
+          active_picker:entry_adder(
+            index,
+            active_picker.manager:get_entry(index),
+            nil,
+            false
           )
         end
+        local row = active_picker:get_reset_row()
         active_picker:set_selection(row)
         vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
       end,

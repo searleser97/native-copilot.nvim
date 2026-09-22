@@ -679,6 +679,21 @@ tick = function()
       finish()
       return
     end
+    local sparse_line_count = vim.api.nvim_buf_line_count(picker.results_bufnr)
+    local sparse_bottom_line = vim.api.nvim_buf_get_lines(
+      picker.results_bufnr,
+      sparse_line_count - 1,
+      sparse_line_count,
+      false
+    )[1] or ''
+    if not check(
+      vim.api.nvim_win_get_cursor(picker.results_win)[1] == sparse_line_count
+        and sparse_bottom_line:find('Untitled session [e2e-cli-]', 1, true) ~= nil,
+      '/resume rendered the unfiltered newest session on the physical bottom row'
+    ) then
+      finish()
+      return
+    end
     actions.close(prompt_buf)
     resume_picker_ready_at = nil
     phase = 'resume-sparse-closed'
