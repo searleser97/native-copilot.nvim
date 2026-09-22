@@ -4800,6 +4800,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         };
         return this.storedAgentJson(context);
       },
+      { allowIndependentOnLiveClaim: true },
     );
     if (!claimed.run.definition) {
       throw new Error(

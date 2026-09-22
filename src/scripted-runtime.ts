@@ -654,6 +654,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
       process.pid,
       (stagedDefinition, alias) =>
         this.primaryDefinitionForClaim(stagedDefinition, alias),
+      { allowIndependentOnLiveClaim: true },
     );
     const primary = this.primaryFromClaim(claimed.run, claimed.claim);
     this.primaryRunId = primary.runId;

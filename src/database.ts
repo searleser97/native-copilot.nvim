@@ -89,6 +89,10 @@ export interface ClaimedPrimaryRun {
   claim?: PrimaryStartupClaim;
 }
 
+export interface PrimaryClaimOptions {
+  allowIndependentOnLiveClaim?: boolean;
+}
+
 export type PrimaryDefinitionFactory = (
   stagedDefinition: string | undefined,
   alias: string,
@@ -3822,6 +3826,7 @@ export class AgentDatabase {
     workspace: string,
     ownerPid: number,
     definitionFactory: PrimaryDefinitionFactory,
+    options: PrimaryClaimOptions = {},
   ): ClaimedPrimaryRun {
     if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
       throw new Error("A primary startup claim requires a valid owner PID.");
@@ -3842,6 +3847,7 @@ export class AgentDatabase {
             claimToken: string;
             ownerPid: number | null;
           }>;
+        let liveClaimOwnerPid: number | undefined;
         if (existingClaims.length > 0) {
           if (existingClaims.length > 1) {
             const details = existingClaims
@@ -3860,19 +3866,25 @@ export class AgentDatabase {
             );
           }
           if (this.ownerPidIsAlive(claim.ownerPid, this.ownerIsAlive)) {
+            if (!options.allowIndependentOnLiveClaim) {
+              throw new Error(
+                `Staged primary identity in workspace "${workspace}" is already claimed by ` +
+                  `live host process ${claim.ownerPid}.`,
+              );
+            }
+            liveClaimOwnerPid = claim.ownerPid;
+          } else {
             throw new Error(
-              `Staged primary identity in workspace "${workspace}" is already claimed by ` +
-                `live host process ${claim.ownerPid}.`,
+              `Staged primary identity in workspace "${workspace}" has a stale claim owned by ` +
+                `process ${claim.ownerPid}. Run interrupted-work recovery before claiming it again.`,
             );
           }
-          throw new Error(
-            `Staged primary identity in workspace "${workspace}" has a stale claim owned by ` +
-              `process ${claim.ownerPid}. Run interrupted-work recovery before claiming it again.`,
-          );
         }
 
-        const predecessorRuns = this.agentRunRows(
-          `workspace = ?
+        const predecessorRuns =
+          liveClaimOwnerPid === undefined
+            ? this.agentRunRows(
+                `workspace = ?
              AND is_primary = 1
              AND status != 'active'
              AND definition IS NOT NULL
@@ -3897,20 +3909,27 @@ export class AgentDatabase {
              )
              ORDER BY started_at DESC, id DESC
              LIMIT 1`,
-          workspace,
-        );
+                workspace,
+              )
+            : [];
         const predecessor = predecessorRuns[0];
-        const reservedWorkerAliases = new Set(
+        const reservedAliases = new Set(
           (
             this.db
               .prepare(
                 `SELECT alias
                  FROM runs
-                 WHERE workspace = ? AND mode = 'agent' AND is_primary = 0
+                 WHERE workspace = ? AND mode = 'agent'
                    AND alias IS NOT NULL AND agent_id IS NOT NULL
-                   AND definition IS NOT NULL`,
+                   AND definition IS NOT NULL
+                   AND (is_primary = 0 OR ? = 1)
+                   AND id != ?`,
               )
-              .all(workspace) as unknown as Array<{ alias: string }>
+              .all(
+                workspace,
+                liveClaimOwnerPid === undefined ? 0 : 1,
+                predecessor?.id ?? "",
+              ) as unknown as Array<{ alias: string }>
           ).map((row) => row.alias),
         );
         if (
@@ -3918,7 +3937,7 @@ export class AgentDatabase {
           predecessor.alias !== LEGACY_PRIMARY_IDENTITY &&
           predecessor.alias !== CALLER_ALIAS &&
           AGENT_ALIAS_PATTERN.test(predecessor.alias) &&
-          !reservedWorkerAliases.has(predecessor.alias)
+          !reservedAliases.has(predecessor.alias)
         ) {
           selectedAlias = predecessor.alias;
         } else {
@@ -3929,7 +3948,7 @@ export class AgentDatabase {
           } while (
             selectedAlias === LEGACY_PRIMARY_IDENTITY ||
             selectedAlias === CALLER_ALIAS ||
-            reservedWorkerAliases.has(selectedAlias)
+            reservedAliases.has(selectedAlias)
           );
         }
 

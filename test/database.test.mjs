@@ -315,6 +315,58 @@ test("fresh primary alias fallback is selected inside the claim transaction", (t
   db.close();
 });
 
+test("concurrent primary startup allocates an independent identity without stealing", (t) => {
+  const path = databasePath(t);
+  seedBrokenV13(path);
+  const db = new AgentDatabase(path, (pid) => pid === 4242 || pid === 4343);
+
+  const winner = db.claimPrimaryRun(
+    "winning-successor",
+    randomUUID(),
+    "workspace",
+    4242,
+    claimedDefinition,
+  );
+  const independentAgentId = randomUUID();
+  const independent = db.claimPrimaryRun(
+    "independent-primary",
+    independentAgentId,
+    "workspace",
+    4343,
+    claimedDefinition,
+    { allowIndependentOnLiveClaim: true },
+  );
+
+  assert.equal(winner.run.agentId, "primary-agent");
+  assert.ok(winner.claim);
+  assert.equal(independent.run.agentId, independentAgentId);
+  assert.match(independent.run.alias, /^primary(?:_\d+)?$/);
+  assert.equal(independent.claim, undefined);
+  assert.notEqual(independent.run.agentId, winner.run.agentId);
+  assert.notEqual(independent.run.alias, winner.run.alias);
+
+  db.upsertSession(independent.run.id, "independent-session", "connected");
+  db.completePrimaryStartup(
+    independent.run.id,
+    "workspace",
+    independent.run.agentId,
+    `agent:${independent.run.agentId}`,
+    independent.claim,
+  );
+  db.upsertSession(winner.run.id, "winning-session", "connected");
+  db.completePrimaryStartup(
+    winner.run.id,
+    "workspace",
+    winner.run.agentId,
+    `agent:${winner.run.agentId}`,
+    winner.claim,
+  );
+
+  assert.equal(db.agentRun(independent.run.id, "workspace").status, "active");
+  assert.equal(db.agentRun(winner.run.id, "workspace").status, "active");
+  db.close();
+});
+
 test("dead staged-primary claims are retryable or resumable", (t) => {
   const path = databasePath(t);
   seedBrokenV13(path);
