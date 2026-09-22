@@ -702,6 +702,31 @@ tick = function()
       finish()
       return
     end
+    picker:set_prompt('older-session-023')
+    phase = 'resume-picker-filtered'
+  elseif phase == 'resume-picker-filtered' then
+    if not picker or picker.manager:num_results() ~= 1 then
+      schedule_tick()
+      return
+    end
+    local selected = action_state.get_selected_entry()
+    if not check(
+      selected
+        and selected.value
+        and selected.value.session
+        and selected.value.session.sessionId == 'e2e-older-session-023',
+      '/resume filtered sessions from Telescope prompt input'
+    ) then
+      finish()
+      return
+    end
+    picker:set_prompt('')
+    phase = 'resume-picker-filter-cleared'
+  elseif phase == 'resume-picker-filter-cleared' then
+    if not picker or picker.manager:num_results() ~= 321 then
+      schedule_tick()
+      return
+    end
     choose_where(function(item)
       return item.session and item.session.inUse == true
     end)

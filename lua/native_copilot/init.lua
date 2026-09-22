@@ -2227,7 +2227,9 @@ local function picker(title, entries, choose, picker_options)
         }
       end,
     }),
-    sorter = picker_options.preserve_order and sorters.empty() or conf.generic_sorter({}),
+    sorter = picker_options.preserve_order
+        and sorters.get_substr_matcher()
+      or conf.generic_sorter({}),
     attach_mappings = function(prompt_buf)
       if restore_cursor_animation then
         vim.api.nvim_create_autocmd('BufWipeout', {
