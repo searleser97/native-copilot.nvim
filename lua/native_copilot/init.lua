@@ -2284,9 +2284,21 @@ local function picker(title, entries, choose, picker_options)
       return true
     end,
   }
-  local ok, failure = pcall(function()
-    pickers.new({}, telescope_options):find()
-  end)
+  local telescope_picker = pickers.new({}, telescope_options)
+  if picker_options.anchor_results_bottom then
+    local original_clear_extra_rows = telescope_picker.clear_extra_rows
+    telescope_picker.clear_extra_rows = function(active_picker, results_bufnr)
+      original_clear_extra_rows(active_picker, results_bufnr)
+      if not vim.api.nvim_buf_is_valid(results_bufnr) then return end
+      local line_count = vim.api.nvim_buf_line_count(results_bufnr)
+      if line_count < active_picker.max_results then
+        local padding = {}
+        for _ = line_count + 1, active_picker.max_results do table.insert(padding, '') end
+        vim.api.nvim_buf_set_lines(results_bufnr, -1, -1, false, padding)
+      end
+    end
+  end
+  local ok, failure = pcall(function() telescope_picker:find() end)
   if restore_eventignore then vim.defer_fn(restore_eventignore, 1000) end
   if not ok then
     if restore_eventignore then restore_eventignore() end
@@ -2959,10 +2971,6 @@ function M._on_event(message)
       return
     end
     local displayed_entries = entries
-    if options.frontend.picker == 'telescope' then
-      displayed_entries = {}
-      for index = #entries, 1, -1 do table.insert(displayed_entries, entries[index]) end
-    end
     picker('Resume Copilot session', displayed_entries, function(item, restore_cursor_animation)
       if item.session.inUse then
         if restore_cursor_animation then restore_cursor_animation() end
@@ -2982,9 +2990,10 @@ function M._on_event(message)
       end
     end, {
       preserve_order = true,
-      sorting_strategy = 'ascending',
-      default_selection_index = #displayed_entries,
-      result_limit = #displayed_entries,
+      sorting_strategy = 'descending',
+      default_selection_index = 1,
+      result_limit = math.max(#displayed_entries, 250),
+      anchor_results_bottom = true,
       on_complete = function(active_picker)
         if
           active_picker.closed
@@ -2993,12 +3002,22 @@ function M._on_event(message)
         then
           return
         end
-        local row = active_picker:get_row(#displayed_entries)
+        if active_picker.manager:num_results() == 0 then return end
+        local row = active_picker:get_reset_row()
         local line_count = vim.api.nvim_buf_line_count(active_picker.results_bufnr)
-        if row >= 0 and row < line_count then
-          active_picker:set_selection(row)
-          vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
+        if line_count <= row then
+          local padding = {}
+          for _ = line_count, row do table.insert(padding, '') end
+          vim.api.nvim_buf_set_lines(
+            active_picker.results_bufnr,
+            -1,
+            -1,
+            false,
+            padding
+          )
         end
+        active_picker:set_selection(row)
+        vim.api.nvim_win_set_cursor(active_picker.results_win, { row + 1, 0 })
       end,
       suppress_cursor_events = true,
     })

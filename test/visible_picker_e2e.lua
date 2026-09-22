@@ -655,8 +655,8 @@ tick = function()
       return
     end
     if not check(
-      picker.sorting_strategy == 'ascending',
-      '/resume used safe newest-first Telescope ordering'
+      picker.sorting_strategy == 'descending',
+      '/resume used bottom-anchored newest-first Telescope ordering'
     ) then
       finish()
       return
@@ -710,12 +710,33 @@ tick = function()
       return
     end
     local selected = action_state.get_selected_entry()
+    local cursor_row = vim.api.nvim_win_get_cursor(picker.results_win)[1]
+    local line_count = vim.api.nvim_buf_line_count(picker.results_bufnr)
+    local bottom_line = vim.api.nvim_buf_get_lines(
+      picker.results_bufnr,
+      line_count - 1,
+      line_count,
+      false
+    )[1] or ''
     if not check(
       selected
         and selected.value
         and selected.value.session
         and selected.value.session.sessionId == 'e2e-older-session-023',
       '/resume filtered sessions from Telescope prompt input'
+    ) then
+      finish()
+      return
+    end
+    if not check(
+      cursor_row == line_count
+        and bottom_line:find('Older workspace session 023', 1, true) ~= nil,
+      ('/resume kept the filtered match selected and rendered at the bottom'
+        .. ' (cursor=%d lines=%d bottom=%q)'):format(
+        cursor_row,
+        line_count,
+        bottom_line
+      )
     ) then
       finish()
       return
