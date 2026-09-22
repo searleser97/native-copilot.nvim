@@ -290,6 +290,7 @@ local function prompt_voice_status_follows_lifecycle()
   local started_value
   local stopped_value
   local listening_before_stop
+  local escape_mapping_result
 
   local ok, result = xpcall(function()
     vim.notify = function() end
@@ -305,18 +306,25 @@ local function prompt_voice_status_follows_lifecycle()
     end
     voice.stop = function()
       listening = false
+      stopped_value = true
       return true
     end
 
     vim.api.nvim_set_current_win(prompt_win)
+    vim.cmd('stopinsert')
     started_value = native.dictate_voice()
+    vim.wait(1000, function() return complete ~= nil end, 10)
     listening_before_stop = voice.is_listening()
-    stopped_value = native.dictate_voice()
+    local escape_mapping = vim.api.nvim_buf_call(prompt_buf, function()
+      return vim.fn.maparg('<Esc>', 'i', false, true)
+    end)
+    escape_mapping_result = escape_mapping.callback()
     finalizing_label = vim.wo[prompt_win].winbar
     complete({ kind = 'no_speech' })
     idle_label = vim.wo[prompt_win].winbar
     return started_value
       and stopped_value
+      and escape_mapping_result == '<Esc>'
       and loading_label:find('[Cancel voice · Loading…]', 1, true) ~= nil
       and listening_label:find('[Stop voice · Listening]', 1, true) ~= nil
       and finalizing_label:find('[Voice: Finalizing…]', 1, true) ~= nil
@@ -338,6 +346,7 @@ local function prompt_voice_status_follows_lifecycle()
     'started=' .. tostring(started_value),
     'listeningBeforeStop=' .. tostring(listening_before_stop),
     'stopped=' .. tostring(stopped_value),
+    'escapeResult=' .. tostring(escape_mapping_result),
     'error=' .. (ok and 'none' or tostring(result)),
   }, '; ')
 end
@@ -887,6 +896,8 @@ tick = function()
     local voice_mappings = vim.api.nvim_buf_call(prompt_buf, function()
       return vim.fn.maparg('<C-g>v', 'n', false, true).callback
         and vim.fn.maparg('<C-g>v', 'i', false, true).callback
+        and vim.fn.maparg('<Esc>', 'i', false, true).callback
+        and vim.fn.maparg('<Esc>', 'i', false, true).expr == 1
     end)
     local voice_setup_command = vim.fn.exists(':NativeCopilotVoiceSetup') == 2
     local image_reference = require('native_copilot.clipboard').image_reference(

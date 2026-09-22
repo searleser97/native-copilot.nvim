@@ -317,6 +317,10 @@ function M.dictate_voice()
     notify('Voice dictation is already being finalized.')
     return false
   end
+  if state.voice_status == 'starting' and not voice.is_listening() then
+    set_voice_status('idle')
+    return true
+  end
   if voice.is_listening() then
     set_voice_status('finalizing')
     if not voice.stop() then
@@ -338,40 +342,56 @@ function M.dictate_voice()
     return false
   end
 
-  local row, column = unpack(vim.api.nvim_win_get_cursor(0))
-  local mark = clipboard.mark_position(state.prompt_buf, row - 1, column)
   set_voice_status('starting')
-  local started = voice.start(options.voice, function(result)
-    set_voice_status('idle')
-    if result.kind == 'transcript' then
-      clipboard.insert_at_mark(state.prompt_buf, mark, result.text .. ' ')
-    elseif result.kind == 'no_speech' then
-      clipboard.insert_at_mark(state.prompt_buf, mark, '')
-      notify('No speech was recognized.', vim.log.levels.WARN)
-    elseif result.kind == 'unsupported' then
-      clipboard.insert_at_mark(state.prompt_buf, mark, '')
-      notify('Voice dictation currently requires Windows.', vim.log.levels.WARN)
-    elseif result.kind == 'canceled' then
-      clipboard.insert_at_mark(state.prompt_buf, mark, '')
-    else
-      clipboard.insert_at_mark(state.prompt_buf, mark, '')
-      notify(result.message, vim.log.levels.ERROR)
+  if not vim.api.nvim_get_mode().mode:find('^i') then vim.cmd('startinsert') end
+  vim.schedule(function()
+    if state.voice_status ~= 'starting' then return end
+    if
+      not state.prompt_buf
+      or not vim.api.nvim_buf_is_valid(state.prompt_buf)
+      or vim.api.nvim_get_current_buf() ~= state.prompt_buf
+    then
+      set_voice_status('idle')
+      notify(
+        'Voice dictation was not started because the Native Copilot prompt lost focus.',
+        vim.log.levels.WARN
+      )
+      return
     end
-  end, function(event)
-    if event.type == 'partial' then
-      clipboard.preview_at_mark(state.prompt_buf, mark, event.text)
-    elseif event.state == 'loading' then
-      set_voice_status('loading')
-      notify('Loading the local Nemotron speech model…')
-    elseif event.state == 'listening' then
-      set_voice_status('listening')
-      notify('Listening for voice dictation; press <C-g>v again to finish.')
-    elseif event.state == 'audio_warning' then
-      notify(event.message or 'The microphone reported an audio warning.', vim.log.levels.WARN)
-    end
+    local row, column = unpack(vim.api.nvim_win_get_cursor(0))
+    local mark = clipboard.mark_position(state.prompt_buf, row - 1, column)
+    local started = voice.start(options.voice, function(result)
+      set_voice_status('idle')
+      if result.kind == 'transcript' then
+        clipboard.insert_at_mark(state.prompt_buf, mark, result.text .. ' ')
+      elseif result.kind == 'no_speech' then
+        clipboard.insert_at_mark(state.prompt_buf, mark, '')
+        notify('No speech was recognized.', vim.log.levels.WARN)
+      elseif result.kind == 'unsupported' then
+        clipboard.insert_at_mark(state.prompt_buf, mark, '')
+        notify('Voice dictation currently requires Windows.', vim.log.levels.WARN)
+      elseif result.kind == 'canceled' then
+        clipboard.insert_at_mark(state.prompt_buf, mark, '')
+      else
+        clipboard.insert_at_mark(state.prompt_buf, mark, '')
+        notify(result.message, vim.log.levels.ERROR)
+      end
+    end, function(event)
+      if event.type == 'partial' then
+        clipboard.preview_at_mark(state.prompt_buf, mark, event.text)
+      elseif event.state == 'loading' then
+        set_voice_status('loading')
+        notify('Loading the local Nemotron speech model…')
+      elseif event.state == 'listening' then
+        set_voice_status('listening')
+        notify('Listening for voice dictation; press <Esc> or <C-g>v to finish.')
+      elseif event.state == 'audio_warning' then
+        notify(event.message or 'The microphone reported an audio warning.', vim.log.levels.WARN)
+      end
+    end)
+    if not started then set_voice_status('idle') end
   end)
-  if not started then set_voice_status('idle') end
-  return started
+  return true
 end
 
 _G.NativeCopilotPromptVoiceToggle = function()
@@ -755,6 +775,14 @@ local function ensure_prompt_buffer()
   vim.keymap.set({ 'n', 'i' }, '<C-g>v', M.dictate_voice, {
     buffer = buf,
     desc = 'Start or finish voice dictation',
+  })
+  vim.keymap.set('i', '<Esc>', function()
+    if state.voice_status ~= 'idle' then M.dictate_voice() end
+    return '<Esc>'
+  end, {
+    buffer = buf,
+    expr = true,
+    desc = 'Finish voice dictation and leave Insert mode',
   })
   vim.keymap.set('n', '[a', function() M.cycle_member(-1) end, {
     buffer = buf,
