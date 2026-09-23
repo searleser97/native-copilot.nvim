@@ -3461,7 +3461,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         continue;
       }
       if ("mode" in callerPermission) {
-        if (!("mode" in requested) || requested.mode !== "prompt") {
+        if ("mode" in requested && requested.mode !== "prompt") {
           throw new Error(
             `Agent "${definition.id}" cannot receive non-interactive permissions because its ` +
               `creator "${caller.alias}" requires permission prompts.`,
@@ -3486,9 +3486,16 @@ export class CopilotRuntime implements RuntimeAdapter {
     caller: AgentContext,
     availableServers: ReadonlySet<string>,
   ): ReadonlySet<string> {
-    return caller.agentId === this.primaryAgentId
-      ? availableServers
-      : this.effectiveMcpServers(caller);
+    if (caller.agentId === this.primaryAgentId) {
+      return availableServers;
+    }
+    return new Set(
+      [...this.effectiveMcpServers(caller)].filter(
+        (server) =>
+          availableServers.has(server) &&
+          !this.policy.disabledMcpServers.includes(server),
+      ),
+    );
   }
 
   private assertMcpCeiling(
@@ -5843,10 +5850,16 @@ export class CopilotRuntime implements RuntimeAdapter {
     for (const sessionId of sessionIds) {
       const active = this.resolveAgentRef(sessionId);
       const stored = this.db.agentRunBySession(sessionId, this.workspace);
+      const recoverableStoredAgentId =
+        stored?.definition &&
+        stored.session &&
+        stored.startupState === "ready"
+          ? stored.agentId
+          : undefined;
       const targetAgentId =
         active && this.lookupAgentSessionId(active) === sessionId
           ? active.agentId
-          : stored?.agentId;
+          : recoverableStoredAgentId;
       if (!targetAgentId) {
         throw new Error(`${field} contains unknown managed Copilot session "${sessionId}".`);
       }

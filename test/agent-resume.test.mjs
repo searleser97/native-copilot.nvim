@@ -271,6 +271,26 @@ test("restricted agents can create only narrower children", async (t) => {
   assert.deepEqual(record.definition.mcpServers, ["old-server"]);
 });
 
+test("prompting agents may create stricter prompting children", async (t) => {
+  const { runtime } = fixture(t, ["old-server"]);
+  const caller = restrictedCaller(runtime);
+  caller.definition.permissions = { mode: "prompt" };
+
+  assert.doesNotThrow(() => runtime.assertPermissionCeiling([{
+    ...caller.definition,
+    id: "strict_child",
+    permissions: restrictedPermissions,
+  }], caller));
+  assert.throws(
+    () => runtime.assertPermissionCeiling([{
+      ...caller.definition,
+      id: "elevated_child",
+      permissions: { mode: "approveAll" },
+    }], caller),
+    /approveAll|non-interactive permissions/,
+  );
+});
+
 test("links use ordinary durable sessions and resolve stopped targets", async (t) => {
   const directory = mkdtempSync(join(artifacts, "links-"));
   const db = new AgentDatabase(join(directory, "state.sqlite"), () => false);
