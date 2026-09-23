@@ -52,6 +52,7 @@ require("native_copilot").setup({
   tool_summary_max_length = 120,
   timestamp_format = '%H:%M:%S',
   conversation = {
+    markdown = true,
     user_label = '👨',
     copilot_label = '🤖',
     task_label = '📝',
@@ -573,8 +574,12 @@ message with the concrete host error instead of leaving an empty or indefinitely
 ## Rendering and observability
 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
-renderer dependency. User, Copilot, and Task turns place emoji-only `👨`, `🤖`, and `📝` actor
-signs in the gutter, while each authored block names its actor before the timestamp or Copilot's
+renderer dependency. Conversation message bodies receive lightweight, non-concealing Markdown
+highlights for headings, emphasis, inline and fenced code, lists, quotes, and links after each
+message completes. The underlying text and line layout never change; set
+`conversation.markdown = false` to disable the highlights. User, Copilot, and Task turns place
+emoji-only `👨`, `🤖`, and `📝` actor signs in the gutter, while each authored block names its actor
+before the timestamp or Copilot's
 animated `writing...` state. Delivered inter-agent prompts appear inline in the recipient's
 conversation with the sender's name and Copilot sign; the Messages view remains the durable
 delivery audit log. Actor signs, along with Tool and Scheduler headings, are configurable through `conversation`

@@ -224,7 +224,7 @@ local function line_has_highlight(buf, row, namespace_name, highlight)
     { details = true }
   )) do
     local details = mark[4] or {}
-    if details.hl_group == highlight
+    if (not highlight or details.hl_group == highlight)
       and mark[2] <= row - 1
       and (details.end_row or mark[2] + 1) > row - 1
     then
@@ -232,6 +232,121 @@ local function line_has_highlight(buf, row, namespace_name, highlight)
     end
   end
   return false
+end
+
+local function line_has_markdown_highlight(buf, row, highlight)
+  local namespace = vim.api.nvim_get_namespaces().native_copilot_markdown
+  if not namespace or not row then return false end
+  local target = row - 1
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+    buf,
+    namespace,
+    { 0, 0 },
+    { -1, -1 },
+    { details = true }
+  )) do
+    local details = mark[4] or {}
+    local end_row = details.end_row or mark[2]
+    if details.hl_group == highlight
+      and mark[2] <= target
+      and (
+        end_row > target
+        or (end_row == target and mark[2] == target and (details.end_col or 0) > mark[3])
+      )
+    then
+      return true
+    end
+  end
+  return false
+end
+
+local function markdown_highlights_preserve_conversation_text()
+  local member_id = 'markdown-highlight-probe'
+  local entry = buffers.ensure_member(member_id, 'Markdown highlight probe')
+  local buf = entry.views.conversation.buf
+  local static_content = table.concat({
+    '# Heading',
+    '',
+    '- **important** and `literal`',
+    '> quoted',
+    '[docs](https://example.test)',
+  }, '\n')
+  buffers.append_block(member_id, 'conversation', 'You', static_content)
+  buffers.begin_response(member_id, 'markdown-response')
+  buffers.append_conversation_delta(
+    member_id,
+    'markdown-message',
+    '**before tool**\n'
+  )
+  buffers.upsert_timeline(member_id, 'markdown-tool', {
+    kind = 'tool',
+    label = '**not markdown**',
+    status = 'completed',
+    detail = '`timeline row`',
+    started_at = os.time(),
+    completed_at = os.time(),
+  })
+  buffers.append_conversation_delta(
+    member_id,
+    'markdown-message',
+    '## Streamed\n\n```lua\nlocal value = 1\n```'
+  )
+  buffers.complete_conversation(
+    member_id,
+    'markdown-message',
+    '## Streamed\n\n```lua\nlocal value = 1\n```'
+  )
+  buffers.finish_response(member_id)
+
+  local rendered = text(buf)
+  local heading_row = line_with(buf, '# Heading')
+  local strong_row = line_with(buf, '**important**')
+  local quote_row = line_with(buf, '> quoted')
+  local link_row = line_with(buf, '[docs](https://example.test)')
+  local before_tool_row = line_with(buf, '**before tool**')
+  local streamed_heading_row = line_with(buf, '## Streamed')
+  local code_row = line_with(buf, 'local value = 1')
+  local tool_row = line_with(buf, '**not markdown**')
+  local preserved = rendered:find(static_content, 1, true) ~= nil
+    and rendered:find('```lua\nlocal value = 1\n```', 1, true) ~= nil
+  local highlighted = line_has_markdown_highlight(
+    buf,
+    heading_row,
+    'NativeCopilotMarkdownHeading'
+  )
+    and line_has_markdown_highlight(
+      buf,
+      strong_row,
+      'NativeCopilotMarkdownStrong'
+    )
+    and line_has_markdown_highlight(
+      buf,
+      quote_row,
+      'NativeCopilotMarkdownQuote'
+    )
+    and line_has_markdown_highlight(
+      buf,
+      link_row,
+      'NativeCopilotMarkdownLink'
+    )
+    and line_has_markdown_highlight(
+      buf,
+      before_tool_row,
+      'NativeCopilotMarkdownStrong'
+    )
+    and line_has_markdown_highlight(
+      buf,
+      streamed_heading_row,
+      'NativeCopilotMarkdownHeading'
+    )
+    and line_has_markdown_highlight(
+      buf,
+      code_row,
+      'NativeCopilotMarkdownCode'
+    )
+    and not line_has_markdown_highlight(buf, tool_row)
+  buffers.remove_member(member_id)
+  return preserved and highlighted
 end
 
 local function reasoning_highlight_recovers_after_extmark_loss()
@@ -770,6 +885,12 @@ tick = function()
     if not check(
       reasoning_highlight_recovers_after_extmark_loss(),
       'reasoning completion restored a missing subdued highlight'
+    ) then
+      return
+    end
+    if not check(
+      markdown_highlights_preserve_conversation_text(),
+      'Markdown highlights preserved static and streamed conversation text'
     ) then
       return
     end

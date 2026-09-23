@@ -43,6 +43,9 @@ local header_highlight_namespace =
 local user_message_namespace = vim.api.nvim_create_namespace('native_copilot_user_message')
 local task_message_namespace = vim.api.nvim_create_namespace('native_copilot_task_message')
 local timeline_namespace = vim.api.nvim_create_namespace('native_copilot_timeline')
+local markdown_namespace = vim.api.nvim_create_namespace('native_copilot_markdown')
+local markdown_region_namespace =
+  vim.api.nvim_create_namespace('native_copilot_markdown_region')
 local content_indent = ''
 local quote_indent = content_indent .. '>'
 local options = {
@@ -52,6 +55,7 @@ local options = {
   timestamp_format = '%H:%M:%S',
   now = os.time,
   conversation = {
+    markdown = true,
     user_label = '👨',
     copilot_label = '🤖',
     task_label = '📝',
@@ -141,6 +145,38 @@ local function setup_highlights()
   local ratio = light_background and 0.20 or 0.30
   vim.api.nvim_set_hl(0, 'NativeCopilotTaskMessage', {
     bg = blend_color(background, purple, ratio),
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownHeading', {
+    default = true,
+    link = 'Title',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownStrong', {
+    default = true,
+    bold = true,
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownEmphasis', {
+    default = true,
+    italic = true,
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownCode', {
+    default = true,
+    link = 'String',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownDelimiter', {
+    default = true,
+    link = 'Comment',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownList', {
+    default = true,
+    link = 'Identifier',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownQuote', {
+    default = true,
+    link = 'Comment',
+  })
+  vim.api.nvim_set_hl(0, 'NativeCopilotMarkdownLink', {
+    default = true,
+    link = 'Underlined',
   })
 end
 
@@ -322,6 +358,8 @@ local function create_buffer(name, member_id, view_id)
     response_line_start = true,
     response_resume_after_actor = false,
     response_has_owned_timeline = false,
+    response_markdown_region = nil,
+    response_markdown_regions = {},
     awaiting_response = nil,
     message_heading = nil,
     writing_generation = 0,
@@ -389,6 +427,8 @@ function M.prepare_history(member_id, event_time)
   vim.api.nvim_buf_clear_namespace(view.buf, timeline_namespace, 0, -1)
   vim.api.nvim_buf_clear_namespace(view.buf, activity_namespace, 0, -1)
   vim.api.nvim_buf_clear_namespace(view.buf, activity_body_namespace, 0, -1)
+  vim.api.nvim_buf_clear_namespace(view.buf, markdown_namespace, 0, -1)
+  vim.api.nvim_buf_clear_namespace(view.buf, markdown_region_namespace, 0, -1)
   with_modifiable(view.buf, function()
     vim.api.nvim_buf_set_lines(view.buf, 0, -1, false, {
       ('──────── %s ────────'):format(os.date(options.conversation.day_header_format, now)),
@@ -405,6 +445,8 @@ function M.prepare_history(member_id, event_time)
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.response_has_owned_timeline = false
+  view.response_markdown_region = nil
+  view.response_markdown_regions = {}
   view.awaiting_response = nil
   view.message_heading = nil
   view.last_activity = nil
@@ -617,6 +659,220 @@ local function append(view, text, final)
   end
 end
 
+local function markdown_highlight(buf, row, start_col, end_col, group, priority)
+    if end_col <= start_col then return end
+    vim.api.nvim_buf_set_extmark(buf, markdown_namespace, row, start_col, {
+      end_row = row,
+      end_col = end_col,
+      hl_group = group,
+      hl_mode = 'combine',
+      priority = priority or 120,
+    })
+  end
+
+  local function markdown_range_highlight(buf, start_row, end_row, group, priority)
+    if end_row <= start_row then return end
+    vim.api.nvim_buf_set_extmark(buf, markdown_namespace, start_row, 0, {
+      end_row = end_row,
+      end_col = 0,
+      hl_group = group,
+      hl_eol = true,
+      hl_mode = 'combine',
+      priority = priority or 120,
+    })
+  end
+
+  local function highlight_markdown_pattern(buf, row, line, pattern, group, priority)
+    local offset = 1
+    while offset <= #line do
+      local start_col, end_col = line:find(pattern, offset)
+      if not start_col then break end
+      markdown_highlight(buf, row, start_col - 1, end_col, group, priority)
+      offset = math.max(end_col + 1, offset + 1)
+    end
+  end
+
+  local function highlight_markdown_range(view, start_row, end_row)
+    if options.conversation.markdown == false or end_row <= start_row then return end
+    local lines = vim.api.nvim_buf_get_lines(view.buf, start_row, end_row, false)
+    local fence_row
+    for index, line in ipairs(lines) do
+      local row = start_row + index - 1
+      if line:match('^%s*```') then
+        markdown_highlight(
+          view.buf,
+          row,
+          0,
+          #line,
+          'NativeCopilotMarkdownDelimiter',
+          130
+        )
+        if fence_row then
+          markdown_range_highlight(
+            view.buf,
+            fence_row + 1,
+            row,
+            'NativeCopilotMarkdownCode',
+            125
+          )
+          fence_row = nil
+        else
+          fence_row = row
+        end
+      elseif not fence_row then
+        local heading_end = line:find('^%s*#+%s+')
+        if heading_end then
+          markdown_highlight(
+            view.buf,
+            row,
+            0,
+            #line,
+            'NativeCopilotMarkdownHeading',
+            110
+          )
+        else
+          local quote_end = line:find('^%s*>%s?')
+          if quote_end then
+            markdown_highlight(
+              view.buf,
+              row,
+              0,
+              #line,
+              'NativeCopilotMarkdownQuote',
+              105
+            )
+          end
+          local _, list_end = line:find('^%s*[-+*]%s+')
+          if not list_end then _, list_end = line:find('^%s*%d+[.)]%s+') end
+          if list_end then
+            markdown_highlight(
+              view.buf,
+              row,
+              0,
+              list_end,
+              'NativeCopilotMarkdownList',
+              115
+            )
+          end
+        end
+        highlight_markdown_pattern(
+          view.buf,
+          row,
+          line,
+          '`[^`]+`',
+          'NativeCopilotMarkdownCode',
+          140
+        )
+        highlight_markdown_pattern(
+          view.buf,
+          row,
+          line,
+          '%*%*[^%*]+%*%*',
+          'NativeCopilotMarkdownStrong',
+          135
+        )
+        highlight_markdown_pattern(
+          view.buf,
+          row,
+          line,
+          '__[^_]+__',
+          'NativeCopilotMarkdownStrong',
+          135
+        )
+        highlight_markdown_pattern(
+          view.buf,
+          row,
+          line,
+          '%*[^%*]+%*',
+          'NativeCopilotMarkdownEmphasis',
+          130
+        )
+        highlight_markdown_pattern(
+          view.buf,
+          row,
+          line,
+          '_[^_]+_',
+          'NativeCopilotMarkdownEmphasis',
+          130
+        )
+        highlight_markdown_pattern(
+          view.buf,
+          row,
+          line,
+          '%[[^%]]+%]%([^%)]+%)',
+          'NativeCopilotMarkdownLink',
+          145
+        )
+      end
+    end
+    if fence_row then
+      markdown_range_highlight(
+        view.buf,
+        fence_row + 1,
+        end_row,
+        'NativeCopilotMarkdownCode',
+        125
+      )
+    end
+  end
+
+  local function open_response_markdown_region(view)
+    if options.conversation.markdown == false or view.response_markdown_region then return end
+    local row = vim.api.nvim_buf_line_count(view.buf) - 1
+    view.response_markdown_region = vim.api.nvim_buf_set_extmark(
+      view.buf,
+      markdown_region_namespace,
+      row,
+      0,
+      { right_gravity = false }
+    )
+  end
+
+  local function close_response_markdown_region(view)
+    if not view.response_markdown_region then return end
+    local position = vim.api.nvim_buf_get_extmark_by_id(
+      view.buf,
+      markdown_region_namespace,
+      view.response_markdown_region,
+      {}
+    )
+    if #position > 0 then
+      local end_row = vim.api.nvim_buf_line_count(view.buf)
+      view.response_markdown_region = vim.api.nvim_buf_set_extmark(
+        view.buf,
+        markdown_region_namespace,
+        position[1],
+        0,
+        {
+          id = view.response_markdown_region,
+          end_row = end_row,
+          end_col = 0,
+          right_gravity = false,
+          end_right_gravity = false,
+        }
+      )
+      table.insert(view.response_markdown_regions, view.response_markdown_region)
+    end
+    view.response_markdown_region = nil
+  end
+
+  local function highlight_response_markdown(view)
+    close_response_markdown_region(view)
+    for _, region in ipairs(view.response_markdown_regions) do
+      local position = vim.api.nvim_buf_get_extmark_by_id(
+        view.buf,
+        markdown_region_namespace,
+        region,
+        { details = true }
+      )
+      if #position > 0 then
+        highlight_markdown_range(view, position[1], position[3].end_row)
+        pcall(vim.api.nvim_buf_del_extmark, view.buf, markdown_region_namespace, region)
+      end
+    end
+    view.response_markdown_regions = {}
+  end
+
 local function actor_sign(label, fallback)
   label = tostring(label or '')
   return vim.fn.strdisplaywidth(label) <= 2 and label or fallback
@@ -668,6 +924,9 @@ end
 function M.append_block(member_id, view_id, heading, content, event_time, actor)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
+  if view_id == 'conversation' and view.response_active then
+    close_response_markdown_region(view)
+  end
   local now = ensure_day_header(view, event_time or options.now())
   prepare_pending_block(view, 1)
   local line_count = vim.api.nvim_buf_line_count(view.buf)
@@ -721,6 +980,11 @@ function M.append_block(member_id, view_id, heading, content, event_time, actor)
           line,
           header_group,
           sign
+        )
+        highlight_markdown_range(
+          view,
+          heading_row + 2,
+          vim.api.nvim_buf_line_count(view.buf) - 1
         )
         if heading == 'You' then
           vim.api.nvim_buf_set_extmark(view.buf, user_message_namespace, heading_row, 0, {
@@ -779,9 +1043,11 @@ local function continue_copilot_actor(view, event_time)
   view.response_line_start = true
   view.response_resume_after_actor = false
   view.last_block_kind = 'header'
+  open_response_markdown_region(view)
 end
 
 local function begin_inline_activity(view, activity_id, heading, event_time)
+  close_response_markdown_region(view)
   continue_copilot_actor(view, event_time)
   ensure_day_header(view, event_time or options.now())
   flush(view)
@@ -1453,6 +1719,7 @@ function M.upsert_timeline(member_id, item_id, item)
   end
 
   if not start_row then
+    close_response_markdown_region(view)
     ensure_day_header(view, now)
     local first_history_environment = item.kind == 'environment'
       and view.history_prepared
@@ -1742,7 +2009,10 @@ local function begin_response(view, response_id, event_time)
   view.awaiting_response = response_id or true
   view.response_active = true
   view.response_message_completed = false
+  view.response_markdown_region = nil
+  view.response_markdown_regions = {}
   view.last_block_kind = 'header'
+  open_response_markdown_region(view)
   animate_writing(view, view.writing_generation)
 end
 
@@ -1805,6 +2075,7 @@ function M.append_conversation_delta(member_id, message_id, content)
   then
     prepare_pending_block(view, 1)
   end
+  open_response_markdown_region(view)
   if view.response_resume_after_actor then
     content = content:gsub('^[ \t]+', '')
     if content ~= '' then view.response_resume_after_actor = false end
@@ -1818,6 +2089,7 @@ function M.fail_response(member_id, detail)
   if not view.awaiting_response and not view.active_message then return false end
   flush(view)
   touch_message_heading(view, 'failed', detail or 'failed')
+  highlight_response_markdown(view)
   view.awaiting_response = nil
   view.active_message = nil
   view.response_active = false
@@ -1845,6 +2117,7 @@ function M.complete_conversation(member_id, message_id, content, event_time)
     then
       prepare_pending_block(view, 1)
     end
+    open_response_markdown_region(view)
     append(view, indent_response_delta(view, content) .. '\n', true)
     view.awaiting_response = nil
     touch_message_heading(view, 'completed', nil, event_time)
@@ -1853,11 +2126,13 @@ function M.complete_conversation(member_id, message_id, content, event_time)
     touch_message_heading(view, 'completed', nil, event_time)
   elseif view.response_active and view.message_heading then
     prepare_pending_block(view, 1)
+    open_response_markdown_region(view)
     append(view, indent_response_delta(view, content) .. '\n', true)
     touch_message_heading(view, 'completed', nil, event_time)
   else
     M.append_block(member_id, 'conversation', 'Copilot', content, event_time)
   end
+  highlight_response_markdown(view)
   view.active_message = nil
   view.response_message_completed = true
   view.response_line_start = true
@@ -1876,6 +2151,7 @@ function M.finish_response(member_id, event_time)
     return
   end
   flush(view)
+  highlight_response_markdown(view)
   if view.awaiting_response
     and not view.active_message
     and not view.response_has_owned_timeline

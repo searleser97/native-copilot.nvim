@@ -72,6 +72,7 @@ local defaults = {
   tool_summary_max_length = 120,
   timestamp_format = '%H:%M:%S',
   conversation = {
+    markdown = true,
     user_label = '👨',
     copilot_label = '🤖',
     task_label = '📝',
