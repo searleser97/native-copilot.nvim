@@ -25,6 +25,7 @@ import {
   agentCreateSchema,
   agentLinkSetSchema,
   createDefinitionToDynamic,
+  dynamicPermissionSchema,
   parseAgentLinkSet,
   validateAgentDefinition,
   validateSpawnRequest,
@@ -47,6 +48,7 @@ export const FLEET_TOOL_NAMES = Object.freeze({
   list: "real_agent_list",
   getLinks: "real_agent_get_links",
   updateLinks: "real_agent_update_links",
+  stop: "real_agent_stop",
   remove: "real_agent_remove",
   listRecipients: "real_agent_list_recipients",
   sendMessage: "real_agent_send_message",
@@ -512,6 +514,11 @@ interface StoredAgentRecord {
   mcpServers: string[];
   canTalkToAgentIds: string[];
   canObserveAgentIds: string[];
+}
+
+interface AgentResumeOverrides {
+  permissions?: DynamicPermission;
+  mcpServers?: string[];
 }
 
 function storedAgentRecord(value: string): StoredAgentRecord {
@@ -2882,6 +2889,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       this.listAgentsTool(context),
       this.getAgentLinksTool(context),
       this.updateAgentLinksTool(context),
+      this.stopOwnedAgentTool(context),
       this.removeOwnedAgentTool(context),
     ];
     config.tools = tools;
@@ -2942,7 +2950,8 @@ export class CopilotRuntime implements RuntimeAdapter {
     return defineTool(FLEET_TOOL_NAMES.resume, {
       description:
         "Resume exactly one Copilot SDK session as a real agent. A managed session recovers its " +
-        "existing durable agent identity and configuration; an unowned local session is adopted " +
+        "existing durable agent identity and may replace its permissions and MCP subset while " +
+        "inactive; an unowned local session is adopted " +
         "as a new generic real agent with inherited runtime configuration and no communication " +
         "links. If the session is already open in another Neovim or Copilot process, tell the user " +
         "it must be closed there before it can be resumed here.",
@@ -2951,11 +2960,23 @@ export class CopilotRuntime implements RuntimeAdapter {
           .string()
           .min(1)
           .describe("Copilot SDK session id returned by real_agent_list."),
+        permissions: dynamicPermissionSchema.optional().describe(
+          "Optional complete replacement permission profile for this resumed run. It must remain " +
+            "within the main session ceiling.",
+        ),
+        mcpServers: z.array(z.string().min(1)).optional().describe(
+          "Optional complete replacement MCP server subset. Every server must currently be " +
+            "available to the primary session.",
+        ),
       }).strict(),
       skipPermission: true,
       defer: "never",
-      handler: async ({ sessionId }) => {
+      handler: async ({ sessionId, permissions, mcpServers }) => {
         const source = this.requireActiveCaller(caller.agentId);
+        const overrides: AgentResumeOverrides = {
+          ...(permissions === undefined ? {} : { permissions }),
+          ...(mcpServers === undefined ? {} : { mcpServers: [...new Set(mcpServers)] }),
+        };
         const active = [...this.agents.values()].find(
           (agent) => this.lookupAgentSessionId(agent) === sessionId,
         );
@@ -2983,7 +3004,7 @@ export class CopilotRuntime implements RuntimeAdapter {
               `Agent session "${sessionId}" is not owned by the calling durable Copilot agent.`,
             );
           }
-          await this.resumeAgent(stored.id);
+          await this.resumeAgent(stored.id, overrides);
           const resumed = this.agents.get(stored.agentId);
           if (!resumed) {
             throw new Error(`Agent session "${sessionId}" did not become active after recovery.`);
@@ -2991,12 +3012,15 @@ export class CopilotRuntime implements RuntimeAdapter {
           return {
             resumed: true,
             adopted: false,
+            reconfigured: permissions !== undefined || mcpServers !== undefined,
             ...this.agentPayload(resumed),
             sessionId,
             state: this.agentState(resumed),
+            permissions: resumed.definition.permissions,
+            mcpServers: [...this.effectiveMcpServers(resumed)].sort(),
           };
         }
-        return this.adoptSessionAsAgent(source, sessionId);
+        return this.adoptSessionAsAgent(source, sessionId, overrides);
       },
     });
   }
@@ -3119,6 +3143,37 @@ export class CopilotRuntime implements RuntimeAdapter {
         this.requireOwnedAdministration(source, target);
         await this.stopAgent(target.agentId, reason ?? `Agent removed by owner "${source.alias}"`);
         return { removed: true, ...this.agentPayload(target) };
+      },
+    });
+  }
+
+  private stopOwnedAgentTool(caller: AgentContext): Tool<any> {
+    return defineTool(FLEET_TOOL_NAMES.stop, {
+      description:
+        "Stop one active real agent owned by this Copilot session while preserving its durable " +
+        "identity, SDK session, history, mailbox, links, and recoverability. Resume it later by " +
+        "passing its SDK session id to real_agent_resume.",
+      parameters: z.object({
+        agent: z.string().min(1),
+        reason: z.string().min(1).optional(),
+      }).strict(),
+      skipPermission: true,
+      defer: "never",
+      handler: async ({ agent, reason }) => {
+        const source = this.requireActiveCaller(caller.agentId);
+        const target = this.requireAgent(agent);
+        this.requireOwnedAdministration(source, target);
+        const sessionId = this.lookupAgentSessionId(target);
+        if (!sessionId) {
+          throw new Error(`Agent "${target.alias}" has no SDK session to resume later.`);
+        }
+        await this.stopAgent(target.agentId, reason ?? `Agent stopped by owner "${source.alias}"`);
+        return {
+          stopped: true,
+          ...this.agentPayload(target),
+          sessionId,
+          state: "recoverable",
+        };
       },
     });
   }
@@ -5596,6 +5651,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   private async adoptSessionAsAgent(
     caller: AgentContext,
     sessionId: string,
+    overrides: AgentResumeOverrides = {},
   ): Promise<Record<string, unknown>> {
     const owner = this.db.sessionOwner(sessionId);
     if (owner) {
@@ -5627,12 +5683,15 @@ export class CopilotRuntime implements RuntimeAdapter {
       prompt:
         "Continue this existing Copilot session as an independently managed real agent. " +
         "Preserve its prior context and wait for explicit user or authorized peer instructions.",
-      permissions: { mode: "inherit" },
+      permissions: overrides.permissions ?? { mode: "inherit" },
+      ...(overrides.mcpServers === undefined ? {} : { mcpServers: overrides.mcpServers }),
       canTalkTo: [],
       canObserve: [],
     };
     const resolved = this.resolveStoredDefinition(definition);
     const mcpServers = await this.availableMcpServers();
+    this.assertPermissionCeiling([definition]);
+    this.assertMcpCeiling([definition], mcpServers);
     const context: AgentContext = {
       agentId: randomUUID(),
       target: "",
@@ -6014,7 +6073,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   /** Resumes exactly one durable agent run; there is no group recovery. */
-  async resumeAgent(runId: string): Promise<void> {
+  async resumeAgent(runId: string, overrides: AgentResumeOverrides = {}): Promise<void> {
     const stored = this.db.agentRun(runId, this.workspace);
     if (!stored) {
       throw new Error(`Agent run "${runId}" was not found for this workspace.`);
@@ -6022,10 +6081,16 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (stored.isPrimary) {
       throw new Error("The primary agent is resumed through the main Copilot buffer.");
     }
-    return this.withAgentLock(stored.agentId, () => this.resumeAgentUnlocked(runId));
+    return this.withAgentLock(
+      stored.agentId,
+      () => this.resumeAgentUnlocked(runId, overrides),
+    );
   }
 
-  private async resumeAgentUnlocked(runId: string): Promise<void> {
+  private async resumeAgentUnlocked(
+    runId: string,
+    overrides: AgentResumeOverrides,
+  ): Promise<void> {
     const stored = this.db.agentRun(runId, this.workspace);
     if (!stored) {
       throw new Error(`Agent run "${runId}" was not found for this workspace.`);
@@ -6067,17 +6132,27 @@ export class CopilotRuntime implements RuntimeAdapter {
       );
     }
     const record = storedAgentRecord(stored.definition);
-    const definition = record.definition;
+    const definition: DynamicAgentDefinition = {
+      ...record.definition,
+      ...(overrides.permissions === undefined
+        ? {}
+        : { permissions: overrides.permissions }),
+      ...(overrides.mcpServers === undefined
+        ? {}
+        : { mcpServers: [...new Set(overrides.mcpServers)] }),
+    };
     const resolved = this.resolveStoredDefinition(definition);
     this.assertPermissionCeiling([definition]);
     this.assertAliasesAvailable([definition.id], stored.agentId);
     await this.openPrimary();
-    // Recovery retains the original captured ceiling. The connection plan separately
-    // disables every currently visible primary server outside it, so newly added
-    // servers can never become available to a recovered agent.
-    const mcpServers = new Set(record.mcpServers);
-    this.assertMcpCeiling([definition], mcpServers);
     const available = await this.availableMcpServers();
+    // Ordinary recovery retains the original captured ceiling. Explicit MCP
+    // reconfiguration recaptures the current primary ceiling before applying the
+    // requested subset, allowing a stopped agent to gain newly available servers.
+    const mcpServers = overrides.mcpServers === undefined
+      ? new Set(record.mcpServers)
+      : new Set(available);
+    this.assertMcpCeiling([definition], mcpServers);
     for (const server of definition.mcpServers ?? []) {
       if (!available.has(server)) {
         throw new Error(
@@ -6087,7 +6162,16 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     this.assertAliasesAvailable([definition.id], stored.agentId);
 
-    this.db.resumeRun(runId, process.pid);
+    const nextStoredDefinition = JSON.stringify({
+      definition,
+      mcpServers: [...mcpServers],
+      canTalkToAgentIds: record.canTalkToAgentIds,
+      canObserveAgentIds: record.canObserveAgentIds,
+    } satisfies StoredAgentRecord);
+    this.db.resumeRun(runId, process.pid, {
+      alias: definition.id,
+      definition: nextStoredDefinition,
+    });
     const administration = this.db.agentAdministration(stored.agentId);
     const canTalkTo = administration
       ? storedAgentIds(administration.canTalkToJson)

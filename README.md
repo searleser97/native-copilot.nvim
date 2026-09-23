@@ -296,9 +296,10 @@ to a raw session ID. Genuinely empty, unnamed sessions receive a compact `Untitl
 
 Agents are not predefined and require no external configuration file. Every agent receives
 `real_agent_create`, `real_agent_resume`, `real_agent_get`, `real_agent_list`, `real_agent_get_links`,
-`real_agent_update_links`, `real_agent_remove`, `real_agent_list_recipients`,
-`real_agent_send_message`, and `real_agent_read_activity`. Each create call provisions exactly one
-agent and returns its Copilot SDK session ID; there is no batch or `real_team_*` tool API.
+`real_agent_update_links`, `real_agent_stop`, `real_agent_remove`,
+`real_agent_list_recipients`, `real_agent_send_message`, and `real_agent_read_activity`. Each create
+call provisions exactly one agent and returns its Copilot SDK session ID; there is no batch or
+`real_team_*` tool API.
 
 The former `native_copilot_*` and `real_team_*` fleet tool names are intentionally not registered as
 duplicate aliases, so the model sees one unambiguous API.
@@ -313,9 +314,11 @@ Every participant receives:
 
 A call to `real_agent_create` accepts the agent's identity, persona, permissions, and MCP subset,
 creates its SDK session once with that complete execution configuration, and returns the final
-session ID without sending a task. Execution configuration is immutable for that agent run; create
-a replacement agent when it must change. The child starts with empty peer links, which its owner
-can configure after all peer session IDs exist.
+session ID without sending a task. To change execution access, its owner must first call
+`real_agent_stop`, then call `real_agent_resume` with that SDK session ID and an optional complete
+replacement `permissions` profile and/or `mcpServers` subset. The same durable agent and SDK
+conversation are retained. The child starts with empty peer links, which its owner can configure
+after all peer session IDs exist.
 
 Ownership and host links are separate workspace-global durable SQLite records. Permissions and MCP
 configuration remain in the run's creation definition, not in the link record. The exact creating
@@ -377,7 +380,9 @@ recreate a parallel definition:
 - An agent's captured MCP ceiling is the primary server set visible when it is created. Its
   `mcpServers` field may only narrow that set; when omitted, the captured set is the effective
   allowlist. Every child connection also explicitly disables currently visible primary servers
-  outside that effective allowlist, so reconnecting cannot acquire servers added later.
+  outside that effective allowlist, so ordinary reconnecting cannot acquire servers added later.
+  An explicit stopped-agent resume that supplies `mcpServers` recaptures the primary's current
+  server ceiling and validates the complete replacement subset against it.
 - An agent's `model` / `reasoningEffort` / `reasoningSummary` override the inherited defaults.
 - An MCP server an agent defines itself takes precedence over an inherited native server of the same
   name.
@@ -400,11 +405,14 @@ session IDs. Link changes are handled entirely by the host and never reconnect o
 session.
 
 Recovery reconnects one agent run at a time with its durable UUID, SDK session ID, stored definition,
-mailbox, communication and observation ACLs, and original MCP ceiling. Active runs owned by another
-Neovim instance are never offered. A persisted SDK session may be owned by historical runs of only
-one durable agent UUID. Session pickers hide every recoverable or currently-starting owned session;
-primary replacement accepts only an unowned session or one already owned by that same primary UUID,
-and worker recovery rejects live, externally in-use, or differently owned sessions.
+mailbox, and communication and observation ACLs. With no overrides, it also retains the original MCP
+ceiling exactly. An inactive owned agent may instead atomically persist a complete replacement
+permission profile and/or MCP subset as it transitions to active; validation failure leaves it
+stopped and unchanged. Active runs owned by another Neovim instance are never offered. A persisted
+SDK session may be owned by historical runs of only one durable agent UUID. Session pickers hide
+every recoverable or currently-starting owned session; primary replacement accepts only an unowned
+session or one already owned by that same primary UUID, and worker recovery rejects live,
+externally in-use, or differently owned sessions.
 
 The primary agent is reclaimed through the same stored context/session path on host restart.
 `/resume` keeps its durable agent UUID and dynamic UI target while creating a coherent replacement
@@ -451,10 +459,16 @@ Every agent, including the primary, receives the same stable communication tools
   the Copilot SDK session ID used for recovery. An agent open in another process is reported as
   `active_elsewhere` rather than being offered for recovery.
 - `real_agent_resume` reconnects exactly one session by SDK session ID. A known managed session
-  recovers its existing durable identity and configuration. An unowned local session is adopted as
-  a generic real agent with inherited runtime configuration and no initial communication or
-  observation links; it preserves the existing conversation instead of creating a replacement SDK
-  session. A session already open in another Neovim or Copilot process must be closed there first.
+  recovers its existing durable identity and configuration. While that session is stopped, optional
+  `permissions` and `mcpServers` arguments replace those complete execution settings within the
+  primary host's current native ceilings. An unowned local session is adopted as a generic real
+  agent with inherited runtime configuration (or supplied replacements) and no initial
+  communication or observation links; it preserves the existing conversation instead of creating a
+  replacement SDK session. A session already open in another Neovim or Copilot process must be
+  closed there first.
+- `real_agent_stop` disconnects one directly owned active agent while preserving its SDK session,
+  durable identity, history, mailbox, and links for later recovery. `real_agent_remove` remains a
+  backward-compatible stop alias.
 - `real_agent_list_recipients` returns the agents it may message or observe with their alias,
   durable UUID, current SDK session ID, runtime state, and directional grant flags.
 - `real_agent_send_message` sends to one of those recipients by alias, UUID, or current session

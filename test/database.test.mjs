@@ -826,3 +826,74 @@ test("failed adopted sessions are not exposed as recoverable agents", (t) => {
   );
   db.close();
 });
+
+test("resume atomically replaces a stopped agent configuration", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, () => false);
+  db.createOwnedAgentRun(
+    {
+      id: "worker-run",
+      agentId: "worker-agent",
+      alias: "worker",
+      definition: storedDefinition("worker", ["peer-agent"], ["observer-agent"]),
+      workspace: "workspace",
+      ownerPid: 8103,
+    },
+    "parent-agent",
+    "parent-session",
+  );
+  db.upsertSession("worker-run", "worker-session", "connected");
+  db.completeProvisionedAgentStartup("worker-run");
+  db.finishRun("worker-run", "interrupted", "Stopped for reconfiguration");
+
+  const reconfigured = JSON.parse(
+    storedDefinition("worker", ["peer-agent"], ["observer-agent"]),
+  );
+  reconfigured.definition.permissions = {
+    tools: { allow: ["builtin:*"], deny: [] },
+    paths: { read: ["${workspace}"], write: ["${workspace}"] },
+    commands: true,
+    network: true,
+    gitWrite: true,
+    externalActions: true,
+  };
+  reconfigured.definition.mcpServers = ["server-a"];
+  reconfigured.mcpServers = ["server-a", "server-b"];
+  const reconfiguredJson = JSON.stringify(reconfigured);
+
+  db.resumeRun("worker-run", 9103, {
+    alias: "worker",
+    definition: reconfiguredJson,
+  });
+
+  const resumed = db.agentRun("worker-run", "workspace");
+  assert.equal(resumed.status, "active");
+  assert.equal(resumed.definition, reconfiguredJson);
+  assert.equal(resumed.session.sessionId, "worker-session");
+  assert.equal(resumed.agentId, "worker-agent");
+  assert.deepEqual(db.agentAdministration("worker-agent"), {
+    agentId: "worker-agent",
+    ownerAgentId: "parent-agent",
+    ownerSessionId: "parent-session",
+    workspace: "workspace",
+    canTalkToJson: "[]",
+    canObserveJson: "[]",
+    revision: 0,
+    createdAt: db.agentAdministration("worker-agent").createdAt,
+    updatedAt: db.agentAdministration("worker-agent").updatedAt,
+  });
+
+  const forbiddenJson = storedDefinition("forbidden");
+  assert.throws(
+    () =>
+      db.resumeRun("worker-run", 9104, {
+        alias: "forbidden",
+        definition: forbiddenJson,
+      }),
+    /could not be resumed/,
+  );
+  const unchanged = db.agentRun("worker-run", "workspace");
+  assert.equal(unchanged.alias, "worker");
+  assert.equal(unchanged.definition, reconfiguredJson);
+  db.close();
+});

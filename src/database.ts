@@ -4779,7 +4779,11 @@ export class AgentDatabase {
       .all(workspace) as unknown as ReservedAgentAlias[];
   }
 
-  resumeRun(id: string, ownerPid: number): void {
+  resumeRun(
+    id: string,
+    ownerPid: number,
+    update?: { alias: string; definition: string },
+  ): void {
     this.transaction(() => {
       const run = this.db
         .prepare(
@@ -4809,15 +4813,26 @@ export class AgentDatabase {
             "ownership is missing or belongs to another agent.",
         );
       }
-      const result = this.db
-        .prepare(
-          `UPDATE runs
-           SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
-           WHERE id = ? AND mode = 'agent' AND status != 'active'
-             AND recovery_eligible = 1 AND startup_state = 'ready'
-             AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
-        )
-        .run(ownerPid, id);
+      const result = update
+        ? this.db
+          .prepare(
+            `UPDATE runs
+             SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?,
+                 alias = ?, definition = ?
+             WHERE id = ? AND mode = 'agent' AND status != 'active'
+               AND recovery_eligible = 1 AND startup_state = 'ready'
+               AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+          )
+          .run(ownerPid, update.alias, update.definition, id)
+        : this.db
+          .prepare(
+            `UPDATE runs
+             SET status = 'active', ended_at = NULL, interruption_reason = NULL, owner_pid = ?
+             WHERE id = ? AND mode = 'agent' AND status != 'active'
+               AND recovery_eligible = 1 AND startup_state = 'ready'
+               AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)`,
+          )
+          .run(ownerPid, id);
       if (result.changes !== 1) {
         throw new Error(`Agent run "${id}" could not be resumed.`);
       }

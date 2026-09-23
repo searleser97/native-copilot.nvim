@@ -10,6 +10,7 @@ test("fleet tools separate agent creation from host links", () => {
     list: "real_agent_list",
     getLinks: "real_agent_get_links",
     updateLinks: "real_agent_update_links",
+    stop: "real_agent_stop",
     remove: "real_agent_remove",
     listRecipients: "real_agent_list_recipients",
     sendMessage: "real_agent_send_message",
