@@ -566,8 +566,10 @@ message with the concrete host error instead of leaving an empty or indefinitely
 
 Conversation, mailbox, and status views are native plain-text `nofile` buffers with no Markdown
 renderer dependency. User, Copilot, and Task turns place emoji-only `👨`, `🤖`, and `📝` actor
-signs in the gutter, while the header text retains the timestamp or Copilot's animated `writing...`
-state. Their signs, along with Tool and Scheduler headings, are configurable through `conversation`
+signs in the gutter, while each authored block names its actor before the timestamp or Copilot's
+animated `writing...` state. Delivered inter-agent prompts appear inline in the recipient's
+conversation with the sender's name and Copilot sign; the Messages view remains the durable
+delivery audit log. Actor signs, along with Tool and Scheduler headings, are configurable through `conversation`
 setup options and must fit within Neovim's two-cell sign width. Inline
 reasoning remains part of each conversation buffer as unlabeled text using Neovim's `Comment`
 highlight group. Each reasoning section is a native fold that starts open and supports normal

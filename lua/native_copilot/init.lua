@@ -2612,7 +2612,10 @@ local function history_event(member_id, event, context)
   if event.type == 'user.message' and event.data then
     local content = data.content or data.prompt
     if content then
-      if agent_id or source:find('^agent%-') then
+      local source_alias = json_value(data.sourceAlias)
+      if source_alias then
+        buffers.append_agent_message(member_id, source_alias, content, event_time)
+      elseif agent_id or source:find('^agent%-') then
         local key = normalized_agent_message(content)
         local matches = context.agent_tool_prompts[key] or 0
         if matches > 0 then
@@ -3626,6 +3629,14 @@ function M._on_event(message)
   elseif message.type == 'prompt.accepted' then
     if message.requestId then state.prompt_calls[message.requestId] = nil end
     -- The user turn is rendered immediately; writing starts only with the SDK turn-start event.
+  elseif message.type == 'agent.prompt' then
+    local event_timestamp = tonumber(json_value(payload.eventTimestamp))
+    buffers.append_agent_message(
+      member_id,
+      payload.sourceDisplayName or payload.source or 'Copilot agent',
+      payload.content or '',
+      event_timestamp and math.floor(event_timestamp / 1000) or nil
+    )
   elseif message.type == 'conversation.delta' then
     set_member_activity(member_id, 'Writing', true)
     buffers.append_conversation_delta(

@@ -24,6 +24,11 @@ local actor_symbols = {
   task = '📝',
   schedule = '⏰',
 }
+local actor_names = {
+  task = 'Task',
+  schedule = 'Scheduler',
+  tool = 'Tool',
+}
 local actor_option_names = {
   task = 'task_label',
   schedule = 'scheduler_label',
@@ -617,6 +622,15 @@ local function actor_sign(label, fallback)
   return vim.fn.strdisplaywidth(label) <= 2 and label or fallback
 end
 
+local function assistant_name(view)
+  local entry = registry[view.member_id]
+  return entry and entry.display_name or 'Copilot'
+end
+
+local function actor_header(name, detail)
+  return ('%s · %s'):format(name, detail)
+end
+
 local function highlight_header(buf, row, line, group, sign)
   local separator = line:find(' · ', 1, true)
   vim.api.nvim_buf_clear_namespace(buf, header_highlight_namespace, row, row + 1)
@@ -651,7 +665,7 @@ local function highlight_header(buf, row, line, group, sign)
   end
 end
 
-function M.append_block(member_id, view_id, heading, content, event_time)
+function M.append_block(member_id, view_id, heading, content, event_time, actor)
   local entry = M.ensure_member(member_id)
   local view = entry.views[view_id]
   local now = ensure_day_header(view, event_time or options.now())
@@ -660,16 +674,29 @@ function M.append_block(member_id, view_id, heading, content, event_time)
   local display_heading
   local header_line
   local sign
-  if view_id == 'conversation' and heading == 'You' then
+  local header_group
+  if view_id == 'conversation' and actor then
+    display_heading = actor.name or heading
+    sign = actor_sign(actor.sign or options.conversation.copilot_label, '🤖')
+    header_group = actor.highlight or 'NativeCopilotActorHeader'
+    content = trim_blank_boundary_lines(content)
+    content = content_indent .. content:gsub('\n', '\n' .. content_indent)
+  elseif view_id == 'conversation' and heading == 'You' then
+    display_heading = 'You'
     sign = actor_sign(options.conversation.user_label, '👨')
+    header_group = 'NativeCopilotUserHeader'
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   elseif view_id == 'conversation' and heading == 'Copilot' then
+    display_heading = entry.display_name or 'Copilot'
     sign = actor_sign(options.conversation.copilot_label, '🤖')
+    header_group = 'NativeCopilotAssistantHeader'
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   elseif view_id == 'conversation' and heading == 'Task' then
+    display_heading = 'Task'
     sign = actor_sign(options.conversation.task_label, '📝')
+    header_group = 'NativeCopilotActorHeader'
     content = trim_blank_boundary_lines(content)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   else
@@ -677,12 +704,12 @@ function M.append_block(member_id, view_id, heading, content, event_time)
     display_heading = ('%s%s %s'):format(content_indent, level, heading)
     content = content_indent .. content:gsub('\n', '\n' .. content_indent)
   end
-  header_line = sign and timestamp(now) or ('%s · %s'):format(display_heading, timestamp(now))
+  header_line = ('%s · %s'):format(display_heading, timestamp(now))
   append(view, ('%s\n\n%s\n'):format(header_line, content), true)
   if view_id == 'conversation' then view.last_block_kind = 'message' end
   if
     view_id == 'conversation'
-    and (heading == 'You' or heading == 'Copilot' or heading == 'Task')
+    and (actor or heading == 'You' or heading == 'Copilot' or heading == 'Task')
   then
     local lines = vim.api.nvim_buf_get_lines(view.buf, line_count - 1, -1, false)
     for index, line in ipairs(lines) do
@@ -692,9 +719,7 @@ function M.append_block(member_id, view_id, heading, content, event_time)
           view.buf,
           heading_row,
           line,
-          heading == 'You' and 'NativeCopilotUserHeader'
-            or heading == 'Copilot' and 'NativeCopilotAssistantHeader'
-            or 'NativeCopilotActorHeader',
+          header_group,
           sign
         )
         if heading == 'You' then
@@ -724,6 +749,14 @@ function M.append_block(member_id, view_id, heading, content, event_time)
   end
 end
 
+function M.append_agent_message(member_id, actor_name, content, event_time)
+  M.append_block(member_id, 'conversation', actor_name, content, event_time, {
+    name = actor_name,
+    sign = options.conversation.copilot_label,
+    highlight = 'NativeCopilotActorHeader',
+  })
+end
+
 local function continue_copilot_actor(view, event_time)
   if view.last_block_kind ~= 'actor_message'
     or not (view.response_active or view.awaiting_response)
@@ -732,7 +765,7 @@ local function continue_copilot_actor(view, event_time)
   end
   prepare_pending_block(view, 1)
   flush(view)
-  local heading = timestamp(event_time or options.now())
+  local heading = actor_header(assistant_name(view), timestamp(event_time or options.now()))
   local heading_row = vim.api.nvim_buf_line_count(view.buf) - 1
   append(view, heading .. '\n\n', false)
   flush(view)
@@ -1068,7 +1101,7 @@ local function timeline_lines(item, now)
   end
   if item.actor_message then
     return {
-      timestamp(now),
+      actor_header(item.actor_name or actor_names[kind] or 'Copilot', timestamp(now)),
       '',
       ('%s%s%s%s%s'):format(
         content_indent,
@@ -1631,7 +1664,10 @@ local function animate_writing(view, generation)
     view.writing_step = (view.writing_step % 3) + 1
     set_message_heading(
       view,
-      ('writing%s'):format(string.rep('.', view.writing_step))
+      actor_header(
+        assistant_name(view),
+        ('writing%s'):format(string.rep('.', view.writing_step))
+      )
     )
     animate_writing(view, generation)
   end, 400)
@@ -1641,10 +1677,10 @@ local function touch_message_heading(view, status, detail, event_time)
   stop_writing_animation(view)
   set_message_heading(
     view,
-    ('%s%s'):format(
+    actor_header(assistant_name(view), ('%s%s'):format(
       timestamp(event_time),
       detail and (' · ' .. detail) or ''
-    ),
+    )),
     status == 'failed' and 'NativeCopilotStatusFailed' or nil
   )
 end
@@ -1685,7 +1721,7 @@ local function begin_response(view, response_id, event_time)
   view.response_started_at = event_time
   append(
     view,
-    'writing.\n\n',
+    actor_header(assistant_name(view), 'writing.') .. '\n\n',
     false
   )
   flush(view)
@@ -1699,7 +1735,7 @@ local function begin_response(view, response_id, event_time)
   highlight_header(
     view.buf,
     heading_row,
-    'writing.',
+    actor_header(assistant_name(view), 'writing.'),
     'NativeCopilotAssistantHeader',
     actor_sign(options.conversation.copilot_label, '🤖')
   )

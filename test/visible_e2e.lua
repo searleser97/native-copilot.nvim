@@ -876,6 +876,23 @@ tick = function()
         displayName = 'Reviewer',
       },
     })
+    native._on_event({
+      type = 'agent.prompt',
+      memberId = 'agent:e2e-recipient-cycle-reviewer',
+      payload = {
+        source = 'planner',
+        sourceDisplayName = 'Planner',
+        content = 'Please validate this implementation.',
+      },
+    })
+    local reviewer = buffers.get_member('agent:e2e-recipient-cycle-reviewer')
+    local reviewer_content = reviewer and text(reviewer.views.conversation.buf) or ''
+    local attributed_prompt = reviewer_content:find('Planner · ', 1, true)
+      and reviewer_content:find('Please validate this implementation.', 1, true)
+      and actor_sign_before(
+        reviewer.views.conversation.buf,
+        'Please validate this implementation.'
+      ) == '🤖'
     prompt_mapping(']a', 'n')()
     local normal_target = vim.b[prompt_buf].native_copilot_target
     local normal_preserved = text(prompt_buf) == draft
@@ -930,6 +947,7 @@ tick = function()
         and public_api_target == 'agent:e2e-recipient-cycle-reviewer'
         and normal_preserved
         and public_api_preserved
+        and attributed_prompt
         and removed_insert_mapping
         and clipboard_mappings
         and voice_mappings
@@ -1194,7 +1212,7 @@ tick = function()
   elseif phase == 'tool' then
     local tool_prompt = content:find('Read the completed validation output', 1, true)
     local copilot_header = tool_prompt
-      and content:find('\n%d%d:%d%d:%d%d\n\n', tool_prompt)
+      and content:find('\nCopilot · %d%d:%d%d:%d%d\n\n', tool_prompt)
     local tool_row = copilot_header
       and content:find(
         'powershell — Read completed validation output and summarize only the final status',
@@ -1343,7 +1361,10 @@ tick = function()
         true
       )
     local resumed_copilot = reasoning_task_promoted
-      and content:find('\n%d%d:%d%d:%d%d\n\n', reasoning_task_promoted)
+      and content:find(
+        '\nCopilot · %d%d:%d%d:%d%d\n\n',
+        reasoning_task_promoted
+      )
     local second_reasoning = content:find(
       'Next, I need to inspect the completed command before composing the final answer.',
       first_reasoning or 1,

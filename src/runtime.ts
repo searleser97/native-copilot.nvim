@@ -590,6 +590,21 @@ export interface HistoryReplayEvent {
   data: Record<string, unknown>;
 }
 
+export function parseAgentMessagePrompt(
+  value: unknown,
+): { id: string; source: string; content: string } | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = value.match(
+    /^<agent_message id="([^"]+)" source="([^"]+)">\n([\s\S]*?)\n<\/agent_message>\n\nProcess this durable message from another Copilot agent\.[\s\S]*$/,
+  );
+  if (!match) return undefined;
+  return {
+    id: match[1]!,
+    source: match[2]!,
+    content: match[3]!,
+  };
+}
+
 function historyShellId(value: unknown): string | undefined {
   if (typeof value === "string") {
     return value.match(/[Ss]hell[Ii]d[\s:=]+([\w-]+)/)?.[1];
@@ -620,11 +635,21 @@ function compactHistoryEvent(event: HistorySourceEvent): HistoryReplayEvent | un
   switch (event.type) {
     case "user.message":
       if (!data.content && !data.prompt) return undefined;
-      compactData = {
-        content: data.content,
-        prompt: data.prompt,
-        source: data.source,
-      };
+      {
+        const agentMessage = parseAgentMessagePrompt(data.content ?? data.prompt);
+        compactData = agentMessage
+          ? {
+              content: agentMessage.content,
+              source: "agent-message",
+              sourceAlias: agentMessage.source,
+              agentMessageId: agentMessage.id,
+            }
+          : {
+              content: data.content,
+              prompt: data.prompt,
+              source: data.source,
+            };
+      }
       break;
     case "assistant.message":
       if (event.agentId !== undefined || !data.content) return undefined;
@@ -4453,12 +4478,32 @@ export class CopilotRuntime implements RuntimeAdapter {
     };
     switch (event.type) {
       case "user.message":
-        if (event.data.source && /^schedule-\d+$/.test(event.data.source)) {
-          this.emit(
-            "scheduled.prompt",
-            { ...event.data, eventId: event.id },
-            { ...fields, target: "conversation", done: false },
+        {
+          const agentMessage = parseAgentMessagePrompt(
+            event.data.content,
           );
+          if (agentMessage) {
+            const source = this.resolveAgentRef(agentMessage.source);
+            this.emit(
+              "agent.prompt",
+              {
+                id: agentMessage.id,
+                source: source?.alias ?? agentMessage.source,
+                ...(source ? { sourceAgentId: source.agentId } : {}),
+                ...(source ? { sourceDisplayName: source.agent.displayName } : {}),
+                target: live.target,
+                content: agentMessage.content,
+                eventTimestamp: Date.parse(event.timestamp),
+              },
+              { ...fields, target: "conversation", done: false },
+            );
+          } else if (event.data.source && /^schedule-\d+$/.test(event.data.source)) {
+            this.emit(
+              "scheduled.prompt",
+              { ...event.data, eventId: event.id },
+              { ...fields, target: "conversation", done: false },
+            );
+          }
         }
         break;
       case "session.schedule_created":
@@ -6262,10 +6307,12 @@ export class CopilotRuntime implements RuntimeAdapter {
       if (!retryWake) {
         live.mailboxDrainCycle = live.idleCycle;
       }
+      const source = this.resolveAgentRef(message.source);
+      const sourceLabel = source?.alias ?? message.source;
       const prompt =
         message.kind === "user"
           ? message.content
-          : `<agent_message id="${message.id}" source="${message.source}">\n` +
+          : `<agent_message id="${message.id}" source="${sourceLabel}">\n` +
             `${message.content}\n` +
             "</agent_message>\n\n" +
             "Process this durable message from another Copilot agent. Respond or act as " +
@@ -6315,7 +6362,6 @@ export class CopilotRuntime implements RuntimeAdapter {
           );
           return;
         }
-        const source = this.resolveAgentRef(message.source);
         this.emit(
           "mailbox.delivered",
           {
@@ -6328,7 +6374,7 @@ export class CopilotRuntime implements RuntimeAdapter {
             createdAt: message.createdAt,
             updatedAt: message.updatedAt,
             deliveryAttempts: message.deliveryAttempts,
-            source: source?.alias ?? message.source,
+            source: sourceLabel,
             ...(source ? { sourceAgentId: source.agentId } : {}),
             status: "delivered",
           },
