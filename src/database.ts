@@ -4316,6 +4316,30 @@ export class AgentDatabase {
       });
   }
 
+  ownedAgentAdministrationsByAgent(
+    ownerAgentId: string,
+    workspace: string,
+  ): AgentAdministration[] {
+    return this.db
+      .prepare(
+        `SELECT ownership.agent_id AS agentId,
+                ownership.owner_agent_id AS ownerAgentId,
+                ownership.owner_session_id AS ownerSessionId,
+                ownership.workspace,
+                links.can_talk_to_json AS canTalkToJson,
+                links.can_observe_json AS canObserveJson,
+                links.revision,
+                ownership.created_at AS createdAt,
+                links.updated_at AS updatedAt
+         FROM agent_ownership ownership
+         JOIN agent_links links ON links.agent_id = ownership.agent_id
+         WHERE ownership.owner_agent_id = ? AND ownership.workspace = ?
+         ORDER BY ownership.created_at, ownership.agent_id`,
+      )
+      .all(ownerAgentId, workspace)
+      .map((row) => ({ ...(row as unknown as AgentAdministration) }));
+  }
+
   /** Atomically updates host links and every denormalized active run definition. */
   updateOwnedAgentLinks(update: OwnedAgentLinkUpdate): AgentAdministration {
     return this.transaction(() => {
@@ -4569,6 +4593,96 @@ export class AgentDatabase {
       workspace,
       limit,
     );
+  }
+
+  ownedResumableAgentRuns(
+    ownerAgentId: string,
+    workspace: string,
+    limit = 50,
+  ): StoredAgentRun[] {
+    return this.agentRunRows(
+      `workspace = ?
+         AND agent_id IN (
+           SELECT agent_id FROM agent_ownership
+           WHERE owner_agent_id = ? AND workspace = ?
+         )
+         AND is_primary = 0
+         AND recovery_eligible = 1
+         AND startup_state = 'ready'
+         AND status != 'active'
+         AND definition IS NOT NULL
+         AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+       ORDER BY started_at DESC
+       LIMIT ?`,
+      workspace,
+      ownerAgentId,
+      workspace,
+      limit,
+    );
+  }
+
+  ownedRecoverableOrActiveAgentRuns(
+    ownerAgentId: string,
+    workspace: string,
+    limit = 50,
+  ): StoredAgentRun[] {
+    return this.agentRunRows(
+      `workspace = ?
+         AND agent_id IN (
+           SELECT agent_id FROM agent_ownership
+           WHERE owner_agent_id = ? AND workspace = ?
+         )
+         AND is_primary = 0
+         AND definition IS NOT NULL
+         AND EXISTS (SELECT 1 FROM agent_sessions WHERE run_id = runs.id)
+         AND (
+           status = 'active'
+           OR (
+             recovery_eligible = 1
+             AND startup_state = 'ready'
+           )
+         )
+         AND id = (
+           SELECT latest.id FROM runs AS latest
+           WHERE latest.agent_id = runs.agent_id
+             AND latest.workspace = runs.workspace
+             AND latest.definition IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM agent_sessions
+               WHERE agent_sessions.run_id = latest.id
+             )
+             AND (
+               latest.status = 'active'
+               OR (
+                 latest.recovery_eligible = 1
+                 AND latest.startup_state = 'ready'
+               )
+             )
+           ORDER BY latest.started_at DESC
+           LIMIT 1
+         )
+       ORDER BY started_at DESC
+       LIMIT ?`,
+      workspace,
+      ownerAgentId,
+      workspace,
+      limit,
+    );
+  }
+
+  agentRunBySession(sessionId: string, workspace: string): StoredAgentRun | undefined {
+    return this.agentRunRows(
+      `workspace = ?
+         AND EXISTS (
+           SELECT 1 FROM agent_sessions
+           WHERE agent_sessions.run_id = runs.id
+             AND agent_sessions.session_id = ?
+         )
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      workspace,
+      sessionId,
+    )[0];
   }
 
   agentRun(id: string, workspace: string): StoredAgentRun | undefined {

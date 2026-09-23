@@ -42,6 +42,7 @@ import type {
 
 export const FLEET_TOOL_NAMES = Object.freeze({
   create: "real_agent_create",
+  resume: "real_agent_resume",
   get: "real_agent_get",
   list: "real_agent_list",
   getLinks: "real_agent_get_links",
@@ -2876,6 +2877,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       ...this.createAgentMessagingTools(context),
       this.readAgentActivityTool(context),
       this.createAgentTool(context),
+      this.resumeAgentTool(context),
       this.getAgentTool(context),
       this.listAgentsTool(context),
       this.getAgentLinksTool(context),
@@ -2936,6 +2938,63 @@ export class CopilotRuntime implements RuntimeAdapter {
     });
   }
 
+  private resumeAgentTool(caller: AgentContext): Tool<any> {
+    return defineTool(FLEET_TOOL_NAMES.resume, {
+      description:
+        "Resume exactly one recoverable durable Copilot agent by its Copilot SDK session id. " +
+        "This reconnects the existing agent and never creates a replacement. If the session is " +
+        "already open in another Neovim or Copilot process, tell the user it must be closed there " +
+        "before it can be resumed here.",
+      parameters: z.object({
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("Copilot SDK session id returned by real_agent_list."),
+      }).strict(),
+      skipPermission: true,
+      defer: "never",
+      handler: async ({ sessionId }) => {
+        const source = this.requireActiveCaller(caller.agentId);
+        const active = [...this.agents.values()].find(
+          (agent) => this.lookupAgentSessionId(agent) === sessionId,
+        );
+        if (active) {
+          throw new Error(
+            `Copilot session "${sessionId}" is already open in this Neovim instance as ` +
+              `agent "${active.alias}".`,
+          );
+        }
+        const stored = this.db.agentRunBySession(sessionId, this.workspace);
+        if (!stored || stored.isPrimary) {
+          throw new Error(
+            `Copilot session "${sessionId}" is not a recoverable agent owned by this workspace.`,
+          );
+        }
+        const administration = this.db.agentAdministration(stored.agentId);
+        if (
+          !administration ||
+          administration.workspace !== this.workspace ||
+          administration.ownerAgentId !== source.agentId
+        ) {
+          throw new Error(
+            `Agent session "${sessionId}" is not owned by the calling durable Copilot agent.`,
+          );
+        }
+        await this.resumeAgent(stored.id);
+        const resumed = this.agents.get(stored.agentId);
+        if (!resumed) {
+          throw new Error(`Agent session "${sessionId}" did not become active after recovery.`);
+        }
+        return {
+          resumed: true,
+          ...this.agentPayload(resumed),
+          sessionId,
+          state: this.agentState(resumed),
+        };
+      },
+    });
+  }
+
   private getAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(FLEET_TOOL_NAMES.get, {
       description:
@@ -2952,21 +3011,57 @@ export class CopilotRuntime implements RuntimeAdapter {
   private listAgentsTool(caller: AgentContext): Tool<any> {
     return defineTool(FLEET_TOOL_NAMES.list, {
       description:
-        "List the agents owned by this exact Copilot session. Ownership is immutable and does not " +
-        "transfer merely because another session knows an agent id or session id.",
+        "List active and recoverable agents owned by this durable Copilot identity. Recoverable " +
+        "entries include the Copilot SDK session id required by real_agent_resume. An " +
+        "active_elsewhere entry is already open in another process; tell the user to close it " +
+        "there before trying to resume it here.",
       parameters: z.object({}).strict(),
       skipPermission: true,
       defer: "never",
       handler: () => {
         const source = this.requireActiveCaller(caller.agentId);
-        const sessionId = this.requireCallerSessionId(source);
+        const administrations = this.db.ownedAgentAdministrationsByAgent(
+          source.agentId,
+          this.workspace,
+        );
+        const ownedAgentIds = new Set(
+          administrations.map((administration) => administration.agentId),
+        );
+        const active = [...ownedAgentIds].flatMap((agentId) => {
+          const child = this.agents.get(agentId);
+          return child
+            ? [{
+                ...this.agentPayload(child),
+                sessionId: this.lookupAgentSessionId(child),
+                state: this.agentState(child),
+              }]
+            : [];
+        });
+        const inactive = this.db
+          .ownedRecoverableOrActiveAgentRuns(source.agentId, this.workspace)
+          .flatMap((run) => {
+            if (!run.definition || !run.session || this.agents.has(run.agentId)) {
+              return [];
+            }
+            let record: StoredAgentRecord;
+            try {
+              record = storedAgentRecord(run.definition);
+            } catch {
+              return [];
+            }
+            return [{
+              agentId: run.agentId,
+              target: agentTarget(run.agentId),
+              alias: run.alias,
+              displayName: record.definition.displayName,
+              description: record.definition.description,
+              runId: run.id,
+              sessionId: run.session.sessionId,
+              state: run.status === "active" ? "active_elsewhere" : "recoverable",
+            }];
+          });
         return {
-          agents: this.db
-            .ownedAgentAdministrations(source.agentId, sessionId, this.workspace)
-            .flatMap((administration) => {
-              const child = this.agents.get(administration.agentId);
-              return child ? [this.visibleAgentPayload(source, child)] : [];
-            }),
+          agents: [...active, ...inactive],
         };
       },
     });
@@ -5799,7 +5894,10 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw new Error(`Agent run "${runId}" was not found for this workspace.`);
     }
     if (stored.status === "active") {
-      throw new Error(`Agent run "${runId}" is owned by another active Neovim instance.`);
+      throw new Error(
+        `Copilot session "${stored.session?.sessionId ?? runId}" is already open in another ` +
+          "Neovim or Copilot process. Close it there before resuming the agent here.",
+      );
     }
     if (!stored.definition) {
       throw new Error(`Agent run "${runId}" has no stored definition and cannot resume.`);
@@ -5827,7 +5925,8 @@ export class CopilotRuntime implements RuntimeAdapter {
     });
     if (inUse.includes(stored.session.sessionId)) {
       throw new Error(
-        `SDK session "${stored.session.sessionId}" is active in another process.`,
+        `Copilot session "${stored.session.sessionId}" is already open in another Neovim or ` +
+          "Copilot process. Close it there before resuming the agent here.",
       );
     }
     const record = storedAgentRecord(stored.definition);

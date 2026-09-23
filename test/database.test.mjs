@@ -693,6 +693,19 @@ test("owned agent links remain controlled by the immutable owner session", (t) =
   db.upsertSession("reviewer-run", "reviewer-session", "connected");
   db.completeProvisionedAgentStartup("reviewer-run");
 
+  assert.deepEqual(
+    db.ownedRecoverableOrActiveAgentRuns("parent-agent", "workspace")
+      .map((run) => ({
+        id: run.id,
+        status: run.status,
+        sessionId: run.session?.sessionId,
+      })),
+    [{
+      id: "reviewer-run",
+      status: "active",
+      sessionId: "reviewer-session",
+    }],
+  );
   assert.deepEqual(db.agentAdministration("reviewer-agent"), {
     agentId: "reviewer-agent",
     ownerAgentId: "parent-agent",
@@ -735,5 +748,50 @@ test("owned agent links remain controlled by the immutable owner session", (t) =
   });
   assert.equal(configured.revision, 1);
   assert.equal(configured.ownerSessionId, "parent-session");
+
+  db.finishRun("reviewer-run", "interrupted", "Neovim exited");
+  assert.deepEqual(
+    db.ownedAgentAdministrationsByAgent("parent-agent", "workspace")
+      .map(({ agentId, ownerAgentId, ownerSessionId }) => ({
+        agentId,
+        ownerAgentId,
+        ownerSessionId,
+      })),
+    [{
+      agentId: "reviewer-agent",
+      ownerAgentId: "parent-agent",
+      ownerSessionId: "parent-session",
+    }],
+  );
+  assert.deepEqual(
+    db.ownedResumableAgentRuns("parent-agent", "workspace")
+      .map((run) => ({
+        id: run.id,
+        agentId: run.agentId,
+        sessionId: run.session?.sessionId,
+      })),
+    [{
+      id: "reviewer-run",
+      agentId: "reviewer-agent",
+      sessionId: "reviewer-session",
+    }],
+  );
+  assert.deepEqual(
+    db.ownedRecoverableOrActiveAgentRuns("parent-agent", "workspace")
+      .map((run) => ({
+        id: run.id,
+        status: run.status,
+        sessionId: run.session?.sessionId,
+      })),
+    [{
+      id: "reviewer-run",
+      status: "interrupted",
+      sessionId: "reviewer-session",
+    }],
+  );
+  assert.equal(
+    db.agentRunBySession("reviewer-session", "workspace")?.id,
+    "reviewer-run",
+  );
   db.close();
 });

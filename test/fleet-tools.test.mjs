@@ -5,6 +5,7 @@ import { FLEET_TOOL_NAMES } from "../dist/runtime.js";
 test("fleet tools separate agent creation from host links", () => {
   assert.deepEqual(FLEET_TOOL_NAMES, {
     create: "real_agent_create",
+    resume: "real_agent_resume",
     get: "real_agent_get",
     list: "real_agent_list",
     getLinks: "real_agent_get_links",

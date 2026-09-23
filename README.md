@@ -294,7 +294,7 @@ to a raw session ID. Genuinely empty, unnamed sessions receive a compact `Untitl
 ## Configuration
 
 Agents are not predefined and require no external configuration file. Every agent receives
-`real_agent_create`, `real_agent_get`, `real_agent_list`, `real_agent_get_links`,
+`real_agent_create`, `real_agent_resume`, `real_agent_get`, `real_agent_list`, `real_agent_get_links`,
 `real_agent_update_links`, `real_agent_remove`, `real_agent_list_recipients`,
 `real_agent_send_message`, and `real_agent_read_activity`. Each create call provisions exactly one
 agent and returns its Copilot SDK session ID; there is no batch or `real_team_*` tool API.
@@ -446,6 +446,12 @@ the Copilot runtime chooses its default model.
 
 Every agent, including the primary, receives the same stable communication tools:
 
+- `real_agent_list` returns directly owned active and recoverable agents. Recoverable entries include
+  the Copilot SDK session ID used for recovery. An agent open in another process is reported as
+  `active_elsewhere` rather than being offered for recovery.
+- `real_agent_resume` reconnects exactly one owned recoverable agent by that SDK session ID. It never
+  creates a replacement. A session already open in another Neovim or Copilot process must be closed
+  there before the agent can be resumed here.
 - `real_agent_list_recipients` returns the agents it may message or observe with their alias,
   durable UUID, current SDK session ID, runtime state, and directional grant flags.
 - `real_agent_send_message` sends to one of those recipients by alias, UUID, or current session
