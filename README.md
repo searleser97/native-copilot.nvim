@@ -321,9 +321,9 @@ conversation are retained. The child starts with empty peer links, which its own
 after all peer session IDs exist.
 
 Ownership and host links are separate workspace-global durable SQLite records. Permissions and MCP
-configuration remain in the run's creation definition, not in the link record. The exact creating
-Copilot session owns the child; another session cannot relink or remove it merely by knowing its
-session ID.
+configuration remain in the run's creation definition, not in the link record. The creating durable
+agent identity owns the child across replacement SDK sessions; another agent cannot relink or stop
+it merely by knowing its session ID.
 
 Aliases cannot collide between the primary and any persisted additional-agent definition in the
 workspace. The primary prefers `copilot` and atomically falls back to `primary`, `primary_2`, and so
@@ -371,6 +371,9 @@ same native configuration as the main agent:
 Agent settings only **narrow or deliberately override** this single source of truth; they never
 recreate a parallel definition:
 
+- Delegated creation, adoption, and managed recovery are also bounded by the immediate caller.
+  A child cannot receive a broader approval posture, tool/path/action profile, or MCP subset than
+  its creator effectively has, even when the native host ceiling would allow more.
 - A member's `permissions.tools.allow` becomes its `availableTools` allowlist and is **not** widened
   back by the native list. It must be a semantic **subset** of the native tool ceiling (an empty
   native allowlist means unrestricted; bare `*` and source wildcards such as `builtin:*` are
@@ -461,7 +464,8 @@ Every agent, including the primary, receives the same stable communication tools
 - `real_agent_resume` reconnects exactly one session by SDK session ID. A known managed session
   recovers its existing durable identity and configuration. While that session is stopped, optional
   `permissions` and `mcpServers` arguments replace those complete execution settings within the
-  primary host's current native ceilings. An unowned local session is adopted as a generic real
+  caller's effective permission/MCP ceilings and the primary host's native ceilings. An unowned
+  local session is adopted as a generic real
   agent with inherited runtime configuration (or supplied replacements) and no initial
   communication or observation links; it preserves the existing conversation instead of creating a
   replacement SDK session. A session already open in another Neovim or Copilot process must be
@@ -483,8 +487,10 @@ alias, UUID, or session ID returns an explicit communication-rule denial, while 
 does not resolve to an active managed agent returns an unknown-recipient error.
 
 `real_agent_update_links` accepts `canTalkToSessionIds` and `canObserveSessionIds`; the host resolves
-them immediately to durable UUID ACL principals. `ownerCanTalk` and `ownerCanObserve` independently
-control the creating session's outgoing links to its child. These grants remain directional.
+active or stopped managed sessions immediately to durable UUID ACL principals. Every grant is an
+ordinary directional link: ownership controls lifecycle administration, but creates no implicit
+communication or observation edge. An agent may replace its own outgoing links to directly owned
+children, or replace the outgoing links of one directly owned child.
 
 Resolved grants are persisted as durable agent UUIDs, not aliases. Renaming an alias therefore does
 not invalidate an established link. Stopping an agent leaves UUID-backed grants intact and marks

@@ -129,8 +129,6 @@ export const agentCreateSchema = z.object({
 export const agentLinkSetSchema = z.object({
   canTalkToSessionIds: stringList,
   canObserveSessionIds: stringList,
-  ownerCanTalk: z.boolean(),
-  ownerCanObserve: z.boolean(),
 }).strict();
 
 export function createDefinitionToDynamic(

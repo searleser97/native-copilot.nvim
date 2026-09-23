@@ -76,8 +76,6 @@ export interface AgentCreateDefinition {
 export interface AgentLinkSet {
   canTalkToSessionIds: string[];
   canObserveSessionIds: string[];
-  ownerCanTalk: boolean;
-  ownerCanObserve: boolean;
 }
 
 /**
