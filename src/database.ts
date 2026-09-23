@@ -4673,6 +4673,7 @@ export class AgentDatabase {
   agentRunBySession(sessionId: string, workspace: string): StoredAgentRun | undefined {
     return this.agentRunRows(
       `workspace = ?
+         AND definition IS NOT NULL
          AND EXISTS (
            SELECT 1 FROM agent_sessions
            WHERE agent_sessions.run_id = runs.id

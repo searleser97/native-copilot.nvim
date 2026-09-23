@@ -449,9 +449,11 @@ Every agent, including the primary, receives the same stable communication tools
 - `real_agent_list` returns directly owned active and recoverable agents. Recoverable entries include
   the Copilot SDK session ID used for recovery. An agent open in another process is reported as
   `active_elsewhere` rather than being offered for recovery.
-- `real_agent_resume` reconnects exactly one owned recoverable agent by that SDK session ID. It never
-  creates a replacement. A session already open in another Neovim or Copilot process must be closed
-  there before the agent can be resumed here.
+- `real_agent_resume` reconnects exactly one session by SDK session ID. A known managed session
+  recovers its existing durable identity and configuration. An unowned local session is adopted as
+  a generic real agent with inherited runtime configuration and no initial communication or
+  observation links; it preserves the existing conversation instead of creating a replacement SDK
+  session. A session already open in another Neovim or Copilot process must be closed there first.
 - `real_agent_list_recipients` returns the agents it may message or observe with their alias,
   durable UUID, current SDK session ID, runtime state, and directional grant flags.
 - `real_agent_send_message` sends to one of those recipients by alias, UUID, or current session

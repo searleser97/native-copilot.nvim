@@ -2941,10 +2941,11 @@ export class CopilotRuntime implements RuntimeAdapter {
   private resumeAgentTool(caller: AgentContext): Tool<any> {
     return defineTool(FLEET_TOOL_NAMES.resume, {
       description:
-        "Resume exactly one recoverable durable Copilot agent by its Copilot SDK session id. " +
-        "This reconnects the existing agent and never creates a replacement. If the session is " +
-        "already open in another Neovim or Copilot process, tell the user it must be closed there " +
-        "before it can be resumed here.",
+        "Resume exactly one Copilot SDK session as a real agent. A managed session recovers its " +
+        "existing durable agent identity and configuration; an unowned local session is adopted " +
+        "as a new generic real agent with inherited runtime configuration and no communication " +
+        "links. If the session is already open in another Neovim or Copilot process, tell the user " +
+        "it must be closed there before it can be resumed here.",
       parameters: z.object({
         sessionId: z
           .string()
@@ -2965,32 +2966,37 @@ export class CopilotRuntime implements RuntimeAdapter {
           );
         }
         const stored = this.db.agentRunBySession(sessionId, this.workspace);
-        if (!stored || stored.isPrimary) {
-          throw new Error(
-            `Copilot session "${sessionId}" is not a recoverable agent owned by this workspace.`,
-          );
+        if (stored) {
+          if (stored.isPrimary) {
+            throw new Error(
+              `Copilot session "${sessionId}" belongs to the primary agent and must be resumed ` +
+                "through /resume.",
+            );
+          }
+          const administration = this.db.agentAdministration(stored.agentId);
+          if (
+            !administration ||
+            administration.workspace !== this.workspace ||
+            administration.ownerAgentId !== source.agentId
+          ) {
+            throw new Error(
+              `Agent session "${sessionId}" is not owned by the calling durable Copilot agent.`,
+            );
+          }
+          await this.resumeAgent(stored.id);
+          const resumed = this.agents.get(stored.agentId);
+          if (!resumed) {
+            throw new Error(`Agent session "${sessionId}" did not become active after recovery.`);
+          }
+          return {
+            resumed: true,
+            adopted: false,
+            ...this.agentPayload(resumed),
+            sessionId,
+            state: this.agentState(resumed),
+          };
         }
-        const administration = this.db.agentAdministration(stored.agentId);
-        if (
-          !administration ||
-          administration.workspace !== this.workspace ||
-          administration.ownerAgentId !== source.agentId
-        ) {
-          throw new Error(
-            `Agent session "${sessionId}" is not owned by the calling durable Copilot agent.`,
-          );
-        }
-        await this.resumeAgent(stored.id);
-        const resumed = this.agents.get(stored.agentId);
-        if (!resumed) {
-          throw new Error(`Agent session "${sessionId}" did not become active after recovery.`);
-        }
-        return {
-          resumed: true,
-          ...this.agentPayload(resumed),
-          sessionId,
-          state: this.agentState(resumed),
-        };
+        return this.adoptSessionAsAgent(source, sessionId);
       },
     });
   }
@@ -5552,6 +5558,137 @@ export class CopilotRuntime implements RuntimeAdapter {
         sessionId: live.session.sessionId,
       });
       return {
+        ...this.agentPayload(context),
+        runId: context.runId,
+        sessionId: live.session.sessionId,
+        state: this.agentState(context),
+      };
+    } catch (error) {
+      await this.failStartingAgent(
+        context,
+        transition,
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    } finally {
+      this.endAgentTransition(transition, ready);
+    }
+  }
+
+  private adoptedAgentAlias(sessionId: string): string {
+    const token = sessionId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12) || "copilot";
+    const base = `session_${token}`;
+    const reserved = new Set([
+      ...this.aliasIndex.keys(),
+      ...this.db.reservedAgentAliases(this.workspace).map((entry) => entry.alias),
+    ]);
+    if (!reserved.has(base)) {
+      return base;
+    }
+    for (let suffix = 2; ; suffix += 1) {
+      const candidate = `${base}_${suffix}`;
+      if (!reserved.has(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  private async adoptSessionAsAgent(
+    caller: AgentContext,
+    sessionId: string,
+  ): Promise<Record<string, unknown>> {
+    const owner = this.db.sessionOwner(sessionId);
+    if (owner) {
+      throw new Error(
+        `Copilot session "${sessionId}" is already owned by durable agent ` +
+          `"${owner.agentId}" in workspace "${owner.workspace}" and cannot be adopted again.`,
+      );
+    }
+    const client = await this.ensureClient();
+    const available = await client.listSessions({ workingDirectory: this.workspace });
+    if (!available.some((session) => session.sessionId === sessionId)) {
+      throw new Error(`Copilot session "${sessionId}" was not found for this workspace.`);
+    }
+    const { inUse } = await client.rpc.sessions.checkInUse({ sessionIds: [sessionId] });
+    if (inUse.includes(sessionId)) {
+      throw new Error(
+        `Copilot session "${sessionId}" is already open in another Neovim or Copilot process. ` +
+          "Close it there before resuming the agent here.",
+      );
+    }
+    const ownerSessionId = this.requireCallerSessionId(caller);
+    const alias = this.adoptedAgentAlias(sessionId);
+    const shortSessionId = sessionId.slice(0, 8);
+    const definition: DynamicAgentDefinition = {
+      id: alias,
+      displayName: `Session ${shortSessionId}`,
+      description: `Adopted Copilot session ${sessionId}`,
+      task: "Continue the existing Copilot session.",
+      prompt:
+        "Continue this existing Copilot session as an independently managed real agent. " +
+        "Preserve its prior context and wait for explicit user or authorized peer instructions.",
+      permissions: { mode: "inherit" },
+      canTalkTo: [],
+      canObserve: [],
+    };
+    const resolved = this.resolveStoredDefinition(definition);
+    const mcpServers = await this.availableMcpServers();
+    const context: AgentContext = {
+      agentId: randomUUID(),
+      target: "",
+      alias,
+      runId: randomUUID(),
+      definition,
+      agent: resolved,
+      canTalkTo: new Set(),
+      canObserve: new Set(),
+      mcpServers,
+      ownerAgentId: caller.agentId,
+      ownerSessionId,
+    };
+    context.target = agentTarget(context.agentId);
+    this.db.createOwnedAgentRun(
+      {
+        id: context.runId,
+        agentId: context.agentId,
+        alias,
+        definition: this.storedAgentJson(context),
+        workspace: this.workspace,
+        ownerPid: process.pid,
+      },
+      caller.agentId,
+      ownerSessionId,
+    );
+    this.registerAgent(context);
+    const transition = this.beginAgentTransition(context, "adopting its existing SDK session");
+    let ready = false;
+    try {
+      this.emitAgentLifecycle("agent.loading", context, {
+        recovered: true,
+        sessionId,
+      });
+      const plan = await this.sessionConnectionPlan(context);
+      const live = await this.connectSession({
+        runId: context.runId,
+        target: context.target,
+        agentId: context.agentId,
+        alias: context.alias,
+        sessionId,
+        config: plan.config,
+        configSignature: plan.configSignature,
+        availableMcpServers: plan.availableMcpServers,
+        resumeExisting: true,
+        transition,
+      });
+      this.db.completeProvisionedAgentStartup(context.runId);
+      ready = true;
+      this.emitAgentLifecycle("agent.ready", context, {
+        recovered: true,
+        sessionId: live.session.sessionId,
+      });
+      return {
+        resumed: true,
+        adopted: true,
         ...this.agentPayload(context),
         runId: context.runId,
         sessionId: live.session.sessionId,

@@ -795,3 +795,34 @@ test("owned agent links remain controlled by the immutable owner session", (t) =
   );
   db.close();
 });
+
+test("failed adopted sessions are not exposed as recoverable agents", (t) => {
+  const path = databasePath(t);
+  const db = new AgentDatabase(path, () => false);
+  db.createOwnedAgentRun(
+    {
+      id: "adoption-run",
+      agentId: "adoption-agent",
+      alias: "session_deadbeef",
+      definition: storedDefinition("session_deadbeef"),
+      workspace: "workspace",
+      ownerPid: 8102,
+    },
+    "parent-agent",
+    "parent-session",
+  );
+  db.upsertSession("adoption-run", "adopted-session", "connecting");
+  db.failAgentStartup(
+    "adoption-run",
+    "workspace",
+    "adoption-agent",
+    "SDK resume failed",
+  );
+
+  assert.equal(db.agentRunBySession("adopted-session", "workspace"), undefined);
+  assert.deepEqual(
+    db.ownedRecoverableOrActiveAgentRuns("parent-agent", "workspace"),
+    [],
+  );
+  db.close();
+});
