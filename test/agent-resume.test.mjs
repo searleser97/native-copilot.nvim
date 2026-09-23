@@ -89,7 +89,7 @@ test("stopped agent resumes the same SDK session with replacement access", async
   assert.deepEqual(stored.definition.permissions, elevatedPermissions);
   assert.deepEqual(stored.definition.mcpServers, ["new-server"]);
   assert.deepEqual(new Set(stored.mcpServers), new Set(["old-server", "new-server"]));
-  assert.equal(runtime.agents.get("worker-agent").definition, stored.definition);
+  assert.deepEqual(runtime.agents.get("worker-agent").definition, stored.definition);
 });
 
 test("invalid MCP escalation leaves a stopped agent unchanged", async (t) => {
