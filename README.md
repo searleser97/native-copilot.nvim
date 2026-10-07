@@ -445,6 +445,82 @@ still delivered it with the correct SDK identity. Sydney's runtime index and ses
 during the turn; its native `sessionEnd` then cleaned them up. Therefore a successful resume alone,
 or an absent index after a completed turn, is not proof of the active turn's binding.
 
+#### Persistent-session lifecycle limitation
+
+**Native `sessionEnd` is not currently a reliable persistent-session termination signal.**
+On 2026-10-07, isolated native-hook probes reproduced the same behavior with SDK 1.0.11 /
+runtime 1.0.90 and released SDK 1.0.17 / runtime 1.0.93:
+
+| Operation on one SDK session ID | Observed native hooks |
+| --- | --- |
+| Create RPC | No startup hook yet |
+| First ordinary prompt | Prompt hook, `sessionStart(source=new)`, `agentStop`, `sessionEnd(reason=complete)` |
+| Second ordinary prompt, same live connection | Prompt hook, `agentStop`, another `sessionEnd`; no new `sessionStart` |
+| Abort an active turn | SDK `abort` acknowledged; native `sessionEnd(reason=complete)`; subsequent prompt succeeds |
+| Harmless custom tool throws | Model handles the tool failure; subsequent prompt succeeds; no native `errorOccurred` in this probe |
+| Disconnect after idle / stop the probe runtime with a live idle session | No additional native `sessionEnd` |
+| Cold resume, with `suppressResumeEvent` either true or false | `sessionStart(source=resume)` on first prompt, then the same per-turn end behavior |
+
+Every captured native hook carried the original SDK session ID and the isolated repository cwd.
+These were real subprocess hooks, not SDK hook callbacks or mocked serialization tests. The
+recoverable tool-error check does not establish behavior for fatal runtime crashes.
+
+The [GitHub hook reference](https://docs.github.com/en/copilot/reference/hooks-reference)
+distinguishes `agentStop` ("The main agent finishes a turn") from `sessionEnd` ("The session
+terminates"). Public SDK session documentation separately says abort leaves the session usable,
+and disconnect releases its in-memory resources while preserving resumable disk state. Neither
+inspected SDK release exposes `deferSessionEnd` in its session configuration or request serializer.
+Whether per-turn native delivery is intentional for SDK invocations needs upstream clarification;
+the documented vocabulary alone does not establish a supported persistent-hook mode.
+
+The plugin's ordinary `session.idle` path clears turn state and schedules queued messages; it
+does not disconnect. Existing live connections are reused. Teardown occurs on explicit agent
+stop, connection/recovery failure, primary replacement, configuration reconnect, or host shutdown.
+The standalone probe below reproduces the issue without loading the plugin runtime at all.
+`suppressResumeEvent` suppresses the SDK resume event, not native end hooks; toggling it is not
+a remedy. SDK 1.0.17 changes disconnect's wire operation from `session.destroy` to `session.detach`,
+but the tested upgrade still emits per-turn end hooks. No dependency upgrade or unsupported
+runtime option has been applied as a workaround.
+
+The older bundled native package 1.0.80 contains a readable per-turn `finally` branch that calls
+`nativeHookProcessor.postSession` unless its internal `sessionScalarDeferSessionEnd` is set or
+the session is a subagent. It also contains internal deferred-shutdown handling. That explains
+the earlier hypothesis but is not a public SDK API or proof of the exact private call graph in
+the newer executables: the inspected 1.0.90/1.0.93 platform releases ship compiled executables,
+not that readable `app.js`. The live, plugin-independent traces establish their actual behavior.
+
+Run the opt-in diagnostic from the project directory with an explicitly chosen executable:
+
+```powershell
+node test\native-file-hooks-lifecycle.mjs --cli (Get-Command copilot.exe).Source --model gpt-6-astra --expect-persistent
+```
+
+Use an available model for `--model`. Optional `--sdk <absolute-path-to-dist\index.js>` selects
+another SDK release without changing the project's dependencies. The script starts only its own
+stdio runtime processes, creates an isolated Git repository under `.e2e-artifacts`, and records
+authentic JSONL hook inputs plus `result.json`. It makes model calls, denies ordinary tool
+permissions, disables configuration discovery and the built-in GitHub MCP server, and pins an
+empty MCP set. The only allowed custom tool intentionally throws a harmless error. Hook commands
+only append local trace records; no external repository hooks or application workflows are used.
+It deletes its own SDK test conversation afterward and retains trace files for inspection.
+The unpacked-release comparison tests stdio behavior, not full upgrade or embedded-FFI compatibility.
+
+With `--expect-persistent`, the command currently **fails** on both tested version pairs because
+the first ordinary turn already emitted `sessionEnd`. Omitting that option collects observations,
+not proof of persistent-session correctness. This manual diagnostic is intentionally excluded
+from `npm test`. An upstream correction needs native coverage for two sends, abort-and-continue,
+recoverable errors, and cold resume, with deferred end delivery exactly once at genuine closure.
+
+Applications whose end hook seals workflow outcomes or deletes execution identity must not treat
+this as repaired by enabling hooks, suppressing resume events, delaying a marker, or restarting
+the host. A separately approved integration would need an explicit, directory-scoped persistent
+host profile with authentic session/connection-generation evidence: record nonterminal native
+turn boundaries without performing terminal cleanup, and reserve terminal actions for explicit
+workflow finalization, authenticated agent closure, or genuine durable-owner death. The workflow
+delivery worker, root-state transition, and identity cleanup must agree on that distinction.
+Other hosts must retain their existing semantics. This is an integration proposal, not an
+implemented bypass or permission grant; no repository workflow code is changed by this plugin.
+
 ### Inherited native configuration
 
 The host parses the resolved main Copilot command **once** into a single, typed native policy
