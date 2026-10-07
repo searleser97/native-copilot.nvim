@@ -137,6 +137,12 @@ never written to plugin configuration, logs, SQLite, or conversation buffers.
 | `q` / `<BS>` in activity details | Close the floating detail pane |
 | `dd` in task details | Cancel the running or waiting task |
 
+Opening Native Copilot first shows the existing workspace session picker with `[New Session]`
+selected. Choose it to start normally, choose a previous session to resume directly, or cancel
+without creating a session. Listing still starts the SDK client and loads session metadata, but
+primary-session creation and environment loading wait until selection. Reopening an active UI
+keeps its current session; `/resume` retains its existing behavior and picker format.
+
 Custom mappings can call the public member-cycling function. When invoked from `AI Prompt`, it
 preserves the draft and returns focus to the prompt:
 
@@ -376,10 +382,17 @@ in the child directory. Unexpected target discovery failures stop creation or re
 changing durable state and report an actionable error without echoing potentially sensitive
 configuration values.
 
+If the requested subset includes the built-in `github-mcp-server`, creation names that server in
+the error instead of silently dropping it. Omit it explicitly for cross-directory agents when
+there is no trusted launch definition. An explicit replacement does not inherit the reserved
+built-in server's GitHub authentication handling.
+
 This safety boundary also disables automatic skills, custom-agent, plugin, and hook discovery in
 cross-directory sessions, because the SDK has no separate MCP-only discovery switch. On-demand
-file instruction discovery remains enabled after permitted file views. Agents using the original
-host directory retain the normal automatic discovery behavior.
+file instruction discovery is requested through the SDK's supported
+`enableOnDemandInstructionDiscovery` switch. Its actual instruction-loading behavior has not been
+verified end-to-end and is not guaranteed equivalent to normal repository discovery. Agents using
+the original host directory retain the normal automatic discovery behavior.
 
 ### Inherited native configuration
 

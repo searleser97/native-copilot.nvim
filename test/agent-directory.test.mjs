@@ -44,7 +44,7 @@ function fixture(t, { allowAll = true } = {}) {
     runtime.agents.set(parent.agentId, parent);
     runtime.aliasIndex.set(parent.alias, parent.agentId);
     runtime.openPrimary = async () => {};
-    runtime.availableMcpServers = async () => new Set(["approved", "builtin-only"]);
+    runtime.availableMcpServers = async () => new Set(["approved", "builtin-only", "github-mcp-server"]);
     runtime.ensureClient = async () => ({
       rpc: {
         sessions: { checkInUse: async () => ({ inUse: [] }) },
@@ -192,6 +192,33 @@ test("cross-directory MCP never loads extra or same-name target definitions", as
     runtime.createAgentForCaller(parent, child("unverifiable", target, undefined, ["builtin-only"])),
     /no verifiable launch configuration/,
   );
+  await assert.rejects(
+    runtime.createAgentForCaller(parent, child("github", target, undefined, ["github-mcp-server"])),
+    /github-mcp-server.*no verifiable launch configuration.*additional-mcp-config.*omit this server/,
+  );
+});
+
+test("pinning preserves opaque server inputs and fingerprints ignore object key order", async (t) => {
+  const { runtime, parent, target, host, db, configs } = fixture(t);
+  const args = ["relative-server.js", "--opaque=../relative-data"];
+  const env = { PRIVATE_VALUE: "test-secret", RELATIVE_VALUE: "../env-path" };
+  runtime.policy.mcpServers.approved = {
+    type: "stdio", command: ".\\bin\\server.exe", args, env, cwd: ".",
+  };
+  const created = await runtime.createAgentForCaller(parent, child("worker", target));
+  assert.equal(configs[0].mcpServers.approved.command, ".\\bin\\server.exe");
+  assert.deepEqual(configs[0].mcpServers.approved.args, args);
+  assert.deepEqual(configs[0].mcpServers.approved.env, env);
+  assert.equal(configs[0].mcpServers.approved.workingDirectory, host);
+  const before = db.agentRun(created.runId, host).definition;
+  assert.equal(before.includes("test-secret"), false);
+  await runtime.stopAgent(created.agentId);
+  runtime.policy.mcpServers.approved = {
+    cwd: ".", env: { RELATIVE_VALUE: "../env-path", PRIVATE_VALUE: "test-secret" },
+    args, command: ".\\bin\\server.exe", type: "stdio",
+  };
+  await runtime.resumeAgent(created.runId, {}, parent);
+  assert.equal(db.agentRun(created.runId, host).definition, before);
 });
 
 test("same-name host MCP changes cannot replace persisted approvals on recovery", async (t) => {
@@ -297,4 +324,35 @@ test("prompt creator posture persists through concrete-child recovery under allo
     { sessionId: created.sessionId },
   );
   assert.deepEqual(decision, { kind: "prompt" });
+});
+
+test("recovered concrete grandchildren wait for interactive approval under an allow-all host", async (t) => {
+  const { runtime, parent, host, db, configure } = fixture(t);
+  runtime.primaryAgentId = "another-primary";
+  parent.definition.permissions = { mode: "prompt" };
+  const created = await runtime.createAgentForCaller(
+    parent, child("worker", undefined, profile(["${workspace}"])),
+  );
+  const worker = runtime.agents.get(created.agentId);
+  const grandchild = await runtime.createAgentForCaller(
+    worker, child("grandchild", undefined, profile(["${workspace}"])),
+  );
+  assert.equal(JSON.parse(db.agentRun(grandchild.runId, host).definition).permissionPromptRequired, true);
+  await runtime.stopAgent(grandchild.agentId);
+  const restarted = configure();
+  await restarted.runtime.resumeAgent(grandchild.runId);
+  const context = restarted.runtime.agents.get(grandchild.agentId);
+  restarted.runtime.sessionBindingCurrent = () => true;
+  const handler = restarted.runtime.permissionHandler(context.definition.permissions, {
+    agentId: context.agentId, runId: context.runId, target: context.target, managedSettingsEnabled: false,
+  });
+  const pending = handler(
+    { kind: "read", path: join(host, "file.txt") }, { sessionId: grandchild.sessionId },
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  const requestIds = [...restarted.runtime.pendingPermissions.keys()];
+  assert.equal(requestIds.length, 1);
+  assert.equal(restarted.runtime.respondPermission(requestIds[0], true), true);
+  assert.deepEqual(await pending, { kind: "approve-once", approvedInteractively: true });
+  assert.equal(restarted.runtime.pendingPermissions.size, 0);
 });
