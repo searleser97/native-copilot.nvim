@@ -39,6 +39,8 @@ export interface DynamicAgentDefinition {
   /** Complete initial objective delivered to this agent immediately after startup. */
   task: string;
   prompt: string;
+  /** Execution directory; durable ownership stays in the host workspace. */
+  workingDirectory?: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
@@ -64,6 +66,7 @@ export interface AgentCreateDefinition {
   displayName: string;
   description: string;
   prompt: string;
+  workingDirectory?: string;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;

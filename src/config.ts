@@ -30,6 +30,11 @@ const alias = z.string().min(1).regex(
 const reasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const reasoningSummary = z.enum(["none", "concise", "detailed"]);
 const stringList = z.array(z.string().min(1));
+const workingDirectory = z.string().min(1).optional().describe(
+  "Existing execution directory, absolute or relative to the host workspace. Omit to use the " +
+    "host workspace. This does not grant filesystem or MCP access; ownership and ${workspace} " +
+    "permission roots remain attached to the host workspace.",
+);
 
 export const permissionsSchema = z.object({
   tools: z.object({
@@ -37,8 +42,8 @@ export const permissionsSchema = z.object({
     deny: stringList.describe("SDK tool patterns explicitly denied to this agent."),
   }),
   paths: z.object({
-    read: stringList.describe("Readable roots; ${workspace} resolves to the active workspace."),
-    write: stringList.describe("Writable roots; ${workspace} resolves to the active workspace."),
+    read: stringList.describe("Readable roots; relative paths and ${workspace} resolve to the host workspace."),
+    write: stringList.describe("Writable roots; relative paths and ${workspace} resolve to the host workspace."),
   }),
   commands: z.boolean().describe("Whether shell commands are allowed."),
   network: z.boolean().describe("Whether network access is allowed."),
@@ -65,6 +70,7 @@ export const dynamicAgentSchema = z.object({
     "Complete initial objective delivered to this agent immediately after it starts.",
   ),
   prompt: z.string().min(1).describe("Complete operating instructions for this agent."),
+  workingDirectory,
   model: z.string().min(1).optional().describe("Model ID; omit to inherit the runtime default."),
   reasoningEffort: reasoningEffort.optional().describe("Optional reasoning effort override."),
   reasoningSummary: reasoningSummary.optional().describe("Optional reasoning display level."),
@@ -115,6 +121,7 @@ export const agentCreateSchema = z.object({
   displayName: z.string().min(1),
   description: z.string().min(1),
   prompt: z.string().min(1).describe("Persistent operating instructions for the new agent."),
+  workingDirectory,
   model: z.string().min(1).optional(),
   reasoningEffort: reasoningEffort.optional(),
   reasoningSummary: reasoningSummary.optional(),
@@ -146,6 +153,9 @@ export function createDefinitionToDynamic(
     canObserve: [],
   };
   if (definition.model !== undefined) dynamic.model = definition.model;
+  if (definition.workingDirectory !== undefined) {
+    dynamic.workingDirectory = definition.workingDirectory;
+  }
   if (definition.reasoningEffort !== undefined) {
     dynamic.reasoningEffort = definition.reasoningEffort;
   }

@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { basename, delimiter, isAbsolute, relative, resolve } from "node:path";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
 import {
   CopilotClient,
   RuntimeConnection,
@@ -436,6 +436,11 @@ interface AgentContext {
   canObserve: Set<string>;
   /** MCP server ceiling captured from the primary session when the agent started. */
   mcpServers: Set<string>;
+  /** Hashes only: never persist MCP credentials in the agent registry. */
+  mcpConfigFingerprints?: Record<string, string>;
+  configurationWarnings?: string[];
+  directoryMcpServers?: string[];
+  permissionPromptRequired?: boolean;
   /** Immutable durable parent identity for additional agents. */
   ownerAgentId?: string;
   /** Immutable Copilot session that owns this agent's links. */
@@ -514,6 +519,8 @@ interface StoredAgentRecord {
   mcpServers: string[];
   canTalkToAgentIds: string[];
   canObserveAgentIds: string[];
+  mcpConfigFingerprints?: Record<string, string>;
+  permissionPromptRequired?: boolean;
 }
 
 interface AgentResumeOverrides {
@@ -537,6 +544,10 @@ function storedAgentRecord(value: string): StoredAgentRecord {
       canObserve: Array.isArray(definition.canObserve) ? definition.canObserve : [],
     },
     mcpServers: parsed.mcpServers.filter((server): server is string => typeof server === "string"),
+    ...(parsed.mcpConfigFingerprints === undefined
+      ? {}
+      : { mcpConfigFingerprints: z.record(z.string(), z.string()).parse(parsed.mcpConfigFingerprints) }),
+    ...(parsed.permissionPromptRequired === true ? { permissionPromptRequired: true } : {}),
     canTalkToAgentIds: Array.isArray(parsed.canTalkToAgentIds)
       ? parsed.canTalkToAgentIds.filter((agentId): agentId is string => typeof agentId === "string")
       : [],
@@ -1186,10 +1197,26 @@ function expandPath(value: string, workspace: string): string {
   return resolve(workspace, value.replaceAll("${workspace}", workspace));
 }
 
-function isWithin(candidate: string, roots: string[], workspace: string): boolean {
-  const target = resolve(workspace, candidate);
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const parent = dirname(path);
+    if (parent === path) throw error;
+    return resolve(canonicalPath(parent), basename(path));
+  }
+}
+
+function isWithin(
+  candidate: string,
+  roots: string[],
+  workspace: string,
+  workingDirectory = workspace,
+): boolean {
+  const target = canonicalPath(resolve(workingDirectory, candidate));
   return roots.some((root) => {
-    const rootPath = expandPath(root, workspace);
+    const rootPath = canonicalPath(expandPath(root, workspace));
     const child = relative(rootPath, target);
     return child === "" || (!child.startsWith("..") && !isAbsolute(child));
   });
@@ -1558,14 +1585,15 @@ export function permissionDecision(
   profile: PermissionProfile,
   workspace: string,
   request: PermissionRequest,
+  workingDirectory = workspace,
 ): PermissionCeilingResult {
   switch (request.kind) {
       case "read":
-        return isWithin(request.path, profile.paths.read, workspace)
+        return isWithin(request.path, profile.paths.read, workspace, workingDirectory)
           ? withinPermissionCeiling()
           : reject(`Read access is outside the configured path ceiling: ${request.path}`);
       case "write":
-        return isWithin(request.fileName, profile.paths.write, workspace)
+        return isWithin(request.fileName, profile.paths.write, workspace, workingDirectory)
           ? withinPermissionCeiling()
           : reject(`Write access is outside the configured path ceiling: ${request.fileName}`);
       case "shell": {
@@ -1577,7 +1605,9 @@ export function permissionDecision(
         }
         const readOnly = request.commands.every((command) => command.readOnly);
         const roots = readOnly ? profile.paths.read : profile.paths.write;
-        const outside = request.possiblePaths.find((path) => !isWithin(path, roots, workspace));
+        const outside = request.possiblePaths.find(
+          (path) => !isWithin(path, roots, workspace, workingDirectory),
+        );
         if (outside) {
           return reject(`Command path is outside the configured ceiling: ${outside}`);
         }
@@ -2424,12 +2454,14 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (ceiling) {
       // A concrete child profile can veto the request, but an allowed match does
       // not itself grant authority; approval still follows the main policy below.
-      const response = permissionDecision(ceiling, this.workspace, request);
+      const response = permissionDecision(
+        ceiling, this.workspace, request, context.definition.workingDirectory ?? this.workspace,
+      );
       if (response.kind === "reject") {
         return { kind: "respond", response };
       }
     }
-    if (usesApproveAll(permission, this.policy.allowAll)) {
+    if (!context.permissionPromptRequired && usesApproveAll(permission, this.policy.allowAll)) {
       if (
         binding.managedSettingsEnabled ||
         request.managedApprovalRequired === true
@@ -2904,6 +2936,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     // or deliberately overrides individual inherited fields.
     const agent = context.agent;
     const config = this.baseSessionConfig();
+    config.workingDirectory = context.definition.workingDirectory ?? this.workspace;
     config.includeSubAgentStreamingEvents = false;
     config.reasoningSummary = agent.reasoningSummary;
     config.systemMessage = { mode: "append", content: agent.initialPrompt };
@@ -2947,6 +2980,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       const knownServers = new Set([
         ...availableMcpServers,
         ...context.mcpServers,
+        ...(context.directoryMcpServers ?? []),
       ]);
       config.disabledMcpServers = [
         ...new Set([
@@ -2954,6 +2988,14 @@ export class CopilotRuntime implements RuntimeAdapter {
           ...[...knownServers].filter((server) => !effectiveMcpServers.has(server)),
         ]),
       ];
+      if (this.hasSeparateWorkingDirectory(context.definition)) {
+        // Discovery does not expose server definitions, so names cannot establish
+        // identity. Only replay launch-approved definitions, never target overrides.
+        config.enableConfigDiscovery = false;
+        config.enableOnDemandInstructionDiscovery = true;
+        config.enableFileHooks = false;
+        config.mcpServers = this.pinnedMcpConfiguration(context);
+      }
     }
     return config;
   }
@@ -3112,6 +3154,7 @@ export class CopilotRuntime implements RuntimeAdapter {
               alias: run.alias,
               displayName: record.definition.displayName,
               description: record.definition.description,
+              workingDirectory: record.definition.workingDirectory ?? this.workspace,
               runId: run.id,
               sessionId: run.session.sessionId,
               state: run.status === "active" ? "active_elsewhere" : "recoverable",
@@ -3453,6 +3496,9 @@ export class CopilotRuntime implements RuntimeAdapter {
     const callerPermission = caller.definition.permissions;
     for (const definition of definitions) {
       const requested = definition.permissions ?? { mode: "inherit" };
+      if (caller.permissionPromptRequired && "mode" in requested && requested.mode === "approveAll") {
+        throw new Error(`Agent "${caller.alias}" requires permission prompts for its descendants.`);
+      }
       if (
         !callerPermission ||
         ("mode" in callerPermission &&
@@ -3467,9 +3513,6 @@ export class CopilotRuntime implements RuntimeAdapter {
               `creator "${caller.alias}" requires permission prompts.`,
           );
         }
-        continue;
-      }
-      if ("mode" in requested && requested.mode === "prompt") {
         continue;
       }
       if ("mode" in requested ||
@@ -3731,6 +3774,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       mcpServers: [...context.mcpServers],
       canTalkToAgentIds: [...canTalkTo],
       canObserveAgentIds: [...canObserve],
+      ...(context.mcpConfigFingerprints === undefined
+        ? {} : { mcpConfigFingerprints: context.mcpConfigFingerprints }),
+      ...(context.permissionPromptRequired ? { permissionPromptRequired: true } : {}),
     };
     return JSON.stringify(record);
   }
@@ -3748,6 +3794,121 @@ export class CopilotRuntime implements RuntimeAdapter {
     return new Set((await primary.session.rpc.mcp.list()).servers.map((server) => server.name));
   }
 
+  private hasSeparateWorkingDirectory(definition: DynamicAgentDefinition): boolean {
+    return definition.workingDirectory !== undefined &&
+      relative(realpathSync.native(this.workspace), definition.workingDirectory) !== "";
+  }
+
+  private authorizeWorkingDirectory(
+    definition: DynamicAgentDefinition,
+    caller?: AgentContext,
+    recovering = false,
+  ): void {
+    if (definition.workingDirectory === undefined) return;
+    const requested = resolve(this.workspace, definition.workingDirectory);
+    let directory: string;
+    try {
+      directory = realpathSync.native(requested);
+      if (!statSync(directory).isDirectory()) throw new Error("not a directory");
+      accessSync(directory, constants.R_OK | constants.X_OK);
+    } catch (error) {
+      throw new Error(
+        `Agent "${definition.id}" workingDirectory "${requested}" must be an existing, ` +
+          `accessible directory: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (recovering && relative(requested, directory) !== "") {
+      throw new Error(`Agent "${definition.id}" workingDirectory now resolves to a different location.`);
+    }
+    if (!this.policy.allowAll && !isWithin(directory, [this.workspace], this.workspace)) {
+      throw new Error(
+        `Working directory "${directory}" is outside the host workspace. Start a host in that ` +
+          "directory or explicitly authorize the host with --allow-all; agents cannot grant this access.",
+      );
+    }
+    const permission = caller?.definition.permissions;
+    if (permission && !("mode" in permission) &&
+        !isWithin(directory, permission.paths.read, this.workspace)) {
+      throw new Error(
+        `Working directory "${directory}" is outside creator "${caller.alias}"'s readable path ceiling.`,
+      );
+    }
+    const ownPermission = definition.permissions;
+    if (ownPermission && !("mode" in ownPermission) &&
+        !isWithin(directory, ownPermission.paths.read, this.workspace)) {
+      throw new Error(`Working directory "${directory}" is outside the agent's readable path ceiling.`);
+    }
+    definition.workingDirectory = directory;
+  }
+
+  private launchMcpConfiguration(server: string): NonNullable<SessionConfig["mcpServers"]>[string] {
+    const configured = this.policy.mcpServers[server];
+    if (!configured || typeof configured !== "object" || Array.isArray(configured)) {
+      throw new Error(
+        `Cross-directory MCP server "${server}" has no verifiable launch configuration. ` +
+          "Ask the user to configure its explicit definition via --additional-mcp-config and " +
+          "restart the host, or omit this server. Discovered names alone do not authorize access.",
+      );
+    }
+    const config = configured as NonNullable<SessionConfig["mcpServers"]>[string];
+    if ("command" in config) {
+      const cwd = "cwd" in config && typeof config.cwd === "string"
+        ? config.cwd : config.workingDirectory ?? this.workspace;
+      return { ...config, workingDirectory: canonicalPath(resolve(this.workspace, cwd)) };
+    }
+    return { ...config };
+  }
+
+  private pinnedMcpConfiguration(context: AgentContext): NonNullable<SessionConfig["mcpServers"]> {
+    const configs: NonNullable<SessionConfig["mcpServers"]> = {};
+    for (const server of this.effectiveMcpServers(context)) {
+      const config = this.launchMcpConfiguration(server);
+      const fingerprint = createHash("sha256").update(stableStringify(config)).digest("hex");
+      if (context.mcpConfigFingerprints?.[server] !== fingerprint) {
+        throw new Error(
+          `Approved MCP configuration for "${server}" changed or was not captured. ` +
+            "Create a new agent after the user has approved the host configuration; " +
+            "a same-name server cannot replace the captured executable or endpoint.",
+        );
+      }
+      configs[server] = config;
+    }
+    return configs;
+  }
+
+  private async prepareAgentDirectory(context: AgentContext, caller?: AgentContext): Promise<void> {
+    this.authorizeWorkingDirectory(context.definition, caller, true);
+    if (!this.hasSeparateWorkingDirectory(context.definition)) return;
+    const fingerprints: Record<string, string> = {};
+    for (const server of this.effectiveMcpServers(context)) {
+      const config = this.launchMcpConfiguration(server);
+      const fingerprint = createHash("sha256").update(stableStringify(config)).digest("hex");
+      const previous = context.mcpConfigFingerprints?.[server];
+      const creator = caller?.mcpConfigFingerprints?.[server];
+      if ((previous !== undefined && previous !== fingerprint) ||
+          (creator !== undefined && creator !== fingerprint)) {
+        throw new Error(`Approved MCP configuration for "${server}" changed; a same-name replacement is not authorized.`);
+      }
+      fingerprints[server] = fingerprint;
+    }
+    context.mcpConfigFingerprints = fingerprints;
+    const client = await this.ensureClient();
+    const discovered = await client.rpc.mcp.discover({
+      workingDirectory: context.definition.workingDirectory ?? this.workspace,
+    });
+    const ignored = discovered.servers.map((server) => server.name).sort();
+    context.directoryMcpServers = ignored;
+    context.configurationWarnings = [
+      "Cross-directory automatic configuration discovery is disabled. Only explicit, " +
+        "launch-approved MCP definitions are used; file instructions are discovered on demand.",
+      ...(ignored.length === 0 ? [] : [
+        `Directory-discovered MCP definitions ignored (including same-name replacements): ${ignored.join(", ")}. ` +
+          "To authorize another server, the user must configure it on the host and restart; " +
+          "changing workingDirectory never grants it.",
+      ]),
+    ];
+  }
+
   private async sessionConnectionPlan(
     context: AgentContext,
   ): Promise<{
@@ -3755,6 +3916,9 @@ export class CopilotRuntime implements RuntimeAdapter {
     config: SessionConfig;
     configSignature: string;
   }> {
+    if (context.definition.workingDirectory !== undefined) {
+      this.authorizeWorkingDirectory(context.definition, undefined, true);
+    }
     const availableMcpServers =
       context.agentId === this.primaryAgentId
         ? new Set<string>()
@@ -3854,6 +4018,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         reasoningEffort: context.definition.reasoningEffort,
         reasoningSummary: context.definition.reasoningSummary,
         permissions: context.definition.permissions,
+        workingDirectory: context.definition.workingDirectory,
+        permissionPromptRequired: context.permissionPromptRequired,
+        mcpConfigFingerprints: context.mcpConfigFingerprints,
         mcpServers: context.definition.mcpServers,
       },
       mcpCeiling: [...context.mcpServers].sort(),
@@ -5642,6 +5809,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     const parsed = agentCreateSchema.parse(requested) as AgentCreateDefinition;
     this.assertAliasesAvailable([parsed.id]);
     const definition = createDefinitionToDynamic(parsed);
+    this.authorizeWorkingDirectory(definition, caller);
     const resolved = this.resolveStoredDefinition(definition);
     const availableMcpServers = await this.availableMcpServers();
     const mcpServers = new Set(this.callerMcpCeiling(caller, availableMcpServers));
@@ -5660,8 +5828,12 @@ export class CopilotRuntime implements RuntimeAdapter {
       mcpServers,
       ownerAgentId: caller.agentId,
       ownerSessionId,
+      permissionPromptRequired: caller.permissionPromptRequired === true ||
+        (caller.definition.permissions !== undefined &&
+          "mode" in caller.definition.permissions && caller.definition.permissions.mode === "prompt"),
     };
     context.target = agentTarget(context.agentId);
+    await this.prepareAgentDirectory(context, caller);
     this.db.createOwnedAgentRun(
       {
         id: context.runId,
@@ -5780,6 +5952,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       mcpServers,
       ownerAgentId: caller.agentId,
       ownerSessionId,
+      permissionPromptRequired: caller.permissionPromptRequired === true ||
+        (caller.definition.permissions !== undefined &&
+          "mode" in caller.definition.permissions && caller.definition.permissions.mode === "prompt"),
     };
     context.target = agentTarget(context.agentId);
     this.db.createOwnedAgentRun(
@@ -6005,6 +6180,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     request: SpawnAgentsRequest,
   ): Promise<Array<Record<string, unknown>>> {
     this.requireCallingPrimary(caller.agentId);
+    for (const definition of request.agents) this.authorizeWorkingDirectory(definition, caller);
     const resolved = this.resolveSpawnRequest(caller, request);
     const mcpServers = await this.availableMcpServers();
     this.assertMcpCeiling(request.agents, mcpServers);
@@ -6043,6 +6219,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         canObserve,
         mcpServers: new Set(mcpServers),
       };
+      await this.prepareAgentDirectory(context, caller);
       contexts.push(context);
     }
     const nextCallerTalk = new Set(caller.canTalkTo);
@@ -6241,6 +6418,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         ? {}
         : { mcpServers: [...new Set(overrides.mcpServers)] }),
     };
+    this.authorizeWorkingDirectory(definition, caller, true);
     const resolved = this.resolveStoredDefinition(definition);
     this.assertPermissionCeiling([definition], caller);
     this.assertAliasesAvailable([definition.id], stored.agentId);
@@ -6270,16 +6448,6 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     this.assertAliasesAvailable([definition.id], stored.agentId);
 
-    const nextStoredDefinition = JSON.stringify({
-      definition,
-      mcpServers: [...mcpServers],
-      canTalkToAgentIds: record.canTalkToAgentIds,
-      canObserveAgentIds: record.canObserveAgentIds,
-    } satisfies StoredAgentRecord);
-    this.db.resumeRun(runId, process.pid, {
-      alias: definition.id,
-      definition: nextStoredDefinition,
-    });
     const administration = this.db.agentAdministration(stored.agentId);
     const canTalkTo = administration
       ? storedAgentIds(administration.canTalkToJson)
@@ -6297,6 +6465,12 @@ export class CopilotRuntime implements RuntimeAdapter {
       canTalkTo: new Set(canTalkTo),
       canObserve: new Set(canObserve),
       mcpServers,
+      ...(record.mcpConfigFingerprints === undefined
+        ? {} : { mcpConfigFingerprints: record.mcpConfigFingerprints }),
+      permissionPromptRequired: record.permissionPromptRequired === true ||
+        caller?.permissionPromptRequired === true ||
+        (caller?.definition.permissions !== undefined &&
+          "mode" in caller.definition.permissions && caller.definition.permissions.mode === "prompt"),
       ...(administration === undefined
         ? {}
         : {
@@ -6304,6 +6478,11 @@ export class CopilotRuntime implements RuntimeAdapter {
             ownerSessionId: administration.ownerSessionId,
           }),
     };
+    await this.prepareAgentDirectory(context, caller);
+    this.db.resumeRun(runId, process.pid, {
+      alias: definition.id,
+      definition: this.storedAgentJsonFor(context, definition, context.canTalkTo, context.canObserve),
+    });
     this.registerAgent(context);
     const transition = this.beginAgentTransition(context, "recovering its SDK session");
     let resumeMailbox = false;
@@ -6461,6 +6640,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       displayName: context.agent.displayName,
       description: context.agent.description,
       task: context.agent.task,
+      workingDirectory: context.definition.workingDirectory ?? this.workspace,
+      ...(context.configurationWarnings === undefined
+        ? {} : { configurationWarnings: context.configurationWarnings }),
       ...(context.ownerAgentId === undefined ? {} : { ownerAgentId: context.ownerAgentId }),
       ...(context.ownerSessionId === undefined ? {} : { ownerSessionId: context.ownerSessionId }),
       recipients: this.grantDetails(context.canTalkTo),
@@ -6509,6 +6691,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         displayName: record.definition.displayName,
         description: record.definition.description,
         task: record.definition.task,
+        workingDirectory: record.definition.workingDirectory ?? this.workspace,
         recipients: record.canTalkToAgentIds.map(agentTarget),
         observes: record.canObserveAgentIds.map(agentTarget),
         status: run.status,

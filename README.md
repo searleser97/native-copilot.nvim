@@ -312,7 +312,8 @@ Every participant receives:
 - Its own top-level Copilot SDK session and `session.sessionId`.
 - Its own SQLite run, recovery state, mailbox, execution configuration, and conversation buffer.
 
-A call to `real_agent_create` accepts the agent's identity, persona, permissions, and MCP subset,
+A call to `real_agent_create` accepts the agent's identity, persona, permissions, MCP subset, and
+optional `workingDirectory`,
 creates its SDK session once with that complete execution configuration, and returns the final
 session ID without sending a task. To change execution access, its owner must first call
 `real_agent_stop`, then call `real_agent_resume` with that SDK session ID and an optional complete
@@ -335,6 +336,49 @@ Each Neovim process owns an independent host and runtime. Active runs record the
 process, so another Neovim instance never recovers or modifies live work. Runs whose owning host has
 exited become individually recoverable.
 
+### Per-agent working directories
+
+Pass `workingDirectory` to `real_agent_create` to run that SDK session in a different existing
+directory. Absolute paths and paths relative to the **host workspace** are accepted. The canonical
+directory (resolving symbolic links and Windows junctions) is persisted in the run definition and
+used again on reconnect, stop/resume, and host restart. Omission retains the host directory and
+existing discovery behavior, including for older stored agents. Resume does not change directories;
+create a new agent to select a different one.
+
+Execution location does not move durable ownership: aliases, recovery, messaging, observation,
+and links still belong to the original host workspace. Active and recoverable agent details report
+`workingDirectory`. Managed workers in another directory are recovered through `real_agent_resume`
+or the agent recovery UI, not the host-directory SDK `/resume` picker. Adoption of unmanaged SDK
+sessions remains limited to the host workspace.
+
+Changing directories does **not** grant access. The directory must be readable within both the
+creator's and child's concrete path ceilings. Outside-host directories require a host explicitly
+launched with `--allow-all`; otherwise use a host launched in the desired directory. Missing,
+inaccessible, non-directory, or redirected recovery paths fail explicitly before changing the
+stored run. `${workspace}` and relative permission roots always refer to the host workspace;
+relative tool paths refer to the agent's execution directory. Concrete creator ceilings cannot be
+discarded by choosing `prompt`, and prompting inherited from a creator survives child recovery.
+
+**Cross-directory MCP limitation:** the SDK discovery API reports names and origins, not complete
+server definitions. A matching name cannot authorize a different executable, endpoint, environment,
+or argument list. Sessions using another directory therefore disable automatic configuration
+discovery and use only explicitly requested, launch-approved `--additional-mcp-config` definitions,
+within both creator and primary MCP subsets. Subprocess MCP working directories remain anchored
+to the host configuration. Configuration fingerprints, not credentials, are persisted; recovery
+rejects changed same-name definitions.
+
+Target-directory MCP discovery runs for diagnostics only. Its definitions are ignored, including
+same-name overrides, and creation returns actionable `configurationWarnings`. Unverifiable servers
+(including built-in-only servers) cannot be selected for these sessions. To add one, the user must
+configure and approve an explicit definition on the host, restart it, and create a new agent; no
+agent self-approval or extra-server approval UI is provided. The host command resolver is not rerun
+in the child directory.
+
+This safety boundary also disables automatic skills, custom-agent, plugin, and hook discovery in
+cross-directory sessions, because the SDK has no separate MCP-only discovery switch. On-demand
+file instruction discovery remains enabled after permitted file views. Agents using the original
+host directory retain the normal automatic discovery behavior.
+
 ### Inherited native configuration
 
 The host parses the resolved main Copilot command **once** into a single, typed native policy
@@ -344,7 +388,7 @@ behavior: there is exactly one parsed policy and one base builder, and agent-spe
 applied as overlays on that shared object. By default a child agent therefore receives exactly the
 same native configuration as the main agent:
 
-- **Working directory / config discovery / instruction files** — every session uses the same
+- **Working directory / config discovery / instruction files** — by default every session uses the same
   workspace `workingDirectory` with `enableConfigDiscovery`, so workspace `.mcp.json`, discovered
   instruction files, and skills resolve identically for children and the main agent.
 - **MCP configuration** — servers discovered from the workspace plus every `--additional-mcp-config`
@@ -387,8 +431,9 @@ recreate a parallel definition:
   An explicit stopped-agent resume that supplies `mcpServers` recaptures the primary's current
   server ceiling and validates the complete replacement subset against it.
 - An agent's `model` / `reasoningEffort` / `reasoningSummary` override the inherited defaults.
-- An MCP server an agent defines itself takes precedence over an inherited native server of the same
-  name.
+- Agents cannot supply replacement MCP definitions through the management tools. In a different
+  working directory, inherited explicit definitions are pinned and directory-local same-name
+  replacements are not loaded.
 
 Omitting an override inherits the shared native default; omitting `mcpServers` specifically uses
 the agent's durable primary-server snapshot rather than servers added later.
