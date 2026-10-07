@@ -72,7 +72,7 @@ local original_eventignore = vim.o.eventignore
 local results = {}
 local notifications = {}
 local completed = false
-local phase = 'early-completion'
+local phase = 'startup-picker'
 local last_trace = 0
 local resume_picker_ready_at
 local primary_target
@@ -112,7 +112,7 @@ pickers_module.new = function(opts, picker_options)
     local original_clear_extra_rows = picker.clear_extra_rows
     picker.clear_extra_rows = function(self, results_bufnr)
       original_clear_extra_rows(self, results_bufnr)
-      if inject_short_resume_results then
+      if inject_short_resume_results and phase == 'resume-picker' then
         inject_short_resume_results = false
         local first_descending_line = math.max(
           1,
@@ -310,7 +310,56 @@ tick = function()
 
   local content = text(conversation())
   local prompt_buf, picker = current_picker()
-  if phase == 'early-completion' then
+  if phase == 'startup-picker' or phase == 'startup-reopened' then
+    if not picker or not action_state.get_selected_entry() then
+      schedule_tick()
+      return
+    end
+    if not resume_picker_ready_at then
+      resume_picker_ready_at = vim.uv.now()
+      schedule_tick()
+      return
+    end
+    if vim.uv.now() - resume_picker_ready_at < 200 then
+      schedule_tick()
+      return
+    end
+    local selected = action_state.get_selected_entry()
+    local last_row = vim.api.nvim_buf_line_count(picker.results_bufnr)
+    if not check(
+      selected.value.display == '[New Session]'
+        and picker.sorting_strategy == 'descending'
+        and vim.api.nvim_win_get_cursor(picker.results_win)[1] == last_row
+        and picker.manager:get_entry(2).value.display
+          == 'Untitled session [e2e-cli-] — 1 minute ago'
+        and picker.manager:get_entry(3).value.display
+          == '[active elsewhere] Older workspace session 023 — 299 days ago'
+        and primary_target == nil,
+      'startup default-selected [New Session] at the bottom with unchanged session rows and no primary'
+    ) then
+      finish()
+      return
+    end
+    resume_picker_ready_at = nil
+    if phase == 'startup-picker' then
+      actions.close(prompt_buf)
+      phase = 'startup-cancelled'
+    else
+      actions.select_default(prompt_buf)
+      phase = 'early-completion'
+    end
+  elseif phase == 'startup-cancelled' then
+    if picker then
+      schedule_tick()
+      return
+    end
+    if not check(primary_target == nil, 'cancelling startup created no primary session') then
+      finish()
+      return
+    end
+    native.open({ reuse_current_tab = true })
+    phase = 'startup-reopened'
+  elseif phase == 'early-completion' then
     local loaded = package.loaded['smear_cursor'] ~= nil
     local available = pcall(require, 'smear_cursor')
     if not check(

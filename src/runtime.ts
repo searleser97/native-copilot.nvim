@@ -5356,7 +5356,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     await this.disconnectLiveSession(live, "SDK session disconnect failed during lifecycle change");
   }
 
-  async openPrimary(): Promise<void> {
+  async openPrimary(sessionId?: string): Promise<void> {
     if (this.primaryAgentId !== undefined) {
       const existing = this.agents.get(this.primaryAgentId);
       if (existing) {
@@ -5381,12 +5381,27 @@ export class CopilotRuntime implements RuntimeAdapter {
     }
     const transition = this.beginAgentTransition(
       context,
-      "starting a fresh SDK session",
+      sessionId ? "resuming the selected SDK session" : "starting a fresh SDK session",
     );
     let resumeMailbox = false;
     try {
-      this.emitAgentLifecycle("agent.loading", context, { recovered: false });
-      const live = await this.ensureAgentSession(context.agentId, transition);
+      const recovered = sessionId !== undefined;
+      this.emitAgentLifecycle("agent.loading", context, { recovered });
+      const plan = recovered ? await this.sessionConnectionPlan(context) : undefined;
+      const live = plan
+        ? await this.connectSession({
+            runId: context.runId,
+            target: context.target,
+            agentId: context.agentId,
+            alias: context.alias,
+            sessionId,
+            config: plan.config,
+            configSignature: plan.configSignature,
+            availableMcpServers: plan.availableMcpServers,
+            resumeExisting: true,
+            transition,
+          })
+        : await this.ensureAgentSession(context.agentId, transition);
       const adoptedMessages = this.db.completePrimaryStartup(
         context.runId,
         this.workspace,
@@ -5396,7 +5411,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       );
       delete context.primaryClaim;
       this.emitAgentLifecycle("agent.ready", context, {
-        recovered: false,
+        recovered,
         sessionId: live.session.sessionId,
       });
       this.emit(
@@ -5404,7 +5419,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         {
           ...this.agentPayload(context),
           mode: "primary",
-          recovered: false,
+          recovered,
           adoptedMessages,
           sessionId: live.session.sessionId,
           runId: context.runId,
@@ -5497,8 +5512,16 @@ export class CopilotRuntime implements RuntimeAdapter {
           `replacing its SDK session with "${sessionId}"`,
         );
       } else {
-        await this.openPrimary();
-        context = this.requirePrimary();
+        const released = owner ? this.db.releaseSession(sessionId, this.workspace) : [];
+        try {
+          await this.openPrimary(sessionId);
+        } catch (error) {
+          if (released.length > 0) {
+            this.db.restoreSessionOwnership(sessionId, this.workspace, released);
+          }
+          throw error;
+        }
+        return;
       }
     }
     const claimedContext = claimed !== undefined;

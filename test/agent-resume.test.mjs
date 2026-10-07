@@ -8,6 +8,129 @@ import { CopilotRuntime } from "../dist/runtime.js";
 const artifacts = resolve(".e2e-artifacts", "agent-resume-tests");
 mkdirSync(artifacts, { recursive: true });
 
+function startupFixture(t) {
+  const directory = mkdtempSync(join(artifacts, "startup-"));
+  const db = new AgentDatabase(join(directory, "state.sqlite"), () => false);
+  const events = [];
+  const connections = [];
+  const runtime = new CopilotRuntime(directory, db, (type, payload) => {
+    events.push({ type, payload });
+  });
+  runtime.ensureClient = async () => ({
+    listSessions: async () => [{ sessionId: "selected-session" }],
+    rpc: { sessions: { checkInUse: async () => ({ inUse: [] }) } },
+  });
+  runtime.sessionConnectionPlan = async () => ({
+    config: {},
+    configSignature: "startup-test",
+    availableMcpServers: new Set(),
+  });
+  runtime.ensureAgentSession = async () => {
+    assert.fail("resuming at startup must never create a throwaway SDK session");
+  };
+  runtime.connectSession = async (request) => {
+    connections.push(request);
+    db.upsertSession(request.runId, request.sessionId, "connected");
+    return { session: { sessionId: request.sessionId } };
+  };
+  t.after(() => {
+    clearInterval(runtime.recoveryTimer);
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return { runtime, db, events, connections };
+}
+
+test("startup resume connects only the selected SDK session in a fresh workspace", async (t) => {
+  const { runtime, db, events, connections } = startupFixture(t);
+  await runtime.resumePrimarySession("selected-session");
+  assert.equal(connections.length, 1);
+  assert.equal(connections[0].sessionId, "selected-session");
+  assert.equal(connections[0].resumeExisting, true);
+  assert.equal(events.filter((event) => event.type === "primary.ready").length, 1);
+  const ready = events.find((event) => event.type === "primary.ready").payload;
+  assert.equal(ready.sessionId, "selected-session");
+  assert.equal(ready.recovered, true);
+  assert.equal(db.agentRun(ready.runId, runtime.workspace).startupState, "ready");
+});
+
+test("startup resume rejects locked or missing sessions before claiming a primary", async (t) => {
+  const { runtime, connections } = startupFixture(t);
+  await assert.rejects(runtime.resumePrimarySession("missing-session"), /not found/);
+  runtime.ensureClient = async () => ({
+    listSessions: async () => [{ sessionId: "selected-session" }],
+    rpc: { sessions: { checkInUse: async () => ({ inUse: ["selected-session"] }) } },
+  });
+  await assert.rejects(runtime.resumePrimarySession("selected-session"), /active in another process/);
+  assert.equal(runtime.primaryAgentId, undefined);
+  assert.equal(connections.length, 0);
+});
+
+test("failed startup resume leaves no active or recoverable failed primary", async (t) => {
+  const { runtime, db, events } = startupFixture(t);
+  runtime.connectSession = async (request) => {
+    db.upsertSession(request.runId, request.sessionId, "connected");
+    throw new Error("resume unavailable");
+  };
+  await assert.rejects(runtime.resumePrimarySession("selected-session"), /resume unavailable/);
+  assert.equal(runtime.primaryAgentId, undefined);
+  assert.equal(runtime.agents.size, 0);
+  assert.deepEqual(db.reservedAgentAliases(runtime.workspace), []);
+  assert.equal(db.resumablePrimaryRun(runtime.workspace), undefined);
+  assert.equal(events.some((event) => event.type === "primary.ready"), false);
+  assert.equal(events.some((event) => event.type === "agent.error"), true);
+});
+
+test("failed startup resume restores a stopped worker's session ownership", async (t) => {
+  const { runtime, db, events } = startupFixture(t);
+  const definition = JSON.stringify({
+    definition: { id: "worker", displayName: "Worker", description: "Worker", task: "Wait" },
+    mcpServers: [],
+    canTalkToAgentIds: [],
+    canObserveAgentIds: [],
+  });
+  db.createAgentRun("worker-run", "worker-agent", "worker", definition, runtime.workspace, 8104);
+  db.upsertSession("worker-run", "selected-session", "connected");
+  db.completeProvisionedAgentStartup("worker-run");
+  db.finishRun("worker-run", "stopped");
+  const owner = db.sessionOwner("selected-session");
+  runtime.connectSession = async (request) => {
+    db.upsertSession(request.runId, request.sessionId, "connected");
+    throw new Error("resume unavailable");
+  };
+
+  await assert.rejects(runtime.resumePrimarySession("selected-session"), /resume unavailable/);
+
+  assert.deepEqual(db.sessionOwner("selected-session"), owner);
+  assert.equal(runtime.primaryAgentId, undefined);
+  assert.deepEqual(db.reservedAgentAliases(runtime.workspace).map((entry) => entry.alias), ["worker"]);
+  assert.equal(events.some((event) => event.type === "primary.ready"), false);
+});
+
+test("established primary still restores its session when replacement fails", async (t) => {
+  const { runtime, db, events, connections } = startupFixture(t);
+  await runtime.resumePrimarySession("selected-session");
+  const original = events.find((event) => event.type === "primary.ready").payload;
+  runtime.ensureClient = async () => ({
+    listSessions: async () => [{ sessionId: "replacement-session" }],
+    rpc: { sessions: { checkInUse: async () => ({ inUse: [] }) } },
+  });
+  const connect = runtime.connectSession;
+  runtime.connectSession = async (request) => {
+    if (request.sessionId === "replacement-session") throw new Error("replacement unavailable");
+    return connect(request);
+  };
+
+  await assert.rejects(runtime.resumePrimarySession("replacement-session"), /replacement unavailable/);
+
+  assert.equal(connections.length, 2);
+  assert.equal(connections[1].sessionId, "selected-session");
+  const restored = events.filter((event) => event.type === "primary.ready").at(-1).payload;
+  assert.equal(restored.replacementFailed, true);
+  assert.equal(restored.runId, original.runId);
+  assert.equal(db.agentRun(original.runId, runtime.workspace).status, "active");
+});
+
 function fixture(t, availableMcpServers) {
   const directory = mkdtempSync(join(artifacts, "case-"));
   const db = new AgentDatabase(join(directory, "state.sqlite"), () => false);

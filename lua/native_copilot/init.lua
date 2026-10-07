@@ -157,6 +157,8 @@ local state = {
   history_render_scheduled = false,
   resume_request_id = nil,
   resume_cursor_animation_restore = nil,
+  startup_request_id = nil,
+  startup_requests = {},
   session_replacing = nil,
 }
 
@@ -1996,8 +1998,11 @@ end
 
 function M.open(open_options)
   ensure_ui(type(open_options) == 'table' and open_options.reuse_current_tab == true)
+  if protocol.is_running()
+    and ((state.primary_target and state.mode ~= 'stopped') or state.startup_request_id)
+  then return end
   state.loading_target = nil
-  set_loading_stage('Starting Native Copilot host')
+  set_loading_stage('Loading Copilot sessions')
   if state.main_win and vim.api.nvim_win_is_valid(state.main_win) then
     vim.api.nvim_win_set_buf(state.main_win, state.loading_buf)
     vim.cmd('redraw')
@@ -2008,10 +2013,15 @@ function M.open(open_options)
     return
   end
   send('hello')
-  send('mode.primary')
+  state.startup_request_id = send('sessions.list')
+  if state.startup_request_id then state.startup_requests[state.startup_request_id] = true end
 end
 
 function M.close()
+  if state.startup_request_id then
+    state.startup_request_id = nil
+    stop_loading_animation()
+  end
   if not is_ui_open() then return end
   close_task_detail()
   if #vim.api.nvim_list_tabpages() == 1 then
@@ -2164,7 +2174,11 @@ local function picker(title, entries, choose, picker_options)
       prompt = title,
       format_item = function(item) return item.display end,
     }, function(item)
-      if item then choose(item) end
+      if item then
+        choose(item)
+      elseif picker_options.on_cancel then
+        picker_options.on_cancel()
+      end
     end)
     return
   end
@@ -2174,6 +2188,7 @@ local function picker(title, entries, choose, picker_options)
       ('Unknown picker frontend: %s'):format(options.frontend.picker),
       vim.log.levels.ERROR
     )
+    if picker_options.on_cancel then picker_options.on_cancel() end
     return
   end
 
@@ -2189,6 +2204,7 @@ local function picker(title, entries, choose, picker_options)
     local ok, loaded = pcall(require, name)
     if not ok then
       notify(('Telescope picker unavailable: %s'):format(loaded), vim.log.levels.ERROR)
+      if picker_options.on_cancel then picker_options.on_cancel() end
       return
     end
     modules[name] = loaded
@@ -2260,6 +2276,18 @@ local function picker(title, entries, choose, picker_options)
         and sorters.get_substr_matcher()
       or conf.generic_sorter({}),
     attach_mappings = function(prompt_buf)
+      local selected = false
+      if picker_options.on_cancel then
+        vim.api.nvim_create_autocmd('BufWipeout', {
+          buffer = prompt_buf,
+          once = true,
+          callback = function()
+            vim.schedule(function()
+              if not selected then picker_options.on_cancel() end
+            end)
+          end,
+        })
+      end
       if restore_cursor_animation then
         vim.api.nvim_create_autocmd('BufWipeout', {
           buffer = prompt_buf,
@@ -2272,6 +2300,7 @@ local function picker(title, entries, choose, picker_options)
       end
       actions.select_default:replace(function()
         local selection = action_state.get_selected_entry()
+        selected = selection ~= nil
         if restore_eventignore then restore_eventignore() end
         local selection_restore = restore_cursor_animation
         restore_cursor_animation = nil
@@ -2305,6 +2334,7 @@ local function picker(title, entries, choose, picker_options)
     if restore_eventignore then restore_eventignore() end
     if restore_cursor_animation then restore_cursor_animation() end
     notify(('Could not open Telescope picker: %s'):format(failure), vim.log.levels.ERROR)
+    if picker_options.on_cancel then picker_options.on_cancel() end
   end
 end
 
@@ -2875,7 +2905,12 @@ end
 
 function M._on_event(message)
   local payload = message.payload or {}
+  if message.type == 'request.complete' and message.requestId then
+    state.startup_requests[message.requestId] = nil
+  end
   if message.type == 'host.error' then
+    state.startup_request_id = nil
+    state.startup_requests = {}
     stop_loading_animation()
     state.loading_target = nil
     set_loading_message(payload.message or 'Native Copilot host failed to initialize.')
@@ -2945,7 +2980,18 @@ function M._on_event(message)
     end
     return
   elseif message.type == 'sessions.list' then
+    local startup = message.requestId and state.startup_requests[message.requestId]
+    if startup then
+      state.startup_requests[message.requestId] = nil
+      if message.requestId ~= state.startup_request_id or not is_ui_open() then return end
+      if state.primary_target and state.mode ~= 'stopped' then
+        state.startup_request_id = nil
+        return
+      end
+      stop_loading_animation()
+    end
     local entries = {}
+    if startup then table.insert(entries, { display = '[New Session]', new_session = true }) end
     for _, session in ipairs(payload.sessions or {}) do
       local summary = session.summary
       if not summary or summary:match('^%s*$') then
@@ -2975,16 +3021,32 @@ function M._on_event(message)
       return
     end
     local displayed_entries = entries
+    local chosen = false
     picker('Resume Copilot session', displayed_entries, function(item, restore_cursor_animation)
+      if startup then
+        if chosen or message.requestId ~= state.startup_request_id or not is_ui_open() then
+          if restore_cursor_animation then restore_cursor_animation() end
+          return
+        end
+        chosen = true
+        if item.new_session then
+          if restore_cursor_animation then vim.defer_fn(restore_cursor_animation, 100) end
+          state.startup_request_id = send('mode.primary')
+          if state.startup_request_id then state.startup_requests[state.startup_request_id] = true end
+          return
+        end
+      end
       if item.session.inUse then
         if restore_cursor_animation then restore_cursor_animation() end
         notify('That Copilot session is active in another process.', vim.log.levels.WARN)
+        if startup then M.close() end
         return
       end
       state.resume_cursor_animation_restore = restore_cursor_animation
       state.resume_request_id = send('session.resume', { sessionId = item.session.sessionId })
       if not state.resume_request_id then
         restore_resume_cursor_animation()
+        if startup then state.startup_request_id = nil end
       elseif restore_cursor_animation then
         vim.defer_fn(function()
           if state.resume_cursor_animation_restore == restore_cursor_animation then
@@ -2993,6 +3055,9 @@ function M._on_event(message)
         end, 60000)
       end
     end, {
+      on_cancel = startup and function()
+        if message.requestId == state.startup_request_id then M.close() end
+      end or nil,
       preserve_order = true,
       sorting_strategy = 'descending',
       default_selection_index = 1,
@@ -3434,10 +3499,19 @@ function M._on_event(message)
     )
     return
   elseif message.type == 'request.error' or message.type == 'protocol.error' then
+    if message.requestId and state.startup_requests[message.requestId] then
+      state.startup_requests[message.requestId] = nil
+      if message.requestId ~= state.startup_request_id then
+        notify(payload.message or 'Native Copilot request failed.', vim.log.levels.ERROR)
+        return
+      end
+      state.startup_request_id = nil
+    end
     if state.prompt_calls[message.requestId] then
       fail_prompt(message.requestId, payload.message)
     end
     if message.requestId and message.requestId == state.resume_request_id then
+      state.startup_request_id = nil
       restore_resume_cursor_animation()
     end
     if loading_visible() then
@@ -3459,6 +3533,7 @@ function M._on_event(message)
     )
     return
   elseif message.type == 'primary.ready' then
+    state.startup_request_id = nil
     close_task_detail()
     local target = set_primary(payload)
     if not target then return end
@@ -3550,6 +3625,7 @@ function M._on_event(message)
     if is_ui_open() and buffers.get_member(state.selected) then refresh_member(state.selected) end
     return
   elseif message.type == 'agent.error' then
+    if payload.primary then state.startup_request_id = nil end
     local target = payload.target
     if target then
       if payload.primary or target == state.primary_target then
@@ -3796,6 +3872,8 @@ function M.setup(user_options)
   vim.api.nvim_create_autocmd('TabClosed', {
     callback = function()
       if state.tab and not vim.api.nvim_tabpage_is_valid(state.tab) then
+        state.startup_request_id = nil
+        stop_loading_animation()
         state.tab = nil
         state.main_win = nil
         state.prompt_win = nil

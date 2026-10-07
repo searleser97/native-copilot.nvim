@@ -880,7 +880,7 @@ export class ScriptedRuntime implements RuntimeAdapter {
         inUse: index === 22,
         context: { workingDirectory: this.workspace },
       }));
-    if (this.sessionListCount === 1) {
+    if (this.sessionListCount <= 3) {
       return [current, older[22]];
     }
     return [current, ...older.reverse()];
