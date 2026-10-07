@@ -372,7 +372,9 @@ same-name overrides, and creation returns actionable `configurationWarnings`. Un
 (including built-in-only servers) cannot be selected for these sessions. To add one, the user must
 configure and approve an explicit definition on the host, restart it, and create a new agent; no
 agent self-approval or extra-server approval UI is provided. The host command resolver is not rerun
-in the child directory.
+in the child directory. Unexpected target discovery failures stop creation or recovery before
+changing durable state and report an actionable error without echoing potentially sensitive
+configuration values.
 
 This safety boundary also disables automatic skills, custom-agent, plugin, and hook discovery in
 cross-directory sessions, because the SDK has no separate MCP-only discovery switch. On-demand

@@ -205,6 +205,33 @@ test("same-name host MCP changes cannot replace persisted approvals on recovery"
   assert.equal(db.agentRun(created.runId, host).status, "stopped");
 });
 
+test("discovery failure is actionable, redacted, and leaves creation and recovery unchanged", async (t) => {
+  const { runtime, parent, target, host, db } = fixture(t);
+  const created = await runtime.createAgentForCaller(parent, child("worker", target));
+  await runtime.stopAgent(created.agentId);
+  const before = db.agentRun(created.runId, host);
+  const originalClient = await runtime.ensureClient();
+  runtime.ensureClient = async () => ({
+    ...originalClient,
+    rpc: {
+      ...originalClient.rpc,
+      mcp: { discover: async () => { throw new Error("invalid config: secret-token"); } },
+    },
+  });
+  const expectedError = (error) => {
+    assert.match(error.message, /MCP discovery failed.*No agent state was changed.*then retry/);
+    assert.equal(error.message.includes("secret-token"), false);
+    assert.equal(error.cause, undefined);
+    return true;
+  };
+  await assert.rejects(runtime.createAgentForCaller(parent, child("new_worker", target)), expectedError);
+  await assert.rejects(runtime.resumeAgent(created.runId, {}, parent), expectedError);
+  assert.equal(db.agentRun(created.runId, host).definition, before.definition);
+  assert.equal(db.agentRun(created.runId, host).status, "stopped");
+  assert.equal(db.ownedRecoverableOrActiveAgentRuns(parent.agentId, host).length, 1);
+  assert.equal(runtime.aliasIndex.has("new_worker"), false);
+});
+
 test("deleted cwd prevents recovery without mutating a stopped agent", async (t) => {
   const { runtime, parent, target, host, db } = fixture(t);
   const created = await runtime.createAgentForCaller(parent, child("worker", target));

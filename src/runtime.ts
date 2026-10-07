@@ -3895,6 +3895,13 @@ export class CopilotRuntime implements RuntimeAdapter {
     const client = await this.ensureClient();
     const discovered = await client.rpc.mcp.discover({
       workingDirectory: context.definition.workingDirectory ?? this.workspace,
+    }).catch(() => {
+      // SDK discovery errors can contain configuration values, including credentials.
+      throw new Error(
+        `MCP discovery failed for agent "${context.alias}" in "${context.definition.workingDirectory}". ` +
+          "No agent state was changed. Check the directory's MCP configuration and SDK availability, " +
+          "then retry; unverified directory configuration will not be loaded.",
+      );
     });
     const ignored = discovered.servers.map((server) => server.name).sort();
     context.directoryMcpServers = ignored;
