@@ -187,6 +187,188 @@ function fixture(t, availableMcpServers) {
   return { db, runtime, originalDefinition: definition };
 }
 
+async function primaryAdoptionFixture(t) {
+  const result = startupFixture(t);
+  const { runtime, db } = result;
+  await runtime.resumePrimarySession("selected-session");
+  const caller = runtime.agents.get(runtime.primaryAgentId);
+  db.createAgentRun(
+    "former-run", "former-agent", "former",
+    JSON.stringify({
+      definition: {
+        id: "former", displayName: "Former main", description: "Former main",
+        task: "Wait.", prompt: "Wait.", permissions: { mode: "inherit" },
+        canTalkTo: [], canObserve: [],
+      },
+      mcpServers: [], canTalkToAgentIds: [], canObserveAgentIds: [],
+    }),
+    runtime.workspace, 8104, true,
+  );
+  db.upsertSession("former-run", "former-session", "connected");
+  db.completeRunStartup("former-run");
+  db.finishRun("former-run", "stopped");
+  runtime.ensureClient = async () => ({
+    listSessions: async () => [{ sessionId: "former-session" }, { sessionId: "unowned-session" }],
+    rpc: { sessions: { checkInUse: async () => ({ inUse: [] }) } },
+  });
+  runtime.availableMcpServers = async () => new Set();
+  return {
+    ...result, caller,
+    resume: (sessionId = "former-session", overrides = {}) =>
+      runtime.resumeAgentTool(caller).handler({ sessionId, ...overrides }),
+  };
+}
+
+test("resume tool adopts an inactive primary conversation without replacing the current primary", async (t) => {
+  const { runtime, db, caller, connections, resume } = await primaryAdoptionFixture(t);
+  const former = db.agentRun("former-run", runtime.workspace);
+  db.createOwnedAgentRun({
+    id: "former-child-run", agentId: "former-child", alias: "former_child",
+    definition: former.definition, workspace: runtime.workspace, ownerPid: 8104,
+  }, former.agentId, "former-session");
+  const childBefore = db.agentAdministration("former-child");
+
+  const adopted = await resume();
+
+  assert.equal(adopted.adopted, true);
+  assert.equal(adopted.sessionId, "former-session");
+  assert.notEqual(adopted.agentId, former.agentId);
+  assert.equal(runtime.primaryAgentId, caller.agentId);
+  assert.equal(db.session(caller.runId).sessionId, "selected-session");
+  assert.equal(connections.length, 2);
+  assert.equal(connections[1].sessionId, "former-session");
+  assert.equal(connections[1].resumeExisting, true);
+  assert.equal(db.sessionOwner("former-session").agentId, adopted.agentId);
+  assert.equal(db.agentRun(adopted.runId, runtime.workspace).isPrimary, false);
+  assert.equal(db.agentAdministration(adopted.agentId).ownerAgentId, caller.agentId);
+  assert.deepEqual(db.agentAdministration("former-child"), childBefore);
+  const context = runtime.agents.get(adopted.agentId);
+  assert.deepEqual([...context.canTalkTo], []);
+  assert.deepEqual([...context.canObserve], []);
+  assert.equal(db.agentRun("former-run", runtime.workspace).definition, former.definition);
+  await assert.rejects(resume(), /already open in this Neovim instance/);
+});
+
+test("resume tool rejects a primary open locally or in another SDK process without transferring ownership", async (t) => {
+  const { runtime, db, connections, resume } = await primaryAdoptionFixture(t);
+  const owner = db.sessionOwner("former-session");
+  await assert.rejects(resume("selected-session"), /already open in this Neovim instance/);
+  runtime.ensureClient = async () => ({
+    listSessions: async () => [{ sessionId: "former-session" }],
+    rpc: { sessions: { checkInUse: async () => ({ inUse: ["former-session"] }) } },
+  });
+  await assert.rejects(resume(), /already open in another Neovim or Copilot process/);
+  assert.deepEqual(db.sessionOwner("former-session"), owner);
+  assert.equal(connections.length, 1);
+});
+
+test("resume tool rejects a primary with an active database reservation even if SDK reports free", async (t) => {
+  const { runtime, db, connections, resume } = await primaryAdoptionFixture(t);
+  db.createAgentRun(
+    "active-former-run", "former-agent", "former_active",
+    db.agentRun("former-run", runtime.workspace).definition,
+    runtime.workspace, 8105, true,
+  );
+  db.upsertSession("active-former-run", "former-session", "connected");
+  db.completeRunStartup("active-former-run");
+  const owner = db.sessionOwner("former-session");
+  await assert.rejects(resume(), /active or no longer eligible/);
+  assert.deepEqual(db.sessionOwner("former-session"), owner);
+  assert.equal(connections.length, 1);
+});
+
+test("failed primary adoption restores ownership and permits retry after partial connection", async (t) => {
+  const { runtime, db, caller, resume } = await primaryAdoptionFixture(t);
+  const owner = db.sessionOwner("former-session");
+  const connect = runtime.connectSession;
+  runtime.connectSession = async (request) => {
+    db.upsertSession(request.runId, request.sessionId, "connected");
+    throw new Error("expected connection failure");
+  };
+  await assert.rejects(resume(), /expected connection failure/);
+  assert.deepEqual(db.sessionOwner("former-session"), owner);
+  assert.equal(runtime.agents.size, 1);
+  assert.equal(runtime.primaryAgentId, caller.agentId);
+  assert.equal(db.agentRunBySession("former-session", runtime.workspace).id, "former-run");
+  assert.equal(db.reservedAgentAliases(runtime.workspace).some(row => row.alias.startsWith("session_")), false);
+  runtime.connectSession = connect;
+  const retried = await resume();
+  assert.equal(retried.sessionId, "former-session");
+  assert.equal(retried.adopted, true);
+});
+
+test("primary adoption keeps MCP and hook approval checks and restores rejected transfers", async (t) => {
+  const { db, runtime, resume } = await primaryAdoptionFixture(t);
+  const owner = db.sessionOwner("former-session");
+  await assert.rejects(resume("former-session", { mcpServers: ["unapproved-server"] }), /unapproved-server/);
+  assert.deepEqual(db.sessionOwner("former-session"), owner);
+  await assert.rejects(resume("former-session", { enableFileHooks: true }), /approval|allow-all/);
+  assert.deepEqual(db.sessionOwner("former-session"), owner);
+  assert.equal(runtime.agents.size, 1);
+});
+
+test("adopted primary conversation subsequently recovers its new managed identity", async (t) => {
+  const { runtime, db, resume } = await primaryAdoptionFixture(t);
+  const adopted = await resume();
+  db.finishRun(adopted.runId, "stopped");
+  runtime.unregisterAgent(runtime.agents.get(adopted.agentId));
+  // A transferred conversation can have historical runs with the same timestamp.
+  db.db.prepare("UPDATE runs SET started_at = ? WHERE id IN (?, ?)")
+    .run("2026-10-07T00:00:00.000Z", "former-run", adopted.runId);
+  runtime.openPrimary = async () => {};
+  runtime.ensureAgentSession = async (agentId) => ({
+    session: { sessionId: db.session(runtime.agents.get(agentId).runId).sessionId },
+  });
+
+  const recovered = await resume();
+
+  assert.equal(recovered.adopted, false);
+  assert.equal(recovered.agentId, adopted.agentId);
+  assert.equal(recovered.sessionId, "former-session");
+  assert.equal(db.sessionOwner("former-session").agentId, adopted.agentId);
+});
+
+test("concurrent primary adoption requests cannot create two owners", async (t) => {
+  const { db, connections, resume } = await primaryAdoptionFixture(t);
+  const results = await Promise.allSettled([resume(), resume()]);
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  const adopted = results.find(result => result.status === "fulfilled").value;
+  assert.equal(connections.length, 2);
+  assert.equal(db.sessionOwner("former-session").agentId, adopted.agentId);
+  assert.match(String(results.find(result => result.status === "rejected").reason), /active|already open/);
+});
+
+test("primary conversation missing from the workspace remains reserved", async (t) => {
+  const { runtime, db, resume, connections } = await primaryAdoptionFixture(t);
+  const owner = db.sessionOwner("former-session");
+  runtime.ensureClient = async () => ({ listSessions: async () => [] });
+  await assert.rejects(resume(), /not found for this workspace/);
+  assert.deepEqual(db.sessionOwner("former-session"), owner);
+  assert.equal(connections.length, 1);
+});
+
+test("ownership restoration cannot introduce duplicate owners after another transfer wins", async (t) => {
+  const { runtime, db, resume } = await primaryAdoptionFixture(t);
+  const adopted = await resume();
+  assert.throws(
+    () => db.restoreSessionOwnership("former-session", runtime.workspace, ["former-run"]),
+    /multiple agent identities/,
+  );
+  assert.equal(db.sessionOwner("former-session").agentId, adopted.agentId);
+});
+
+test("unowned conversation adoption is unchanged and primary-only release cannot steal managed sessions", async (t) => {
+  const { runtime, db, caller, resume } = await primaryAdoptionFixture(t);
+  const adopted = await resume("unowned-session");
+  assert.equal(adopted.adopted, true);
+  assert.equal(adopted.sessionId, "unowned-session");
+  db.finishRun(adopted.runId, "stopped");
+  const owner = db.sessionOwner("unowned-session");
+  assert.throws(() => db.releaseSession("unowned-session", runtime.workspace, true), /no longer eligible/);
+  assert.deepEqual(db.sessionOwner("unowned-session"), owner);
+  assert.equal(db.agentAdministration(adopted.agentId).ownerAgentId, caller.agentId);
+});
+
 const elevatedPermissions = {
   tools: { allow: ["builtin:*"], deny: [] },
   paths: { read: ["${workspace}"], write: ["${workspace}"] },

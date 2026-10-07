@@ -2786,10 +2786,11 @@ export class AgentDatabase {
   }
 
   /**
-   * Releases an inactive managed session so the primary can explicitly resume it.
+   * Releases inactive session reservations for explicit conversation transfer.
    * Cross-workspace and active sessions remain non-transferable.
+   * Primary-only transfers cannot release another managed agent's ownership.
    */
-  releaseSession(sessionId: string, workspace: string): string[] {
+  releaseSession(sessionId: string, workspace: string, primaryOnly = false): string[] {
     return this.transaction(() => {
       const rows = this.sessionOwnershipRows(sessionId);
       if (rows.length === 0) {
@@ -2808,12 +2809,14 @@ export class AgentDatabase {
           `UPDATE runs
            SET recovery_eligible = 0
            WHERE id IN (${placeholders}) AND mode = 'agent'
-             AND workspace = ? AND status != 'active'`,
+             AND workspace = ? AND status != 'active'
+             AND (? = 0 OR is_primary = 1)`,
         )
-        .run(...runIds, workspace);
+        .run(...runIds, workspace, primaryOnly ? 1 : 0);
       if (released.changes !== runIds.length) {
         throw new Error(
-          `SDK session "${sessionId}" could not be released from its historical runs.`,
+          `SDK session "${sessionId}" could not be released from its historical runs; ` +
+            "it is active or no longer eligible for this ownership transfer.",
         );
       }
       return runIds;
@@ -2848,6 +2851,8 @@ export class AgentDatabase {
           `SDK session "${sessionId}" could not restore its historical ownership.`,
         );
       }
+      // Roll back restoration if another host claimed the released conversation.
+      this.sessionOwner(sessionId);
     });
   }
 
@@ -4679,7 +4684,7 @@ export class AgentDatabase {
            WHERE agent_sessions.run_id = runs.id
              AND agent_sessions.session_id = ?
          )
-       ORDER BY started_at DESC
+       ORDER BY recovery_eligible DESC, started_at DESC
        LIMIT 1`,
       workspace,
       sessionId,

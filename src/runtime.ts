@@ -3035,7 +3035,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       description:
         "Resume exactly one Copilot SDK session as a real agent. A managed session recovers its " +
         "existing durable agent identity and may replace its permissions and MCP subset while " +
-        "inactive; an unowned local session is adopted " +
+        "inactive; an inactive former primary or unowned local session is adopted " +
         "as a new generic real agent with inherited runtime configuration and no communication " +
         "links. If the session is already open in another Neovim or Copilot process, tell the user " +
         "it must be closed there before it can be resumed here.",
@@ -3043,7 +3043,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         sessionId: z
           .string()
           .min(1)
-          .describe("Copilot SDK session id returned by real_agent_list."),
+          .describe("Copilot SDK session ID, including an inactive former main/primary session."),
         permissions: dynamicPermissionSchema.optional().describe(
           "Optional complete replacement permission profile for this resumed run. It must remain " +
             "within both the caller's effective ceiling and the main session ceiling.",
@@ -3075,9 +3075,9 @@ export class CopilotRuntime implements RuntimeAdapter {
         const stored = this.db.agentRunBySession(sessionId, this.workspace);
         if (stored) {
           if (stored.isPrimary) {
-            throw new Error(
-              `Copilot session "${sessionId}" belongs to the primary agent and must be resumed ` +
-                "through /resume.",
+            return this.withAgentLock(
+              `session:${sessionId}`,
+              () => this.adoptPrimarySessionAsAgent(source, sessionId, overrides),
             );
           }
           const administration = this.db.agentAdministration(stored.agentId);
@@ -5985,6 +5985,40 @@ export class CopilotRuntime implements RuntimeAdapter {
       throw error;
     } finally {
       this.endAgentTransition(transition, ready);
+    }
+  }
+
+  private async adoptPrimarySessionAsAgent(
+    caller: AgentContext,
+    sessionId: string,
+    overrides: AgentResumeOverrides,
+  ): Promise<Record<string, unknown>> {
+    const client = await this.ensureClient();
+    const available = await client.listSessions({ workingDirectory: this.workspace });
+    if (!available.some((session) => session.sessionId === sessionId)) {
+      throw new Error(`Copilot session "${sessionId}" was not found for this workspace.`);
+    }
+    const { inUse } = await client.rpc.sessions.checkInUse({ sessionIds: [sessionId] });
+    if (inUse.includes(sessionId)) {
+      throw new Error(
+        `Copilot session "${sessionId}" is already open in another Neovim or Copilot process. ` +
+          "Close it there before resuming the agent here.",
+      );
+    }
+    // Release only inactive primary reservations, never another managed agent's ownership.
+    const released = this.db.releaseSession(sessionId, this.workspace, true);
+    try {
+      return await this.adoptSessionAsAgent(caller, sessionId, overrides);
+    } catch (error) {
+      try {
+        this.db.restoreSessionOwnership(sessionId, this.workspace, released);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Adoption of primary session "${sessionId}" failed and its ownership could not be restored.`,
+        );
+      }
+      throw error;
     }
   }
 

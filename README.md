@@ -657,6 +657,12 @@ Every agent, including the primary, receives the same stable communication tools
   communication or observation links; it preserves the existing conversation instead of creating a
   replacement SDK session. A session already open in another Neovim or Copilot process must be
   closed there first.
+  An inactive former main/primary session can also be adopted by passing its SDK session ID.
+  This opens the same conversation as a new real agent in the current workspace, without replacing
+  the current main buffer or transferring the former primary's children, mailbox, or communication
+  links. Existing adoption permission/MCP ceilings and file-hook approval rules still apply.
+  Active primary sessions cannot be taken over. If adoption fails, the former primary's session
+  reservation is restored.
 - `real_agent_stop` disconnects one directly owned active agent while preserving its SDK session,
   durable identity, history, mailbox, and links for later recovery. `real_agent_remove` remains a
   backward-compatible stop alias.
