@@ -60,6 +60,7 @@ end
 local defaults = {
   node_command = 'node',
   runtime_command_resolver = vim.env.NVIM_COPILOT_CMD_RESOLVER,
+  file_hook_directories = {},
   database_path = default_database,
   workspace = nil,
   prompt_height = 8,
@@ -1991,6 +1992,7 @@ local function start_host()
   return protocol.start({
     node_command = options.node_command,
     runtime_command_resolver = options.runtime_command_resolver,
+    file_hook_directories = options.file_hook_directories,
     database_path = options.database_path,
     workspace = current_workspace(),
   }, M._on_event)

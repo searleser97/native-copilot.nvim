@@ -35,6 +35,12 @@ const workingDirectory = z.string().min(1).optional().describe(
     "host workspace. This does not grant filesystem or MCP access; ownership and ${workspace} " +
     "permission roots remain attached to the host workspace.",
 );
+export const enableFileHooksSchema = z.boolean().optional().describe(
+  "Explicit native .github/hooks command execution for the agent working directory. True " +
+    "requires exact-directory host approval, --allow-all, and unrestricted creator/agent " +
+    "permissions. False disables hooks. Omit on create to retain existing defaults; omit on " +
+    "resume to preserve the stored choice. Does not enable MCP/config discovery.",
+);
 
 export const permissionsSchema = z.object({
   tools: z.object({
@@ -71,6 +77,7 @@ export const dynamicAgentSchema = z.object({
   ),
   prompt: z.string().min(1).describe("Complete operating instructions for this agent."),
   workingDirectory,
+  enableFileHooks: enableFileHooksSchema,
   model: z.string().min(1).optional().describe("Model ID; omit to inherit the runtime default."),
   reasoningEffort: reasoningEffort.optional().describe("Optional reasoning effort override."),
   reasoningSummary: reasoningSummary.optional().describe("Optional reasoning display level."),
@@ -122,6 +129,7 @@ export const agentCreateSchema = z.object({
   description: z.string().min(1),
   prompt: z.string().min(1).describe("Persistent operating instructions for the new agent."),
   workingDirectory,
+  enableFileHooks: enableFileHooksSchema,
   model: z.string().min(1).optional(),
   reasoningEffort: reasoningEffort.optional(),
   reasoningSummary: reasoningSummary.optional(),
@@ -155,6 +163,9 @@ export function createDefinitionToDynamic(
   if (definition.model !== undefined) dynamic.model = definition.model;
   if (definition.workingDirectory !== undefined) {
     dynamic.workingDirectory = definition.workingDirectory;
+  }
+  if (definition.enableFileHooks !== undefined) {
+    dynamic.enableFileHooks = definition.enableFileHooks;
   }
   if (definition.reasoningEffort !== undefined) {
     dynamic.reasoningEffort = definition.reasoningEffort;

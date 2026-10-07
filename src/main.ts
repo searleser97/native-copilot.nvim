@@ -3,6 +3,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { argv, env, exit, ppid, stderr } from "node:process";
+import { z } from "zod";
 import { AgentDatabase, processIsAlive } from "./database.js";
 import { Protocol, type IncomingCommand } from "./protocol.js";
 import { CopilotRuntime, resolveRuntimeCommand } from "./runtime.js";
@@ -15,6 +16,7 @@ import {
 } from "./types.js";
 
 interface HostOptions {
+  fileHookDirectories: string[];
   databasePath: string;
   runtimeCommandResolver: string | undefined;
   scriptedProfile: string | undefined;
@@ -36,6 +38,9 @@ function hostOptions(): HostOptions {
       ? resolve(env.LOCALAPPDATA ?? homedir(), "nvim-data")
       : resolve(env.XDG_DATA_HOME ?? resolve(homedir(), ".local", "share"), "nvim"));
   return {
+    fileHookDirectories: z.array(z.string().min(1)).parse(
+      JSON.parse(env.NATIVE_COPILOT_FILE_HOOK_DIRECTORIES ?? "[]"),
+    ),
     workspace,
     databasePath: resolve(
       option("--db") ??
@@ -467,7 +472,7 @@ async function main(): Promise<void> {
   };
   runtime = options.scriptedProfile
     ? new ScriptedRuntime(options.workspace, db, emit, options.scriptedProfile)
-    : new CopilotRuntime(options.workspace, db, emit, runtimeCommand);
+    : new CopilotRuntime(options.workspace, db, emit, runtimeCommand, options.fileHookDirectories);
 
   const parentMonitor = setInterval(() => {
     if (!processIsAlive(ppid)) {

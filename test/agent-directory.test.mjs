@@ -9,7 +9,7 @@ import { CopilotRuntime, permissionDecision } from "../dist/runtime.js";
 const artifacts = resolve(".e2e-artifacts", "agent-directory-tests");
 mkdirSync(artifacts, { recursive: true });
 
-function fixture(t, { allowAll = true } = {}) {
+function fixture(t, { allowAll = true, approveFileHooks = false } = {}) {
   const directory = realpathSync.native(mkdtempSync(join(artifacts, "case-")));
   const host = join(directory, "host");
   const target = join(directory, "target");
@@ -28,8 +28,9 @@ function fixture(t, { allowAll = true } = {}) {
   db.completeRunStartup("parent-run");
   const discoveries = [];
   const configs = [];
-  const configure = () => {
-    const runtime = new CopilotRuntime(host, db, () => {});
+  const configure = (fileHookDirectories = approveFileHooks ? [target, host] : []) => {
+    const runtime = new CopilotRuntime(host, db, () => {}, undefined, fileHookDirectories);
+    t.after(() => clearInterval(runtime.recoveryTimer));
     runtime.policy.allowAll = allowAll;
     runtime.policy.mcpServers = {
       approved: { command: "node", args: ["server.js"], env: { FLAVOR: "approved" } },
@@ -101,7 +102,150 @@ test("omitted cwd retains host discovery and execution defaults", async (t) => {
   assert.equal(result.workingDirectory, host);
   assert.equal(configs[0].workingDirectory, host);
   assert.equal(configs[0].enableConfigDiscovery, true);
+  assert.equal(configs[0].enableFileHooks, undefined);
   assert.deepEqual(discoveries, []);
+});
+
+test("file-hook API accepts the exact flag and rejects renamed or nonboolean inputs", () => {
+  const definition = { ...child("worker"), enableFileHooks: true };
+  assert.equal(createDefinitionToDynamic(agentCreateSchema.parse(definition)).enableFileHooks, true);
+  assert.throws(() => agentCreateSchema.parse({ ...child("worker"), enableRepositoryHooks: true }));
+  assert.throws(() => agentCreateSchema.parse({ ...child("worker"), enableFileHooks: "true" }));
+});
+
+test("file hooks require distinct exact-directory host approval before reserving state", async (t) => {
+  const { runtime, parent, target, host, db, configure } = fixture(t);
+  const request = { ...child("worker", target), enableFileHooks: true };
+  await assert.rejects(runtime.createAgentForCaller(parent, request), /explicit host approval/);
+  assert.deepEqual(db.ownedRecoverableOrActiveAgentRuns(parent.agentId, host), []);
+  const wrongApproval = configure([host]);
+  await assert.rejects(wrongApproval.runtime.createAgentForCaller(wrongApproval.parent, request), /explicit host approval/);
+  const approved = configure([target]);
+  const nested = join(target, "nested");
+  mkdirSync(nested);
+  await assert.rejects(
+    approved.runtime.createAgentForCaller(approved.parent, { ...request, workingDirectory: nested }),
+    /explicit host approval/,
+  );
+});
+
+test("approved hooks persist while configuration discovery and MCP isolation remain unchanged", async (t) => {
+  const { runtime, parent, target, host, db, configs, configure } = fixture(t, { approveFileHooks: true });
+  const created = await runtime.createAgentTool(parent).handler({ ...child("worker", target), enableFileHooks: true });
+  const context = runtime.agents.get(created.agentId);
+  const signature = runtime.sessionSignature(context, new Set(["approved"]));
+  assert.equal(created.enableFileHooks, true);
+  assert.equal(configs[0].enableFileHooks, true);
+  assert.equal(configs[0].enableConfigDiscovery, false);
+  assert.deepEqual(Object.keys(configs[0].mcpServers), ["approved"]);
+  assert.equal(configs[0].mcpServers.approved.workingDirectory, host);
+  assert.ok(configs[0].disabledMcpServers.includes("target-only"));
+  assert.equal(JSON.parse(db.agentRun(created.runId, host).definition).definition.enableFileHooks, true);
+  await runtime.stopAgent(created.agentId);
+  const restarted = configure();
+  await restarted.runtime.resumeAgent(created.runId, {}, restarted.parent);
+  const recovered = restarted.runtime.agents.get(created.agentId);
+  assert.equal(configs.at(-1).enableFileHooks, true);
+  assert.equal(restarted.runtime.sessionSignature(recovered, new Set(["approved"])), signature);
+  await restarted.runtime.stopAgent(created.agentId);
+  await restarted.runtime.resumeAgent(created.runId, { enableFileHooks: false }, restarted.parent);
+  assert.equal(configs.at(-1).enableFileHooks, false);
+  assert.notEqual(restarted.runtime.sessionSignature(restarted.runtime.agents.get(created.agentId), new Set(["approved"])), signature);
+  await restarted.runtime.stopAgent(created.agentId);
+  await restarted.runtime.resumeAgent(created.runId, {}, restarted.parent);
+  assert.equal(configs.at(-1).enableFileHooks, false);
+});
+
+test("public resume enables a previously unapproved stopped agent without changing its session ID", async (t) => {
+  const { runtime, parent, target, configs } = fixture(t, { approveFileHooks: true });
+  const created = await runtime.createAgentForCaller(parent, child("worker", target));
+  assert.equal(configs.at(-1).enableFileHooks, false);
+  await runtime.stopAgent(created.agentId);
+  const result = await runtime.resumeAgentTool(parent).handler({
+    sessionId: created.sessionId, enableFileHooks: true,
+  });
+  assert.equal(result.reconfigured, true);
+  assert.equal(result.sessionId, created.sessionId);
+  assert.equal(result.enableFileHooks, true);
+  assert.equal(configs.at(-1).enableFileHooks, true);
+});
+
+test("explicit false disables same-directory hooks without requiring trust; approved true pins host cwd", async (t) => {
+  const { runtime, parent, host, configs, configure } = fixture(t);
+  await runtime.createAgentForCaller(parent, { ...child("disabled"), enableFileHooks: false });
+  assert.equal(configs.at(-1).enableFileHooks, false);
+  assert.equal(configs.at(-1).enableConfigDiscovery, true);
+  const approved = configure([host]);
+  const created = await approved.runtime.createAgentForCaller(approved.parent, { ...child("enabled"), enableFileHooks: true });
+  assert.equal(approved.runtime.agents.get(created.agentId).definition.workingDirectory, host);
+  assert.equal(configs.at(-1).enableFileHooks, true);
+});
+
+test("hook approval cannot bypass host or concrete/interactive execution ceilings", async (t) => {
+  const { runtime, parent, target, host } = fixture(t, { approveFileHooks: true });
+  for (const permissions of [{ mode: "prompt" }, profile([target, host])]) {
+    await assert.rejects(runtime.createAgentForCaller(parent, {
+      ...child("worker", target, permissions), enableFileHooks: true,
+    }), /unrestricted, non-prompting/);
+  }
+  runtime.policy.allowAll = false;
+  await assert.rejects(runtime.createAgentForCaller(parent, {
+    ...child("worker", host), enableFileHooks: true,
+  }), /host --allow-all/);
+  runtime.policy.allowAll = true;
+  parent.permissionPromptRequired = true;
+  await assert.rejects(runtime.createAgentForCaller(parent, {
+    ...child("worker", target), enableFileHooks: true,
+  }), /unrestricted, non-prompting/);
+});
+
+test("delegated creators need hook authority for the same directory even when host-approved", async (t) => {
+  const { runtime, parent, target, host } = fixture(t, { approveFileHooks: true });
+  const worker = await runtime.createAgentForCaller(parent, child("worker", target));
+  const creator = runtime.agents.get(worker.agentId);
+  const request = { ...child("grandchild", target), enableFileHooks: true };
+  await assert.rejects(runtime.createAgentForCaller(creator, request), /creator's approved directory/);
+  await runtime.stopAgent(worker.agentId);
+  await runtime.resumeAgent(worker.runId, { enableFileHooks: true }, parent);
+  const approvedCreator = runtime.agents.get(worker.agentId);
+  await assert.rejects(runtime.createAgentForCaller(approvedCreator, {
+    ...request, workingDirectory: host,
+  }), /creator's approved directory/);
+  const grandchild = await runtime.createAgentForCaller(approvedCreator, request);
+  await runtime.stopAgent(grandchild.agentId);
+  await runtime.stopAgent(worker.agentId);
+  await runtime.resumeAgent(worker.runId, { enableFileHooks: false }, parent);
+  await assert.rejects(runtime.resumeAgent(grandchild.runId), /creator's approved directory/);
+});
+
+test("revoked host trust blocks recovery unchanged, while explicit false permits recovery", async (t) => {
+  const { runtime, parent, target, host, db, configure, configs } = fixture(t, { approveFileHooks: true });
+  const created = await runtime.createAgentForCaller(parent, { ...child("worker", target), enableFileHooks: true });
+  await runtime.stopAgent(created.agentId);
+  const before = db.agentRun(created.runId, host).definition;
+  const revoked = configure([]);
+  await assert.rejects(revoked.runtime.resumeAgent(created.runId, {}, revoked.parent), /explicit host approval/);
+  assert.equal(db.agentRun(created.runId, host).definition, before);
+  assert.equal(db.agentRun(created.runId, host).status, "stopped");
+  await revoked.runtime.resumeAgent(created.runId, { enableFileHooks: false }, revoked.parent);
+  assert.equal(configs.at(-1).enableFileHooks, false);
+});
+
+test("redirecting a host approval junction cannot authorize either target on reconnect", async (t) => {
+  const { directory, host, target, configure } = fixture(t);
+  const link = join(directory, "approved-link");
+  symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+  const { runtime, parent } = configure([link]);
+  const created = await runtime.createAgentForCaller(parent, {
+    ...child("worker", target), enableFileHooks: true,
+  });
+  const context = runtime.agents.get(created.agentId);
+  rmdirSync(link);
+  symlinkSync(host, link, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(runtime.sessionConnectionPlan(context), /explicit host approval/);
+  await assert.rejects(runtime.createAgentForCaller(parent, {
+    ...child("other", host), enableFileHooks: true,
+  }), /explicit host approval/);
 });
 
 test("explicit cwd reaches session config and survives stop and host restart without moving ownership", async (t) => {

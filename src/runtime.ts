@@ -26,6 +26,7 @@ import {
   agentLinkSetSchema,
   createDefinitionToDynamic,
   dynamicPermissionSchema,
+  enableFileHooksSchema,
   parseAgentLinkSet,
   validateAgentDefinition,
   validateSpawnRequest,
@@ -526,6 +527,7 @@ interface StoredAgentRecord {
 interface AgentResumeOverrides {
   permissions?: DynamicPermission;
   mcpServers?: string[];
+  enableFileHooks?: boolean;
 }
 
 function storedAgentRecord(value: string): StoredAgentRecord {
@@ -1737,6 +1739,7 @@ export class CopilotRuntime implements RuntimeAdapter {
   // command. The primary agent and every spawned agent inherit it; agent
   // settings only overlay or restrict it, so there is one source of truth.
   private readonly policy: NativePolicy;
+  private readonly fileHookDirectories: ReadonlyArray<{ requested: string; canonical: string }>;
   // UUID of the generic agent attached to the primary user-facing buffer.
   private primaryAgentId: string | undefined;
   // Every active participant, including the primary agent, keyed by durable UUID.
@@ -1771,8 +1774,17 @@ export class CopilotRuntime implements RuntimeAdapter {
     private readonly db: AgentDatabase,
     private readonly emit: RuntimeEmitter,
     private readonly runtimeCommand?: string,
+    fileHookDirectories: readonly string[] = [],
   ) {
     this.policy = nativePolicy(runtimeCommand, workspace);
+    this.fileHookDirectories = fileHookDirectories.map((directory) => {
+      const requested = resolve(workspace, directory);
+      const canonical = realpathSync.native(requested);
+      if (!statSync(canonical).isDirectory()) {
+        throw new Error(`File-hook approval "${requested}" must identify an existing directory.`);
+      }
+      return { requested, canonical };
+    });
     this.recoveryTimer = setInterval(() => {
       if (!this.shuttingDown) {
         void this.recoverSilentSessions();
@@ -2937,6 +2949,9 @@ export class CopilotRuntime implements RuntimeAdapter {
     const agent = context.agent;
     const config = this.baseSessionConfig();
     config.workingDirectory = context.definition.workingDirectory ?? this.workspace;
+    if (context.definition.enableFileHooks !== undefined) {
+      config.enableFileHooks = context.definition.enableFileHooks;
+    }
     config.includeSubAgentStreamingEvents = false;
     config.reasoningSummary = agent.reasoningSummary;
     config.systemMessage = { mode: "append", content: agent.initialPrompt };
@@ -2993,7 +3008,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         // identity. Only replay launch-approved definitions, never target overrides.
         config.enableConfigDiscovery = false;
         config.enableOnDemandInstructionDiscovery = true;
-        config.enableFileHooks = false;
+        config.enableFileHooks = context.definition.enableFileHooks ?? false;
         config.mcpServers = this.pinnedMcpConfiguration(context);
       }
     }
@@ -3037,14 +3052,16 @@ export class CopilotRuntime implements RuntimeAdapter {
           "Optional complete replacement MCP server subset. Every server must currently be " +
             "available to both the caller and the primary session.",
         ),
+        enableFileHooks: enableFileHooksSchema,
       }).strict(),
       skipPermission: true,
       defer: "never",
-      handler: async ({ sessionId, permissions, mcpServers }) => {
+      handler: async ({ sessionId, permissions, mcpServers, enableFileHooks }) => {
         const source = this.requireActiveCaller(caller.agentId);
         const overrides: AgentResumeOverrides = {
           ...(permissions === undefined ? {} : { permissions }),
           ...(mcpServers === undefined ? {} : { mcpServers: [...new Set(mcpServers)] }),
+          ...(enableFileHooks === undefined ? {} : { enableFileHooks }),
         };
         const active = [...this.agents.values()].find(
           (agent) => this.lookupAgentSessionId(agent) === sessionId,
@@ -3081,7 +3098,8 @@ export class CopilotRuntime implements RuntimeAdapter {
           return {
             resumed: true,
             adopted: false,
-            reconfigured: permissions !== undefined || mcpServers !== undefined,
+            reconfigured: permissions !== undefined || mcpServers !== undefined ||
+              enableFileHooks !== undefined,
             ...this.agentPayload(resumed),
             sessionId,
             state: this.agentState(resumed),
@@ -3155,6 +3173,7 @@ export class CopilotRuntime implements RuntimeAdapter {
               displayName: record.definition.displayName,
               description: record.definition.description,
               workingDirectory: record.definition.workingDirectory ?? this.workspace,
+              enableFileHooks: record.definition.enableFileHooks,
               runId: run.id,
               sessionId: run.session.sessionId,
               state: run.status === "active" ? "active_elsewhere" : "recoverable",
@@ -3799,6 +3818,62 @@ export class CopilotRuntime implements RuntimeAdapter {
       relative(realpathSync.native(this.workspace), definition.workingDirectory) !== "";
   }
 
+  private assertFileHookApproval(context: AgentContext, caller?: AgentContext): void {
+    if (context.definition.enableFileHooks !== true) return;
+    const directory = context.definition.workingDirectory;
+    const approved = directory !== undefined && this.fileHookDirectories.some((entry) => {
+      if (relative(entry.canonical, directory) !== "") return false;
+      try {
+        return relative(entry.canonical, realpathSync.native(entry.requested)) === "";
+      } catch {
+        return false;
+      }
+    });
+    if (!approved || directory === undefined) {
+      throw new Error(
+        `enableFileHooks for agent "${context.alias}" requires explicit host approval of its ` +
+          `exact workingDirectory in setup({ file_hook_directories = { ... } }). ` +
+          "Ask the user to approve native repository command execution and restart the host. " +
+          "Directory access and MCP approval do not grant hook trust.",
+      );
+    }
+    const unrestricted = (definition: DynamicAgentDefinition, promptRequired?: boolean): boolean =>
+      !promptRequired && (definition.permissions === undefined ||
+        ("mode" in definition.permissions && definition.permissions.mode !== "prompt"));
+    if (!this.policy.allowAll || !unrestricted(context.definition, context.permissionPromptRequired)) {
+      throw new Error(
+        "enableFileHooks requires host --allow-all and unrestricted, non-prompting agent " +
+          "permissions. Native repository hooks execute outside SDK tool-permission checks; " +
+          "concrete path/tool/action ceilings cannot constrain them.",
+      );
+    }
+    // Recheck the durable creator on recovery/reconnect, not just the requesting
+    // caller on creation. A model cannot delegate hook authority it does not have.
+    const owner = caller ?? (context.ownerAgentId === undefined
+      ? undefined : this.agents.get(context.ownerAgentId));
+    const storedOwner = !owner && context.ownerAgentId !== undefined
+      ? this.db.latestAgentRun(context.ownerAgentId, this.workspace) : undefined;
+    const ownerRecord = !storedOwner?.definition
+      ? undefined : storedAgentRecord(storedOwner.definition);
+    const ownerDefinition = owner?.definition ?? ownerRecord?.definition;
+    const ownerIsPrimary = owner
+      ? owner.agentId === this.primaryAgentId : storedOwner?.isPrimary === true;
+    if ((context.ownerAgentId !== undefined || caller) && (
+      !ownerDefinition ||
+      !unrestricted(ownerDefinition, owner?.permissionPromptRequired ?? ownerRecord?.permissionPromptRequired) ||
+      (!ownerIsPrimary && (
+        ownerDefinition.enableFileHooks !== true ||
+        ownerDefinition.workingDirectory === undefined ||
+        relative(ownerDefinition.workingDirectory, directory) !== ""
+      ))
+    )) {
+      throw new Error(
+        "enableFileHooks exceeds the creator's approved directory or unrestricted permission ceiling. " +
+          "Only the primary host or an already hook-approved creator in that exact directory may enable it.",
+      );
+    }
+  }
+
   private authorizeWorkingDirectory(
     definition: DynamicAgentDefinition,
     caller?: AgentContext,
@@ -3877,7 +3952,12 @@ export class CopilotRuntime implements RuntimeAdapter {
   }
 
   private async prepareAgentDirectory(context: AgentContext, caller?: AgentContext): Promise<void> {
+    if (context.definition.enableFileHooks === true &&
+        context.definition.workingDirectory === undefined) {
+      context.definition.workingDirectory = realpathSync.native(this.workspace);
+    }
     this.authorizeWorkingDirectory(context.definition, caller, true);
+    this.assertFileHookApproval(context, caller);
     if (!this.hasSeparateWorkingDirectory(context.definition)) return;
     const fingerprints: Record<string, string> = {};
     for (const server of this.effectiveMcpServers(context)) {
@@ -3926,6 +4006,7 @@ export class CopilotRuntime implements RuntimeAdapter {
     if (context.definition.workingDirectory !== undefined) {
       this.authorizeWorkingDirectory(context.definition, undefined, true);
     }
+    this.assertFileHookApproval(context);
     const availableMcpServers =
       context.agentId === this.primaryAgentId
         ? new Set<string>()
@@ -4026,6 +4107,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         reasoningSummary: context.definition.reasoningSummary,
         permissions: context.definition.permissions,
         workingDirectory: context.definition.workingDirectory,
+        enableFileHooks: context.definition.enableFileHooks,
         permissionPromptRequired: context.permissionPromptRequired,
         mcpConfigFingerprints: context.mcpConfigFingerprints,
         mcpServers: context.definition.mcpServers,
@@ -5961,6 +6043,7 @@ export class CopilotRuntime implements RuntimeAdapter {
         "Preserve its prior context and wait for explicit user or authorized peer instructions.",
       permissions: overrides.permissions ?? { mode: "inherit" },
       ...(overrides.mcpServers === undefined ? {} : { mcpServers: overrides.mcpServers }),
+      ...(overrides.enableFileHooks === undefined ? {} : { enableFileHooks: overrides.enableFileHooks }),
       canTalkTo: [],
       canObserve: [],
     };
@@ -5987,6 +6070,7 @@ export class CopilotRuntime implements RuntimeAdapter {
           "mode" in caller.definition.permissions && caller.definition.permissions.mode === "prompt"),
     };
     context.target = agentTarget(context.agentId);
+    await this.prepareAgentDirectory(context, caller);
     this.db.createOwnedAgentRun(
       {
         id: context.runId,
@@ -6447,6 +6531,9 @@ export class CopilotRuntime implements RuntimeAdapter {
       ...(overrides.mcpServers === undefined
         ? {}
         : { mcpServers: [...new Set(overrides.mcpServers)] }),
+      ...(overrides.enableFileHooks === undefined
+        ? {}
+        : { enableFileHooks: overrides.enableFileHooks }),
     };
     this.authorizeWorkingDirectory(definition, caller, true);
     const resolved = this.resolveStoredDefinition(definition);
@@ -6671,6 +6758,7 @@ export class CopilotRuntime implements RuntimeAdapter {
       description: context.agent.description,
       task: context.agent.task,
       workingDirectory: context.definition.workingDirectory ?? this.workspace,
+      enableFileHooks: context.definition.enableFileHooks,
       ...(context.configurationWarnings === undefined
         ? {} : { configurationWarnings: context.configurationWarnings }),
       ...(context.ownerAgentId === undefined ? {} : { ownerAgentId: context.ownerAgentId }),

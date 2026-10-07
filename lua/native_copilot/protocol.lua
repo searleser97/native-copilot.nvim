@@ -85,11 +85,15 @@ function M.start(opts, on_event)
     '--workspace', opts.workspace or vim.uv.cwd(),
     '--db', opts.database_path,
   }
+  local host_env = {
+    NATIVE_COPILOT_FILE_HOOK_DIRECTORIES = vim.json.encode(opts.file_hook_directories or {}),
+  }
+  if opts.runtime_command_resolver then
+    host_env.NATIVE_COPILOT_RUNTIME_COMMAND_RESOLVER = opts.runtime_command_resolver
+  end
   state.job = vim.fn.jobstart(command, {
     cwd = opts.workspace or vim.uv.cwd(),
-    env = opts.runtime_command_resolver and {
-      NATIVE_COPILOT_RUNTIME_COMMAND_RESOLVER = opts.runtime_command_resolver,
-    } or nil,
+    env = host_env,
     stdout_buffered = false,
     stderr_buffered = false,
     on_stdout = on_stdout,

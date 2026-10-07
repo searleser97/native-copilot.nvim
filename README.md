@@ -387,12 +387,63 @@ the error instead of silently dropping it. Omit it explicitly for cross-director
 there is no trusted launch definition. An explicit replacement does not inherit the reserved
 built-in server's GitHub authentication handling.
 
-This safety boundary also disables automatic skills, custom-agent, plugin, and hook discovery in
-cross-directory sessions, because the SDK has no separate MCP-only discovery switch. On-demand
+This safety boundary disables automatic skills, custom-agent, and plugin discovery, and defaults
+repository file hooks off in cross-directory sessions. Explicit hook approval is described below;
+it does not enable broader configuration discovery. On-demand
 file instruction discovery is requested through the SDK's supported
 `enableOnDemandInstructionDiscovery` switch. Its actual instruction-loading behavior has not been
 verified end-to-end and is not guaranteed equivalent to normal repository discovery. Agents using
 the original host directory retain the normal automatic discovery behavior.
+
+### Explicit repository file hooks
+
+`real_agent_create` and `real_agent_resume` accept the SDK's exact `enableFileHooks` boolean.
+`true` enables native repository `.github/hooks` execution independently of config discovery;
+`false` explicitly disables it. On creation, omission preserves SDK defaults in the host directory
+and remains off in other directories. On resume, omission preserves the stored choice, including
+an explicit `false`. Resume requires an inactive owned session; it does not interrupt active agents.
+The choice and canonical execution directory are persisted and included in reconnect configuration.
+
+**Repository hooks execute commands outside the SDK tool-permission callback.** Read permission,
+selecting a working directory, MCP approval, and `--allow-all` alone do not authorize this opt-in.
+The user must explicitly trust each exact directory in the host's Neovim setup, then restart that
+host normally to apply it:
+
+```lua
+require("native_copilot").setup({
+  file_hook_directories = { [[E:\sydney2]] },
+})
+```
+
+This list grants permission to request hooks, not automatic enablement. Direct Node hosts use the
+equivalent `NATIVE_COPILOT_FILE_HOOK_DIRECTORIES` JSON string array. Approval is exact-directory,
+not recursive, and canonical paths are checked again on recovery. Removing an approval prevents
+future hook-enabled connections; it does not terminate existing processes. Resume with
+`enableFileHooks: false` to persist revocation for a stopped agent.
+
+The host must also have `--allow-all`; the creator and child must have unrestricted, non-prompting
+execution permissions. Concrete permission profiles and inherited prompting are rejected because
+their tool, path, command, network, Git, or external-action restrictions cannot constrain native
+hook processes. Non-primary creators additionally need their own hook approval for that same
+directory. Hook trust is separate from MCP trust: cross-directory `enableConfigDiscovery` remains
+false, explicit MCP definitions remain pinned, and disabled-server restrictions are unchanged.
+Trust the repository's hooks themselves, including their subprocesses and external effects.
+
+For an existing stopped worker, its owner can call:
+
+```text
+real_agent_resume({ sessionId: "<existing SDK session ID>", enableFileHooks: true })
+```
+
+Omitting `permissions` and `mcpServers` preserves both. Lifecycle delivery is handled by the SDK,
+not synthesized by the host. Configuration regression tests alone do not prove that a repository
+hook ran or that its application-specific identity state was repaired.
+
+In a native SDK 1.0.11 / CLI 1.0.90 check against Sydney, `sessionStart` ran on the first
+submitted prompt, not on the create/resume RPC itself. Cold resume with `suppressResumeEvent: true`
+still delivered it with the correct SDK identity. Sydney's runtime index and session state matched
+during the turn; its native `sessionEnd` then cleaned them up. Therefore a successful resume alone,
+or an absent index after a completed turn, is not proof of the active turn's binding.
 
 ### Inherited native configuration
 

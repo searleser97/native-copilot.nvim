@@ -41,6 +41,8 @@ export interface DynamicAgentDefinition {
   prompt: string;
   /** Execution directory; durable ownership stays in the host workspace. */
   workingDirectory?: string;
+  /** Explicit native repository-hook opt-in; requires host directory approval. */
+  enableFileHooks?: boolean;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;
@@ -67,6 +69,7 @@ export interface AgentCreateDefinition {
   description: string;
   prompt: string;
   workingDirectory?: string;
+  enableFileHooks?: boolean;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   reasoningSummary?: ReasoningSummary;

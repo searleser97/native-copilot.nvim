@@ -1,9 +1,10 @@
 vim.opt.runtimepath:prepend(vim.fn.getcwd())
 local sent = {}
 local running = false
+local started_options
 package.loaded['native_copilot.protocol'] = {
   is_running = function() return running end,
-  start = function() running = true return true end,
+  start = function(opts) started_options = opts running = true return true end,
   send = function(kind, payload)
     local id = 'request-' .. (#sent + 1)
     table.insert(sent, { id = id, type = kind, payload = payload })
@@ -12,7 +13,7 @@ package.loaded['native_copilot.protocol'] = {
   stop_sync = function() running = false end,
 }
 local native = require('native_copilot')
-native.setup({ voice = { preload = false } })
+native.setup({ voice = { preload = false }, file_hook_directories = { [[E:\sydney2]] } })
 local choices = {}
 vim.ui.select = function(items, opts, callback)
   table.insert(choices, { items = items, opts = opts, choose = callback })
@@ -35,6 +36,7 @@ local sessions = {
 }
 
 native.open({ reuse_current_tab = true })
+assert(vim.deep_equal(started_options.file_hook_directories, { [[E:\sydney2]] }))
 assert(sent[1].type == 'hello' and sent[2].type == 'sessions.list')
 local stale = last_request()
 native.open()
@@ -129,5 +131,19 @@ assert(#choices == 7, 'external tab close must invalidate the old response')
 list(reopened_request, {})
 assert(#choices == 8)
 choices[8].choose(nil)
+package.loaded['native_copilot.protocol'] = nil
+local protocol = require('native_copilot.protocol')
+local host_options
+vim.fn.jobstart = function(_, opts) host_options = opts return 12345 end
+vim.fn.jobwait = function() return { 0 } end
+assert(protocol.start({ database_path = 'test.sqlite' }, function() end))
+assert(host_options.env.NATIVE_COPILOT_FILE_HOOK_DIRECTORIES == '[]')
+assert(protocol.start({
+  database_path = 'test.sqlite',
+  file_hook_directories = { [[E:\sydney2]] },
+  runtime_command_resolver = 'trusted-resolver',
+}, function() end))
+assert(vim.deep_equal(vim.json.decode(host_options.env.NATIVE_COPILOT_FILE_HOOK_DIRECTORIES), { [[E:\sydney2]] }))
+assert(host_options.env.NATIVE_COPILOT_RUNTIME_COMMAND_RESOLVER == 'trusted-resolver')
 print('PASS startup selection, cancellation, races, native rows, active reopen, and unchanged /resume')
 vim.cmd('qa!')
